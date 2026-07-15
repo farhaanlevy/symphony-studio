@@ -1,3 +1,5 @@
+# Modified for Symphony Studio on 2026-07-14: restore supervised workflow
+# runtime ownership after exercising manual WorkflowStore lifecycle paths.
 defmodule SymphonyElixir.ExtensionsTest do
   use SymphonyElixir.TestSupport
 
@@ -171,14 +173,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert removed_state.workflow.prompt == "Manual workflow prompt"
     assert_receive :poll, 1_100
 
-    Process.exit(manual_pid, :normal)
-    restart_result = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-
-    assert match?({:ok, _pid}, restart_result) or
-             match?({:error, {:already_started, _pid}}, restart_result)
-
     Workflow.set_workflow_file_path(existing_path)
-    WorkflowStore.force_reload()
+    GenServer.stop(manual_pid)
+    refute Process.whereis(WorkflowStore)
+    assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+    assert :ok = WorkflowStore.force_reload()
   end
 
   test "tracker delegates to memory and linear adapters" do

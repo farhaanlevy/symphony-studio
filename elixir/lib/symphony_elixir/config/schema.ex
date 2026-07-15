@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-14): Symphony Studio validates and
+# safely adapts legacy approval policies to its pinned Codex App Server schema.
 defmodule SymphonyElixir.Config.Schema do
   @moduledoc false
 
@@ -161,16 +163,20 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    alias SymphonyElixir.Config.Schema
+
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
 
       field(:approval_policy, StringOrMap,
         default: %{
-          "reject" => %{
-            "sandbox_approval" => true,
-            "rules" => true,
-            "mcp_elicitations" => true
+          "granular" => %{
+            "sandbox_approval" => false,
+            "rules" => false,
+            "mcp_elicitations" => false,
+            "skill_approval" => false,
+            "request_permissions" => false
           }
         }
       )
@@ -199,6 +205,9 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_required([:command])
+      |> validate_change(:approval_policy, &Schema.validate_approval_policy/2)
+      |> validate_inclusion(:thread_sandbox, ~w(read-only workspace-write danger-full-access))
+      |> validate_change(:turn_sandbox_policy, &Schema.validate_turn_sandbox_policy/2)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
@@ -299,7 +308,13 @@ defmodule SymphonyElixir.Config.Schema do
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do
     case settings.codex.turn_sandbox_policy do
       %{} = policy ->
-        policy
+        case normalize_turn_sandbox_policy(policy) do
+          {:ok, normalized_policy} ->
+            normalized_policy
+
+          {:error, reason} ->
+            raise ArgumentError, "invalid explicit Codex turn sandbox policy: #{reason}"
+        end
 
       _ ->
         workspace
@@ -312,14 +327,16 @@ defmodule SymphonyElixir.Config.Schema do
   @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
-    case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
-        {:ok, policy}
+    with :ok <- validate_remote_runtime_workspace(settings, workspace, opts) do
+      case settings.codex.turn_sandbox_policy do
+        %{} = policy ->
+          normalize_explicit_runtime_turn_sandbox_policy(policy)
 
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> default_runtime_turn_sandbox_policy(opts)
+        _ ->
+          workspace
+          |> default_workspace_root(settings.workspace.root)
+          |> default_runtime_turn_sandbox_policy(opts)
+      end
     end
   end
 
@@ -337,6 +354,46 @@ defmodule SymphonyElixir.Config.Schema do
       Map.put(acc, normalize_issue_state(to_string(state_name)), limit)
     end)
   end
+
+  @doc false
+  @spec validate_approval_policy(atom(), term()) :: keyword(String.t())
+  def validate_approval_policy(_field, value)
+      when value in ["untrusted", "on-failure", "on-request", "never"],
+      do: []
+
+  def validate_approval_policy(field, %{"reject" => policy} = value) when map_size(value) == 1,
+    do: validate_boolean_policy(field, policy, ~w(sandbox_approval rules mcp_elicitations))
+
+  def validate_approval_policy(field, %{"granular" => policy} = value) when map_size(value) == 1,
+    do:
+      validate_boolean_policy(
+        field,
+        policy,
+        ~w(sandbox_approval rules mcp_elicitations skill_approval request_permissions)
+      )
+
+  def validate_approval_policy(field, _value),
+    do: [{field, "must match the pinned Codex approval policy contract"}]
+
+  @doc false
+  @spec validate_turn_sandbox_policy(atom(), term()) :: keyword(String.t())
+  def validate_turn_sandbox_policy(field, value) do
+    case normalize_turn_sandbox_policy(value) do
+      {:ok, _policy} -> []
+      {:error, reason} -> [{field, reason}]
+    end
+  end
+
+  @doc false
+  @spec normalize_turn_sandbox_policy(term()) :: {:ok, map()} | {:error, String.t()}
+  def normalize_turn_sandbox_policy(policy) when is_map(policy) do
+    policy
+    |> normalize_keys()
+    |> normalize_pinned_turn_sandbox_policy()
+  end
+
+  def normalize_turn_sandbox_policy(_policy),
+    do: {:error, "must match the pinned Codex turn sandbox policy contract"}
 
   @doc false
   @spec validate_state_limits(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
@@ -385,8 +442,11 @@ defmodule SymphonyElixir.Config.Schema do
 
     codex = %{
       settings.codex
-      | approval_policy: normalize_keys(settings.codex.approval_policy),
-        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
+      | approval_policy:
+          settings.codex.approval_policy
+          |> normalize_keys()
+          |> normalize_approval_policy(),
+        turn_sandbox_policy: normalize_optional_turn_sandbox_policy(settings.codex.turn_sandbox_policy)
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
@@ -401,11 +461,172 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
 
-  defp normalize_optional_map(nil), do: nil
-  defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
+  defp normalize_optional_turn_sandbox_policy(nil), do: nil
+
+  defp normalize_optional_turn_sandbox_policy(value) do
+    {:ok, normalized_policy} = normalize_turn_sandbox_policy(value)
+    normalized_policy
+  end
+
+  defp normalize_pinned_turn_sandbox_policy(%{"type" => "dangerFullAccess"} = policy) do
+    with :ok <- validate_exact_keys(policy, ~w(type)) do
+      {:ok, policy}
+    end
+  end
+
+  defp normalize_pinned_turn_sandbox_policy(%{"type" => "readOnly"} = policy) do
+    with :ok <- validate_exact_keys(policy, ~w(type networkAccess)),
+         :ok <- validate_optional_boolean(policy, "networkAccess") do
+      {:ok, policy}
+    end
+  end
+
+  defp normalize_pinned_turn_sandbox_policy(%{"type" => "externalSandbox"} = policy) do
+    with :ok <- validate_exact_keys(policy, ~w(type networkAccess)),
+         :ok <- validate_optional_enum(policy, "networkAccess", ~w(restricted enabled)) do
+      {:ok, policy}
+    end
+  end
+
+  defp normalize_pinned_turn_sandbox_policy(%{"type" => "workspaceWrite"} = policy) do
+    allowed_keys = ~w(type writableRoots networkAccess excludeTmpdirEnvVar excludeSlashTmp)
+
+    with :ok <- validate_exact_keys(policy, allowed_keys),
+         {:ok, writable_roots} <- normalize_optional_writable_roots(policy),
+         :ok <- validate_optional_boolean(policy, "networkAccess"),
+         :ok <- validate_optional_boolean(policy, "excludeTmpdirEnvVar"),
+         :ok <- validate_optional_boolean(policy, "excludeSlashTmp") do
+      normalized_policy =
+        if Map.has_key?(policy, "writableRoots") do
+          Map.put(policy, "writableRoots", writable_roots)
+        else
+          policy
+        end
+
+      {:ok, normalized_policy}
+    end
+  end
+
+  defp normalize_pinned_turn_sandbox_policy(_policy),
+    do: {:error, "must match the pinned Codex turn sandbox policy contract"}
+
+  defp validate_exact_keys(policy, allowed_keys) do
+    case Map.keys(policy) -- allowed_keys do
+      [] -> :ok
+      unsupported -> {:error, "contains unsupported keys: #{Enum.sort(unsupported) |> Enum.join(", ")}"}
+    end
+  end
+
+  defp validate_optional_boolean(policy, key) do
+    case Map.fetch(policy, key) do
+      :error -> :ok
+      {:ok, value} when is_boolean(value) -> :ok
+      {:ok, _value} -> {:error, "#{key} must be a boolean when provided"}
+    end
+  end
+
+  defp validate_optional_enum(policy, key, allowed_values) do
+    case Map.fetch(policy, key) do
+      :error ->
+        :ok
+
+      {:ok, value} ->
+        if value in allowed_values do
+          :ok
+        else
+          {:error, "#{key} must be one of: #{Enum.join(allowed_values, ", ")}"}
+        end
+    end
+  end
+
+  defp normalize_optional_writable_roots(policy) do
+    case Map.fetch(policy, "writableRoots") do
+      :error ->
+        {:ok, []}
+
+      {:ok, roots} when is_list(roots) ->
+        Enum.reduce_while(roots, {:ok, []}, &prepend_normalized_writable_root/2)
+        |> case do
+          {:ok, normalized_roots} -> {:ok, Enum.reverse(normalized_roots)}
+          {:error, _reason} = error -> error
+        end
+
+      {:ok, _roots} ->
+        {:error, "writableRoots must be a list of absolute paths when provided"}
+    end
+  end
+
+  defp prepend_normalized_writable_root(root, {:ok, normalized_roots}) do
+    case normalize_absolute_path(root) do
+      {:ok, normalized_root} -> {:cont, {:ok, [normalized_root | normalized_roots]}}
+      {:error, reason} -> {:halt, {:error, "writableRoots #{reason}"}}
+    end
+  end
+
+  defp normalize_absolute_path(path) when is_binary(path) do
+    if path != "" and Path.type(path) == :absolute do
+      {:ok, Path.expand(path)}
+    else
+      {:error, "must contain only non-empty absolute paths"}
+    end
+  end
+
+  defp normalize_absolute_path(_path),
+    do: {:error, "must contain only non-empty absolute paths"}
+
+  defp normalize_explicit_runtime_turn_sandbox_policy(policy) do
+    case normalize_turn_sandbox_policy(policy) do
+      {:ok, normalized_policy} ->
+        {:ok, normalized_policy}
+
+      {:error, reason} ->
+        {:error, {:unsafe_turn_sandbox_policy, {:invalid_explicit_policy, reason}}}
+    end
+  end
+
+  defp normalize_approval_policy("on-failure"), do: "on-request"
+  defp normalize_approval_policy(value) when is_binary(value), do: value
+
+  defp normalize_approval_policy(%{"reject" => legacy}) do
+    %{
+      "granular" => %{
+        "sandbox_approval" => not Map.get(legacy, "sandbox_approval", false),
+        "rules" => not Map.get(legacy, "rules", false),
+        "mcp_elicitations" => not Map.get(legacy, "mcp_elicitations", false),
+        "skill_approval" => false,
+        "request_permissions" => false
+      }
+    }
+  end
+
+  defp normalize_approval_policy(%{"granular" => granular}) do
+    defaults = %{
+      "sandbox_approval" => false,
+      "rules" => false,
+      "mcp_elicitations" => false,
+      "skill_approval" => false,
+      "request_permissions" => false
+    }
+
+    %{"granular" => Map.merge(defaults, granular)}
+  end
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
+
+  defp validate_boolean_policy(field, policy, allowed_keys) when is_map(policy) do
+    invalid_keys = Map.keys(policy) -- allowed_keys
+    invalid_values = Enum.reject(policy, fn {_key, value} -> is_boolean(value) end)
+
+    if invalid_keys == [] and invalid_values == [] do
+      []
+    else
+      [{field, "contains unsupported keys or non-boolean approval flags"}]
+    end
+  end
+
+  defp validate_boolean_policy(field, _policy, _allowed_keys),
+    do: [{field, "approval policy flags must be a map"}]
 
   defp drop_nil_values(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, nested}, acc ->
@@ -489,7 +710,6 @@ defmodule SymphonyElixir.Config.Schema do
     %{
       "type" => "workspaceWrite",
       "writableRoots" => [workspace],
-      "readOnlyAccess" => %{"type" => "fullAccess"},
       "networkAccess" => false,
       "excludeTmpdirEnvVar" => false,
       "excludeSlashTmp" => false
@@ -509,6 +729,25 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp default_runtime_turn_sandbox_policy(workspace_root, _opts) do
     {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
+  end
+
+  defp validate_remote_runtime_workspace(settings, workspace, opts) do
+    if Keyword.get(opts, :remote, false) do
+      workspace_root = default_workspace_root(workspace, settings.workspace.root)
+
+      case normalize_absolute_path(workspace_root) do
+        {:ok, ^workspace_root} ->
+          :ok
+
+        {:ok, _normalized_workspace_root} ->
+          {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root, "must be normalized"}}}
+
+        {:error, reason} ->
+          {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root, reason}}}
+      end
+    else
+      :ok
+    end
   end
 
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",

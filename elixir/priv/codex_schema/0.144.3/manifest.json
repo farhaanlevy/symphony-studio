@@ -1,0 +1,137 @@
+{
+  "artifacts": {
+    "artifactBundleSha256": "d96f8d427cf68655b5658ebea0e9e2332986e8b4b9c1f0ff078957e2ceb70d69",
+    "experimentalJson": {
+      "byteCount": 3159797,
+      "fileCount": 337,
+      "path": "experimental/json",
+      "sha256": "008731d2918513fe9169eac27bc9c006e6dc54a372fa93837562487b92aabfb4"
+    },
+    "experimentalTypescript": {
+      "byteCount": 377094,
+      "fileCount": 671,
+      "path": "experimental/typescript",
+      "sha256": "d561ef0b4ef8a921fff50de4e3c662a0fdff643e82868f2b05a3e71f912aec8c"
+    },
+    "json": {
+      "byteCount": 2720160,
+      "fileCount": 267,
+      "path": "json",
+      "sha256": "dcb50e560741ea78adfcf9ed6851ecc54b3847ded78bfc0b81c5d2187c802dfd"
+    },
+    "schemaBundleSha256": "5044e15b8aa187e7deec44ee16b0848a4f9a20aa25e6ec66f10c1d5bcc40141a",
+    "typescript": {
+      "byteCount": 322075,
+      "fileCount": 598,
+      "path": "typescript",
+      "sha256": "73c95b6a19d5559939519a771e0f7285cc60bbfaa1aac8bd9c52ba308c6e6811"
+    }
+  },
+  "codex": {
+    "executable": {
+      "installedPackageAlias": "@openai/codex-linux-x64",
+      "launcherSha256": "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+      "nativeSha256": "37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b",
+      "platformNpmIntegrity": "sha512-xtDY5sWQPbYBj2lLWZJvc0jBre0XQ7ZmN4VbSEvazbQ2X7uHhm1D/0oZ7AI+SgC/VfZrUhvxRHd43/AmXSaAzA==",
+      "platformPackage": "@openai/codex@0.144.3-linux-x64",
+      "target": "x86_64-unknown-linux-musl"
+    },
+    "npmIntegrity": "sha512-8Re3wp5CdYiM7nsF4StFa5js6IT11N7srhxfvwtol7ENHDht05C+HS4e1CTmYjqkhgsUzl2R1gB27iN2pdbVnA==",
+    "package": "@openai/codex",
+    "version": "0.144.3",
+    "versionOutput": "codex-cli 0.144.3"
+  },
+  "compatibility": {
+    "fixtureEvidence": {
+      "artifactBundleSha256": "d96f8d427cf68655b5658ebea0e9e2332986e8b4b9c1f0ff078957e2ceb70d69",
+      "codexVersion": "0.144.3",
+      "command": [
+        "mise",
+        "exec",
+        "--",
+        "mix",
+        "test",
+        "test/symphony_elixir/codex_schema_bundle_test.exs",
+        "test/symphony_elixir/app_server_test.exs",
+        "test/symphony_elixir/dynamic_tool_test.exs",
+        "test/symphony_elixir/fake_codex_app_server_test.exs",
+        "test/symphony_elixir/fake_linear_test.exs",
+        "test/symphony_elixir/network_hermeticity_test.exs",
+        "--seed",
+        "0"
+      ],
+      "dependencyCommand": [
+        "mise",
+        "exec",
+        "--",
+        "mix",
+        "deps.get",
+        "--check-locked"
+      ],
+      "dependencyCompileCommand": [
+        "mise",
+        "exec",
+        "--",
+        "mix",
+        "deps.compile"
+      ],
+      "matrixSha256": "f102c992bc99faaa7442f1bc22b6f41cce70e0f1a5d2ba56e99a8dabafdd8b25",
+      "schemaBundleSha256": "5044e15b8aa187e7deec44ee16b0848a4f9a20aa25e6ec66f10c1d5bcc40141a",
+      "sourceFileCount": 71,
+      "sourceHashAlgorithm": "sha256-text-lf-binary-raw-relative-path-v2",
+      "sourceSha256": "4a59a423518e2db4f92bb4f0ba36a90d23eec851034e19bfb217ef584f54309e",
+      "testCount": 55,
+      "testedAt": "2026-07-15"
+    },
+    "fixtures": "pass",
+    "overall": "pending_r0_06",
+    "runtimeCapabilities": "not_run",
+    "schemaContract": "pass",
+    "testedAt": "2026-07-15",
+    "transportConformance": "not_run"
+  },
+  "generation": {
+    "cleanCodexHome": true,
+    "commands": [
+      [
+        "codex",
+        "app-server",
+        "generate-json-schema",
+        "--out",
+        "<bundle>/json"
+      ],
+      [
+        "codex",
+        "app-server",
+        "generate-ts",
+        "--out",
+        "<bundle>/typescript"
+      ],
+      [
+        "codex",
+        "app-server",
+        "generate-json-schema",
+        "--out",
+        "<bundle>/experimental/json",
+        "--experimental"
+      ],
+      [
+        "codex",
+        "app-server",
+        "generate-ts",
+        "--out",
+        "<bundle>/experimental/typescript",
+        "--experimental"
+      ]
+    ],
+    "generatedAt": "2026-07-14",
+    "jsonHashAlgorithm": "python-json-sort-keys-utf8-relative-path-v1",
+    "typescriptHashAlgorithm": "sha256-raw-relative-path-v1"
+  },
+  "manifestVersion": 1,
+  "matrix": {
+    "path": "method-field-matrix.json",
+    "profile": "build-week-chatgpt-reference",
+    "sha256": "f102c992bc99faaa7442f1bc22b6f41cce70e0f1a5d2ba56e99a8dabafdd8b25"
+  }
+}

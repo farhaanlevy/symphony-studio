@@ -1,0 +1,5 @@
+# Copyright 2026 Symphony Studio contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# This authored matrix is hashed byte-for-byte into release evidence.
+scripts/codex_schema_matrix.json text eol=lf

@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-14): Symphony Studio makes optional
+# defaults explicit and proves pinned Codex approval-policy normalization.
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
@@ -780,6 +782,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     System.delete_env("LINEAR_API_KEY")
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_endpoint: nil,
       workspace_root: nil,
       max_concurrent_agents: nil,
       codex_approval_policy: nil,
@@ -803,10 +806,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "codex app-server"
 
     assert config.codex.approval_policy == %{
-             "reject" => %{
-               "sandbox_approval" => true,
-               "rules" => true,
-               "mcp_elicitations" => true
+             "granular" => %{
+               "sandbox_approval" => false,
+               "rules" => false,
+               "mcp_elicitations" => false,
+               "skill_approval" => false,
+               "request_permissions" => false
              }
            }
 
@@ -818,7 +823,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.codex_turn_sandbox_policy() == %{
              "type" => "workspaceWrite",
              "writableRoots" => [canonical_default_workspace_root],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
@@ -917,36 +921,26 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, _message}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "")
-    assert :ok = Config.validate!()
-    assert Config.settings!().codex.approval_policy == ""
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.approval_policy"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "")
-    assert :ok = Config.validate!()
-    assert Config.settings!().codex.thread_sandbox == ""
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.thread_sandbox"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_sandbox_policy: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.turn_sandbox_policy"
 
     write_workflow_file!(Workflow.workflow_file_path(),
-      codex_approval_policy: "future-policy",
+      codex_approval_policy: "on-request",
       codex_thread_sandbox: "future-sandbox",
-      codex_turn_sandbox_policy: %{
-        type: "futureSandbox",
-        nested: %{flag: true}
-      }
+      codex_turn_sandbox_policy: %{type: "futureSandbox"}
     )
 
-    config = Config.settings!()
-    assert config.codex.approval_policy == "future-policy"
-    assert config.codex.thread_sandbox == "future-sandbox"
-
-    assert :ok = Config.validate!()
-
-    assert Config.codex_turn_sandbox_policy() == %{
-             "type" => "futureSandbox",
-             "nested" => %{"flag" => true}
-           }
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.thread_sandbox"
+    assert message =~ "codex.turn_sandbox_policy"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
     assert Config.settings!().codex.command == "codex app-server"
@@ -1102,8 +1096,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
 
     assert settings.codex.approval_policy == %{
-             "reject" => %{"sandbox_approval" => true}
+             "granular" => %{
+               "sandbox_approval" => false,
+               "rules" => true,
+               "mcp_elicitations" => true,
+               "skill_approval" => false,
+               "request_permissions" => false
+             }
            }
+
+    assert {:ok, alias_settings} =
+             Schema.parse(%{codex: %{approval_policy: "on-failure"}})
+
+    assert alias_settings.codex.approval_policy == "on-request"
 
     assert {:ok, settings} =
              Schema.parse(%{
@@ -1129,7 +1134,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }) == %{
              "type" => "workspaceWrite",
              "writableRoots" => [Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
@@ -1144,11 +1148,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            ) == %{
              "type" => "workspaceWrite",
              "writableRoots" => [Path.expand("/tmp/workspace")],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
+
+    invalid_settings = %Schema{
+      codex: %Codex{turn_sandbox_policy: %{"type" => "futureSandbox"}},
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert_raise ArgumentError, ~r/invalid explicit Codex turn sandbox policy/, fn ->
+      Schema.resolve_turn_sandbox_policy(invalid_settings)
+    end
   end
 
   test "schema keeps workspace roots raw while sandbox helpers expand only for local use" do
@@ -1163,26 +1175,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Schema.resolve_turn_sandbox_policy(settings) == %{
              "type" => "workspaceWrite",
              "writableRoots" => [Path.expand("~/.symphony-workspaces")],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
 
-    assert {:ok, remote_policy} =
+    assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, "~/.symphony-workspaces", _reason}}} =
              Schema.resolve_runtime_turn_sandbox_policy(settings, nil, remote: true)
-
-    assert remote_policy == %{
-             "type" => "workspaceWrite",
-             "writableRoots" => ["~/.symphony-workspaces"],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
-             "excludeTmpdirEnvVar" => false,
-             "excludeSlashTmp" => false
-           }
   end
 
-  test "runtime sandbox policy resolution passes explicit policies through unchanged" do
+  test "runtime sandbox policy resolution normalizes valid explicit policies and rejects invented ones" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1192,13 +1194,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       workspace_root = Path.join(test_root, "workspaces")
       issue_workspace = Path.join(workspace_root, "MT-100")
+      unnormalized_cache = issue_workspace <> "/cache/../cache"
       File.mkdir_p!(issue_workspace)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         codex_turn_sandbox_policy: %{
           type: "workspaceWrite",
-          writableRoots: ["relative/path"],
+          writableRoots: [unnormalized_cache],
           networkAccess: true
         }
       )
@@ -1207,24 +1210,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert runtime_settings.turn_sandbox_policy == %{
                "type" => "workspaceWrite",
-               "writableRoots" => ["relative/path"],
+               "writableRoots" => [Path.expand(unnormalized_cache)],
                "networkAccess" => true
              }
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_turn_sandbox_policy: %{
-          type: "futureSandbox",
-          nested: %{flag: true}
-        }
+        codex_turn_sandbox_policy: %{type: "futureSandbox"}
       )
 
-      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "codex.turn_sandbox_policy"
 
-      assert runtime_settings.turn_sandbox_policy == %{
-               "type" => "futureSandbox",
-               "nested" => %{"flag" => true}
-             }
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["relative/path"]}
+      )
+
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "writableRoots"
     after
       File.rm_rf(test_root)
     end
@@ -1276,12 +1280,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
                Schema.resolve_runtime_turn_sandbox_policy(read_only_settings, 123)
 
+      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, "~", "must contain only non-empty absolute paths"}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(read_only_settings, "~", remote: true)
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, "/tmp/work/../escape", "must be normalized"}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(
+                 read_only_settings,
+                 "/tmp/work/../escape",
+                 remote: true
+               )
+
       future_settings = %{
         settings
         | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}}
       }
 
-      assert {:ok, %{"type" => "futureSandbox", "nested" => %{"flag" => true}}} =
+      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_explicit_policy, _reason}}} =
                Schema.resolve_runtime_turn_sandbox_policy(future_settings, 123)
 
       assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, 123}}} =
@@ -1289,6 +1303,61 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "pinned sandbox variants accept exact atom or string keyed shapes" do
+    assert {:error, "must match the pinned Codex turn sandbox policy contract"} =
+             Schema.normalize_turn_sandbox_policy("readOnly")
+
+    assert {:ok, danger} = Schema.parse(%{codex: %{thread_sandbox: "danger-full-access", turn_sandbox_policy: %{type: "dangerFullAccess"}}})
+    assert danger.codex.turn_sandbox_policy == %{"type" => "dangerFullAccess"}
+
+    assert {:ok, read_only} =
+             Schema.parse(%{
+               "codex" => %{
+                 "thread_sandbox" => "read-only",
+                 "turn_sandbox_policy" => %{"type" => "readOnly", "networkAccess" => true}
+               }
+             })
+
+    assert read_only.codex.turn_sandbox_policy == %{"type" => "readOnly", "networkAccess" => true}
+
+    assert {:ok, external} =
+             Schema.parse(%{
+               codex: %{
+                 thread_sandbox: "workspace-write",
+                 turn_sandbox_policy: %{type: "externalSandbox", networkAccess: "restricted"}
+               }
+             })
+
+    assert external.codex.turn_sandbox_policy == %{
+             "type" => "externalSandbox",
+             "networkAccess" => "restricted"
+           }
+
+    assert {:ok, %{"type" => "externalSandbox"}} =
+             Schema.normalize_turn_sandbox_policy(%{"type" => "externalSandbox"})
+
+    assert {:ok, %{"type" => "workspaceWrite"}} =
+             Schema.normalize_turn_sandbox_policy(%{"type" => "workspaceWrite"})
+
+    invalid_policies = [
+      %{"type" => "dangerFullAccess", "networkAccess" => false},
+      %{"type" => "readOnly", "networkAccess" => "enabled"},
+      %{"type" => "externalSandbox", "networkAccess" => "open"},
+      %{"type" => "workspaceWrite", "writableRoots" => ["relative"]},
+      %{"type" => "workspaceWrite", "writableRoots" => [123]},
+      %{"type" => "workspaceWrite", "writableRoots" => "/tmp"},
+      %{"type" => "workspaceWrite", "excludeSlashTmp" => "false"},
+      %{"type" => "workspaceWrite", "invented" => true}
+    ]
+
+    Enum.each(invalid_policies, fn policy ->
+      assert {:error, {:invalid_workflow_config, message}} =
+               Schema.parse(%{codex: %{turn_sandbox_policy: policy}})
+
+      assert message =~ "codex.turn_sandbox_policy"
+    end)
   end
 
   test "workflow prompt is used when building base prompt" do

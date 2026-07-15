@@ -1,5 +1,9 @@
+# Downstream modification notice (2026-07-14): Symphony Studio proves exact
+# pinned sandbox, dynamic-tool, and fail-closed App Server wire behavior.
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
+
+  alias SymphonyElixir.Codex.DynamicTool
 
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
@@ -76,7 +80,22 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server passes explicit turn sandbox policies through unchanged" do
+  test "remote sessions reject unsafe workspaces before starting a port" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/remote/workspaces",
+      codex_turn_sandbox_policy: %{"type" => "readOnly"}
+    )
+
+    assert {:error, {:invalid_workspace_cwd, :non_absolute_remote_workspace, "worker.invalid", "~"}} =
+             AppServer.start_session("~", worker_host: "worker.invalid")
+
+    assert {:error, {:invalid_workspace_cwd, :unnormalized_remote_workspace, "worker.invalid", "/remote/workspaces/../escape"}} =
+             AppServer.start_session("/remote/workspaces/../escape",
+               worker_host: "worker.invalid"
+             )
+  end
+
+  test "app server forwards only normalized pinned turn sandbox policies" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -136,21 +155,30 @@ defmodule SymphonyElixir.AppServerTest do
       issue = %Issue{
         id: "issue-supported-turn-policies",
         identifier: "MT-1001",
-        title: "Validate explicit turn sandbox policy passthrough",
-        description: "Ensure runtime startup forwards configured turn sandbox policies unchanged",
+        title: "Validate explicit turn sandbox policy normalization",
+        description: "Ensure runtime startup forwards only normalized pinned turn sandbox policies",
         state: "In Progress",
         url: "https://example.org/issues/MT-1001",
         labels: ["backend"]
       }
 
       policy_cases = [
-        %{"type" => "dangerFullAccess"},
-        %{"type" => "externalSandbox", "profile" => "remote-ci"},
-        %{"type" => "workspaceWrite", "writableRoots" => ["relative/path"], "networkAccess" => true},
-        %{"type" => "futureSandbox", "nested" => %{"flag" => true}}
+        {%{"type" => "dangerFullAccess"}, %{"type" => "dangerFullAccess"}},
+        {%{"type" => "readOnly", "networkAccess" => true}, %{"type" => "readOnly", "networkAccess" => true}},
+        {%{"type" => "externalSandbox", "networkAccess" => "enabled"}, %{"type" => "externalSandbox", "networkAccess" => "enabled"}},
+        {%{
+           "type" => "workspaceWrite",
+           "writableRoots" => [workspace <> "/cache/../cache"],
+           "networkAccess" => true
+         },
+         %{
+           "type" => "workspaceWrite",
+           "writableRoots" => [Path.join(workspace, "cache")],
+           "networkAccess" => true
+         }}
       ]
 
-      Enum.each(policy_cases, fn configured_policy ->
+      Enum.each(policy_cases, fn {configured_policy, expected_policy} ->
         File.rm(trace_file)
 
         write_workflow_file!(Workflow.workflow_file_path(),
@@ -171,7 +199,7 @@ defmodule SymphonyElixir.AppServerTest do
                    |> Jason.decode!()
                    |> then(fn payload ->
                      payload["method"] == "turn/start" &&
-                       get_in(payload, ["params", "sandboxPolicy"]) == configured_policy
+                       get_in(payload, ["params", "sandboxPolicy"]) == expected_policy
                    end)
                  else
                    false
@@ -390,7 +418,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server auto-approves command execution approval requests when approval policy is never" do
+  test "app server declines command execution callbacks when approval policy is never" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -458,8 +486,8 @@ defmodule SymphonyElixir.AppServerTest do
       issue = %Issue{
         id: "issue-auto-approve",
         identifier: "MT-89",
-        title: "Auto approve request",
-        description: "Ensure app-server approval requests are handled automatically",
+        title: "Decline unexpected request",
+        description: "Ensure never-ask policy fails closed on approval callbacks",
         state: "In Progress",
         url: "https://example.org/issues/MT-89",
         labels: ["backend"]
@@ -517,7 +545,7 @@ defmodule SymphonyElixir.AppServerTest do
                    |> String.trim_leading("JSON:")
                    |> Jason.decode!()
 
-                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "acceptForSession"
+                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "decline"
                else
                  false
                end
@@ -527,7 +555,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server auto-approves MCP tool approval prompts when approval policy is never" do
+  test "app server blocks MCP tool input prompts without fabricating a response under never" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -595,28 +623,29 @@ defmodule SymphonyElixir.AppServerTest do
       issue = %Issue{
         id: "issue-tool-user-input-auto-approve",
         identifier: "MT-717",
-        title: "Auto approve MCP tool request user input",
-        description: "Ensure app tool approval prompts continue automatically",
+        title: "Deny MCP tool request user input",
+        description: "Ensure app tool approval prompts fail closed automatically",
         state: "In Progress",
         url: "https://example.org/issues/MT-717",
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Handle tool approval prompt", issue)
+      assert {:error, {:turn_input_required, payload}} =
+               AppServer.run(workspace, "Handle tool approval prompt", issue)
+
+      assert payload["method"] == "item/tool/requestUserInput"
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
 
-      assert Enum.any?(lines, fn line ->
+      refute Enum.any?(lines, fn line ->
                if String.starts_with?(line, "JSON:") do
                  payload =
                    line
                    |> String.trim_leading("JSON:")
                    |> Jason.decode!()
 
-                 payload["id"] == 110 and
-                   get_in(payload, ["result", "answers", "mcp_tool_call_approval_call-717", "answers"]) ==
-                     ["Approve this Session"]
+                 payload["id"] == 110
                else
                  false
                end
@@ -626,7 +655,108 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server sends a generic non-interactive answer for freeform tool input prompts" do
+  test "never policy fails closed across file, legacy, permissions, and MCP callbacks" do
+    alias SymphonyElixir.TestSupport.FakeCodexAppServer, as: FakeCodex
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-fail-closed-callbacks-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-720")
+      File.mkdir_p!(workspace)
+
+      fixture =
+        FakeCodex.create!(
+          test_root,
+          FakeCodex.session_prelude(thread_id: "thread-720", turn_id: "turn-720", cwd: workspace) ++
+            [
+              FakeCodex.request(201, "item/fileChange/requestApproval", %{
+                "itemId" => "file-change-720",
+                "startedAtMs" => 0,
+                "threadId" => "thread-720",
+                "turnId" => "turn-720"
+              }),
+              FakeCodex.expect(%{
+                "id" => 201,
+                "result" => FakeCodex.fail_closed_callback_response("item/fileChange/requestApproval")
+              }),
+              FakeCodex.request(202, "execCommandApproval", %{
+                "callId" => "exec-720",
+                "command" => ["true"],
+                "conversationId" => "thread-720",
+                "cwd" => workspace,
+                "parsedCmd" => []
+              }),
+              FakeCodex.expect(%{
+                "id" => 202,
+                "result" => FakeCodex.fail_closed_callback_response("execCommandApproval")
+              }),
+              FakeCodex.request(203, "applyPatchApproval", %{
+                "callId" => "patch-720",
+                "conversationId" => "thread-720",
+                "fileChanges" => %{}
+              }),
+              FakeCodex.expect(%{
+                "id" => 203,
+                "result" => FakeCodex.fail_closed_callback_response("applyPatchApproval")
+              }),
+              FakeCodex.request(204, "item/permissions/requestApproval", %{
+                "cwd" => workspace,
+                "itemId" => "permissions-720",
+                "permissions" => %{},
+                "startedAtMs" => 0,
+                "threadId" => "thread-720",
+                "turnId" => "turn-720"
+              }),
+              FakeCodex.expect(%{
+                "id" => 204,
+                "result" => FakeCodex.no_grant_permissions_response()
+              }),
+              FakeCodex.request(205, "mcpServer/elicitation/request", %{
+                "message" => "Approve access?",
+                "mode" => "openai/form",
+                "requestedSchema" => %{},
+                "serverName" => "fixture-mcp",
+                "threadId" => "thread-720",
+                "turnId" => "turn-720"
+              }),
+              FakeCodex.expect(%{
+                "id" => 205,
+                "result" => FakeCodex.fail_closed_callback_response("mcpServer/elicitation/request")
+              }),
+              FakeCodex.turn_completed_notification("thread-720", "turn-720"),
+              FakeCodex.exit(0)
+            ]
+        )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: fixture.command,
+        codex_approval_policy: "never"
+      )
+
+      issue = %Issue{
+        id: "issue-fail-closed-callbacks",
+        identifier: "MT-720",
+        title: "Fail closed on callbacks",
+        description: "Never ask is not permission to approve",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-720",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Deny unexpected callbacks", issue)
+      assert :ok = FakeCodex.assert_complete!(fixture)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server blocks freeform tool input prompts without fabricating an answer" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -681,7 +811,7 @@ defmodule SymphonyElixir.AppServerTest do
         id: "issue-tool-user-input-required",
         identifier: "MT-718",
         title: "Non interactive tool input answer",
-        description: "Ensure arbitrary tool prompts receive a generic answer",
+        description: "Ensure arbitrary tool prompts block without a fabricated answer",
         state: "In Progress",
         url: "https://example.org/issues/MT-718",
         labels: ["backend"]
@@ -689,20 +819,22 @@ defmodule SymphonyElixir.AppServerTest do
 
       on_message = fn message -> send(self(), {:app_server_message, message}) end
 
-      assert {:ok, _result} =
+      assert {:error, {:turn_input_required, payload}} =
                AppServer.run(workspace, "Handle generic tool input", issue, on_message: on_message)
+
+      assert payload["method"] == "item/tool/requestUserInput"
 
       assert_received {:app_server_message,
                        %{
-                         event: :tool_input_auto_answered,
-                         answer: "This is a non-interactive session. Operator input is unavailable."
+                         event: :turn_input_required,
+                         payload: ^payload
                        }}
     after
       File.rm_rf(test_root)
     end
   end
 
-  test "app server sends a generic non-interactive answer for option-based tool input prompts" do
+  test "app server blocks option-based tool input prompts without fabricating an answer" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -770,29 +902,28 @@ defmodule SymphonyElixir.AppServerTest do
         id: "issue-tool-user-input-options",
         identifier: "MT-719",
         title: "Option based tool input answer",
-        description: "Ensure option prompts receive a generic non-interactive answer",
+        description: "Ensure option prompts block without a fabricated answer",
         state: "In Progress",
         url: "https://example.org/issues/MT-719",
         labels: ["backend"]
       }
 
-      assert {:ok, _result} =
+      assert {:error, {:turn_input_required, payload}} =
                AppServer.run(workspace, "Handle option based tool input", issue)
+
+      assert payload["method"] == "item/tool/requestUserInput"
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
 
-      assert Enum.any?(lines, fn line ->
+      refute Enum.any?(lines, fn line ->
                if String.starts_with?(line, "JSON:") do
                  payload =
                    line
                    |> String.trim_leading("JSON:")
                    |> Jason.decode!()
 
-                 payload["id"] == 112 and
-                   get_in(payload, ["result", "answers", "options-719", "answers"]) == [
-                     "This is a non-interactive session. Operator input is unavailable."
-                   ]
+                 payload["id"] == 112
                else
                  false
                end
@@ -846,7 +977,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90\"}}}'
-            printf '%s\\n' '{\"id\":101,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"some_tool\",\"callId\":\"call-90\",\"threadId\":\"thread-90\",\"turnId\":\"turn-90\",\"arguments\":{}}}'
+            printf '%s\\n' '{\"id\":101,\"method\":\"item/tool/call\",\"params\":{\"tool\":\" linear_graphql \",\"callId\":\"call-90\",\"threadId\":\"thread-90\",\"turnId\":\"turn-90\",\"arguments\":{}}}'
             ;;
           5)
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
@@ -876,7 +1007,31 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Reject unsupported tool calls", issue)
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      tool_executor = fn tool, arguments ->
+        send(test_pid, {:tool_called, tool, arguments})
+
+        case tool do
+          "linear_graphql" -> %{"success" => true, "contentItems" => []}
+          other -> DynamicTool.execute(other, arguments)
+        end
+      end
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Reject unsupported tool calls", issue,
+                 on_message: on_message,
+                 tool_executor: tool_executor
+               )
+
+      assert_received {:tool_called, " linear_graphql ", %{}}
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :unsupported_tool_call,
+                         payload: %{"params" => %{"tool" => " linear_graphql "}}
+                       }}
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -890,8 +1045,9 @@ defmodule SymphonyElixir.AppServerTest do
 
                  payload["id"] == 101 and
                    get_in(payload, ["result", "success"]) == false and
+                   Enum.sort(Map.keys(payload["result"])) == ["contentItems", "success"] and
                    String.contains?(
-                     get_in(payload, ["result", "output"]),
+                     get_in(payload, ["result", "contentItems", Access.at(0), "text"]),
                      "Unsupported dynamic tool"
                    )
                else
@@ -947,7 +1103,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90a\"}}}'
-            printf '%s\\n' '{\"id\":102,\"method\":\"item/tool/call\",\"params\":{\"name\":\"linear_graphql\",\"callId\":\"call-90a\",\"threadId\":\"thread-90a\",\"turnId\":\"turn-90a\",\"arguments\":{\"query\":\"query Viewer { viewer { id } }\",\"variables\":{\"includeTeams\":false}}}}'
+            printf '%s\\n' '{\"id\":102,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"linear_graphql\",\"callId\":\"call-90a\",\"threadId\":\"thread-90a\",\"turnId\":\"turn-90a\",\"arguments\":{\"query\":\"query Viewer { viewer { id } }\",\"variables\":{\"includeTeams\":false}}}}'
             ;;
           5)
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
@@ -983,11 +1139,12 @@ defmodule SymphonyElixir.AppServerTest do
         send(test_pid, {:tool_called, tool, arguments})
 
         %{
-          "success" => true,
-          "contentItems" => [
+          success: true,
+          output: ~s({"data":{"viewer":{"id":"usr_123"}}}),
+          contentItems: [
             %{
-              "type" => "inputText",
-              "text" => ~s({"data":{"viewer":{"id":"usr_123"}}})
+              type: "inputText",
+              text: ~s({"data":{"viewer":{"id":"usr_123"}}})
             }
           ]
         }
@@ -1014,7 +1171,8 @@ defmodule SymphonyElixir.AppServerTest do
 
                  payload["id"] == 102 and
                    get_in(payload, ["result", "success"]) == true and
-                   get_in(payload, ["result", "output"]) ==
+                   Enum.sort(Map.keys(payload["result"])) == ["contentItems", "success"] and
+                   get_in(payload, ["result", "contentItems", Access.at(0), "text"]) ==
                      ~s({"data":{"viewer":{"id":"usr_123"}}})
                else
                  false
@@ -1069,7 +1227,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90b\"}}}'
-            printf '%s\\n' '{\"id\":103,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"linear_graphql\",\"callId\":\"call-90b\",\"threadId\":\"thread-90b\",\"turnId\":\"turn-90b\",\"arguments\":{\"query\":\"query Viewer { viewer { id } }\"}}}'
+            printf '%s\\n' '{\"id\":103,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"linear_graphql\",\"callId\":\"call-90b\",\"threadId\":\"thread-90b\",\"turnId\":\"turn-90b\",\"arguments\":false}}'
             ;;
           5)
             printf '%s\\n' '{\"method\":\"turn/completed\"}'
@@ -1123,7 +1281,7 @@ defmodule SymphonyElixir.AppServerTest do
                  tool_executor: tool_executor
                )
 
-      assert_received {:tool_called, "linear_graphql", %{"query" => "query Viewer { viewer { id } }"}}
+      assert_received {:tool_called, "linear_graphql", false}
 
       assert_received {:app_server_message, %{event: :tool_call_failed, payload: %{"params" => %{"tool" => "linear_graphql"}}}}
     after
@@ -1434,7 +1592,6 @@ defmodule SymphonyElixir.AppServerTest do
       expected_turn_policy = %{
         "type" => "workspaceWrite",
         "writableRoots" => [remote_workspace],
-        "readOnlyAccess" => %{"type" => "fullAccess"},
         "networkAccess" => false,
         "excludeTmpdirEnvVar" => false,
         "excludeSlashTmp" => false

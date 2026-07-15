@@ -1,5 +1,10 @@
+# Downstream modification notice (2026-07-14): Symphony Studio makes ordinary
+# tests network-hermetic and exposes loopback fake-Linear workflow setup.
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "You are an agent for this repository."
+  @network_hermetic_workflow_path Path.expand("network_hermetic_workflow.md", __DIR__)
+
+  alias SymphonyElixir.TestSupport.FakeLinear
 
   defmacro __using__(_opts) do
     quote do
@@ -22,7 +27,15 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          write_fake_linear_workflow!: 2,
+          write_fake_linear_workflow!: 3,
+          restore_network_hermetic_workflow!: 0,
+          restore_env: 2,
+          stop_default_http_server: 0
+        ]
 
       setup do
         workflow_root =
@@ -35,14 +48,15 @@ defmodule SymphonyElixir.TestSupport do
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+        :ok = SymphonyElixir.TestSupport.ensure_default_workflow_store_running!()
+        :ok = SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
 
         on_exit(fn ->
-          Application.delete_env(:symphony_elixir, :workflow_file_path)
-          Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          restore_network_hermetic_workflow!()
+          Application.delete_env(:symphony_elixir, :server_port_override)
           File.rm_rf(workflow_root)
         end)
 
@@ -64,6 +78,44 @@ defmodule SymphonyElixir.TestSupport do
     end
 
     :ok
+  end
+
+  def write_fake_linear_workflow!(path, fixture, overrides \\ []) do
+    fixture_overrides = FakeLinear.workflow_overrides(fixture)
+    write_workflow_file!(path, Keyword.merge(overrides, fixture_overrides))
+  end
+
+  def restore_network_hermetic_workflow! do
+    :ok = SymphonyElixir.Workflow.set_workflow_file_path(@network_hermetic_workflow_path)
+    :ok = ensure_default_workflow_store_running!()
+    :ok = SymphonyElixir.WorkflowStore.force_reload()
+    :ok
+  end
+
+  @spec ensure_default_workflow_store_running!() :: :ok
+  def ensure_default_workflow_store_running! do
+    child =
+      Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+        {SymphonyElixir.WorkflowStore, _pid, _type, _modules} -> true
+        _child -> false
+      end)
+
+    case child do
+      {SymphonyElixir.WorkflowStore, pid, _type, _modules} when is_pid(pid) ->
+        :ok
+
+      {SymphonyElixir.WorkflowStore, _status, _type, _modules} ->
+        stop_detached_workflow_store()
+
+        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore) do
+          {:ok, _pid} -> :ok
+          {:ok, _pid, _info} -> :ok
+          {:error, reason} -> raise "failed to restart supervised WorkflowStore: #{inspect(reason)}"
+        end
+
+      nil ->
+        raise "supervised WorkflowStore child specification is missing"
+    end
   end
 
   def restore_env(key, nil), do: System.delete_env(key)
@@ -88,12 +140,19 @@ defmodule SymphonyElixir.TestSupport do
     end
   end
 
+  defp stop_detached_workflow_store do
+    case Process.whereis(SymphonyElixir.WorkflowStore) do
+      pid when is_pid(pid) -> GenServer.stop(pid)
+      nil -> :ok
+    end
+  end
+
   defp workflow_content(overrides) do
     config =
       Keyword.merge(
         [
-          tracker_kind: "linear",
-          tracker_endpoint: "https://api.linear.app/graphql",
+          tracker_kind: "memory",
+          tracker_endpoint: "http://127.0.0.1:0/graphql",
           tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_assignee: nil,

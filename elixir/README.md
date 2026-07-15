@@ -1,3 +1,6 @@
+<!-- Downstream modification notice (2026-07-14): Symphony Studio documents
+its pinned Codex 0.144.3 approval-policy compatibility behavior. -->
+
 # Symphony Elixir
 
 This directory contains the current Elixir/OTP implementation of Symphony, based on
@@ -52,11 +55,30 @@ Linear issue can become a dispatch candidate again after restart.
 ## Prerequisites
 
 We recommend using [mise](https://mise.jdx.dev/) to manage Elixir/Erlang versions.
+The complete quality gate also requires Python 3.10 or newer and the exact
+Codex CLI version pinned by the repository (`0.144.3`).
+
+The checked-in R0-02 Codex bundle is locked to Linux x86_64. Its fail-closed
+schema and fixture gate also requires Linux procfs, `prctl` child-subreaper
+support, pidfds and `waitid`, inotify, `renameat2(RENAME_EXCHANGE)`, no-follow
+descriptor opens, and durable file/directory `fsync`. `make all` reports a
+hard error when one of these containment or publication guarantees is absent;
+it does not silently run a weaker verifier.
 
 ```bash
 mise install
 mise exec -- elixir --version
+python3 --version
+npm install --global @openai/codex@0.144.3
+codex --version
+python3 ../scripts/codex_schema.py verify --installed
 ```
+
+The final command checks the installed launcher and native executable against
+[`CODEX_LOCK.json`](../CODEX_LOCK.json), not only the version string. The test
+profile uses Xema 0.17.9 and its transitive `conv_case` 0.2.3 dependency; both
+are MIT-licensed and are not runtime dependencies. Comprehensive SBOM and
+third-party-notice packaging is a Release 0 R0-07 gate.
 
 ## Run
 
@@ -119,14 +141,25 @@ Notes:
   configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace. A blank configured label matches no issue.
 - Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
+  - `codex.approval_policy` defaults to `{"granular":{"sandbox_approval":false,"rules":false,"mcp_elicitations":false,"skill_approval":false,"request_permissions":false}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
+- The pinned Codex `0.144.3` wire contract accepts `untrusted`, `on-request`,
+  `never`, or object-form `granular`. For compatibility, Symphony accepts the
+  legacy `on-failure` alias and sends `on-request`. It also accepts legacy
+  object-form `reject`, inverts its three booleans to preserve their meaning,
+  and sends `granular`; new skill and permission-request flags default to
+  fail-closed. Unknown policy strings, keys, and non-boolean flags are rejected
+  during configuration validation. `never` is never interpreted as permission
+  to approve a callback; an unexpected approval or elicitation request fails
+  closed.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
-  unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
-  Symphony validation.
+- An explicit `codex.turn_sandbox_policy` must match one pinned tagged variant:
+  `dangerFullAccess`; `readOnly` with optional boolean `networkAccess`;
+  `externalSandbox` with optional `networkAccess` of `restricted` or `enabled`;
+  or `workspaceWrite` with optional absolute normalized `writableRoots` and
+  boolean `networkAccess`, `excludeTmpdirEnvVar`, and `excludeSlashTmp` flags.
+  Unknown keys and invalid value types are rejected before App Server dispatch.
 - Workflows that run package managers or other commands that resolve external hosts should set
   `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.

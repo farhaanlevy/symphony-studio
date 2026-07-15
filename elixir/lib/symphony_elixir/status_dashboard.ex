@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-14): Symphony Studio renders pinned
+# App Server fail-closed callback decisions truthfully in operator diagnostics.
 defmodule SymphonyElixir.StatusDashboard do
   @moduledoc """
   Renders a status snapshot for orchestrator and worker activity as a terminal UI.
@@ -1119,6 +1121,24 @@ defmodule SymphonyElixir.StatusDashboard do
         "#{humanize_codex_method(method, payload)} (auto-approved)"
       else
         "approval request auto-approved"
+      end
+
+    if is_binary(decision), do: "#{base}: #{decision}", else: base
+  end
+
+  defp humanize_codex_event(:approval_auto_declined, message, payload) do
+    method =
+      map_value(payload, ["method", :method]) ||
+        map_path(message, ["payload", "method"]) ||
+        map_path(message, [:payload, :method])
+
+    decision = map_value(message, ["decision", :decision])
+
+    base =
+      if is_binary(method) do
+        "#{humanize_codex_method(method, payload)} (auto-declined)"
+      else
+        "approval request auto-declined"
       end
 
     if is_binary(decision), do: "#{base}: #{decision}", else: base

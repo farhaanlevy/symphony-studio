@@ -31,8 +31,14 @@ package is accepted:
 3. Release 1.1 freezes features and completes submission hardening, packaging,
    judge-path verification, and external-media preparation.
 
-At this checkpoint only R0-01 metadata, provenance, governance, and preflight
-records are being established. No later-stage feature is claimed complete.
+Accepted downstream packages currently include R0-01 provenance/governance and
+R0-02 Codex 0.144.3 pinning, generated stable/experimental schema contracts,
+exact outbound-request validation, and deterministic App Server and loopback
+Linear fixtures. R0-02 passed its source-bound fixture seal, deterministic
+regeneration, full 266-test/100%-coverage gate, Dialyzer, and independent
+adversarial review on 2026-07-15. Transport conformance, runtime capability
+discovery, durable Studio state, the operator UI, and submission hardening
+remain unclaimed until their later packages pass.
 
 ## Build Week execution configuration
 

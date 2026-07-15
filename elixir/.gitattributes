@@ -1,1 +1,9 @@
+# Downstream modification (2026-07-14): keep pinned Codex evidence on LF and
+# classify only raw generator output as generated source.
 test/fixtures/status_dashboard_snapshots/* linguist-generated=true
+priv/codex_schema/** text eol=lf
+priv/codex_schema/*/json/** linguist-generated=true
+priv/codex_schema/*/typescript/** linguist-generated=true
+priv/codex_schema/*/experimental/json/** linguist-generated=true
+priv/codex_schema/*/experimental/typescript/** linguist-generated=true
+priv/codex_schema/*/SEMANTIC-SHA256SUMS linguist-generated=true

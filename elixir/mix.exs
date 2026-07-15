@@ -1,3 +1,6 @@
+# Downstream modification notice (2026-07-14): Symphony Studio registers its
+# pinned Codex schema loader, deterministic fixtures, and test-only Draft 7
+# validator with release gates.
 defmodule SymphonyElixir.MixProject do
   use Mix.Project
 
@@ -22,6 +25,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.CLI,
           SymphonyElixir.Codex.AppServer,
           SymphonyElixir.Codex.DynamicTool,
+          SymphonyElixir.Codex.SchemaBundle,
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
@@ -40,6 +44,9 @@ defmodule SymphonyElixir.MixProject do
         ]
       ],
       test_ignore_filters: [
+        "test/support/fake_codex_app_server.exs",
+        "test/support/fake_codex_app_server/runner.exs",
+        "test/support/fake_linear.exs",
         "test/support/snapshot_support.exs",
         "test/support/test_support.exs"
       ],
@@ -66,6 +73,7 @@ defmodule SymphonyElixir.MixProject do
       {:bandit, "~> 1.8"},
       {:floki, ">= 0.30.0", only: :test},
       {:lazy_html, ">= 0.1.0", only: :test},
+      {:xema, "~> 0.17.9", only: :test},
       {:phoenix, "~> 1.8.0"},
       {:phoenix_html, "~> 4.2"},
       {:phoenix_live_view, "~> 1.1.0"},

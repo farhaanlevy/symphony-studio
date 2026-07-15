@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-14): Symphony Studio advertises
+# dynamic tools in the typed shape required by pinned Codex 0.144.3.
 defmodule SymphonyElixir.Codex.DynamicTool do
   @moduledoc """
   Executes client-side tool calls requested by Codex app-server turns.
@@ -6,6 +8,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   alias SymphonyElixir.Linear.Client
 
   @linear_graphql_tool "linear_graphql"
+  @linear_graphql_argument_keys ["query", "variables", :query, :variables]
   @linear_graphql_description """
   Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.
   """
@@ -46,6 +49,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   def tool_specs do
     [
       %{
+        "type" => "function",
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
@@ -73,26 +77,26 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_linear_graphql_arguments(arguments) when is_map(arguments) do
-    case normalize_query(arguments) do
-      {:ok, query} ->
-        case normalize_variables(arguments) do
-          {:ok, variables} ->
-            {:ok, query, variables}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    with :ok <- validate_argument_keys(arguments),
+         {:ok, query} <- normalize_query(arguments),
+         {:ok, variables} <- normalize_variables(arguments) do
+      {:ok, query, variables}
     end
   end
 
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
 
+  defp validate_argument_keys(arguments) do
+    if Enum.all?(Map.keys(arguments), &(&1 in @linear_graphql_argument_keys)) do
+      :ok
+    else
+      {:error, :unexpected_arguments}
+    end
+  end
+
   defp normalize_query(arguments) do
-    case Map.get(arguments, "query") || Map.get(arguments, :query) do
-      query when is_binary(query) ->
+    case fetch_argument(arguments, "query", :query) do
+      {:ok, query} when is_binary(query) ->
         case String.trim(query) do
           "" -> {:error, :missing_query}
           trimmed -> {:ok, trimmed}
@@ -104,9 +108,18 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_variables(arguments) do
-    case Map.get(arguments, "variables") || Map.get(arguments, :variables) || %{} do
-      variables when is_map(variables) -> {:ok, variables}
-      _ -> {:error, :invalid_variables}
+    case fetch_argument(arguments, "variables", :variables) do
+      :error -> {:ok, %{}}
+      {:ok, nil} -> {:ok, %{}}
+      {:ok, variables} when is_map(variables) -> {:ok, variables}
+      {:ok, _variables} -> {:error, :invalid_variables}
+    end
+  end
+
+  defp fetch_argument(arguments, string_key, atom_key) do
+    case Map.fetch(arguments, string_key) do
+      :error -> Map.fetch(arguments, atom_key)
+      result -> result
     end
   end
 
@@ -164,6 +177,14 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     %{
       "error" => %{
         "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:unexpected_arguments) do
+    %{
+      "error" => %{
+        "message" => "`linear_graphql` accepts only `query` and optional `variables` arguments."
       }
     }
   end

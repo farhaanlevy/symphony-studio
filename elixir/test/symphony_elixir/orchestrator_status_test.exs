@@ -974,6 +974,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
       tracker_api_token: nil,
       codex_stall_timeout_ms: 1_000
     )
@@ -1056,7 +1057,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator blocks failed workers after app-server reports input required" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: nil)
 
     issue_id = "issue-input-required"
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredBlockOrchestrator)
@@ -1109,7 +1110,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator blocks normal worker exits after input required completion" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: nil)
 
     issue_id = "issue-input-required-normal"
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredNormalBlockOrchestrator)
@@ -1684,6 +1685,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     humanized = StatusDashboard.humanize_codex_message(message)
     assert humanized =~ "command approval requested"
     assert humanized =~ "auto-approved"
+  end
+
+  test "status dashboard formats fail-closed approval updates from codex" do
+    message = %{
+      event: :approval_auto_declined,
+      message: %{
+        payload: %{
+          "method" => "item/commandExecution/requestApproval",
+          "params" => %{"parsedCmd" => "mix test"}
+        },
+        decision: "decline"
+      }
+    }
+
+    humanized = StatusDashboard.humanize_codex_message(message)
+    assert humanized =~ "command approval requested"
+    assert humanized =~ "auto-declined"
   end
 
   test "status dashboard formats auto-answered tool input updates from codex" do

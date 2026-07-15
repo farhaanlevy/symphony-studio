@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-14): prove the pinned Codex typed
+# dynamic-tool descriptor.
 defmodule SymphonyElixir.Codex.DynamicToolTest do
   use SymphonyElixir.TestSupport
 
@@ -8,6 +10,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
              %{
                "description" => description,
                "inputSchema" => %{
+                 "additionalProperties" => false,
                  "properties" => %{
                    "query" => _,
                    "variables" => _
@@ -15,7 +18,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "required" => ["query"],
                  "type" => "object"
                },
-               "name" => "linear_graphql"
+               "name" => "linear_graphql",
+               "type" => "function"
              }
            ] = DynamicTool.tool_specs()
 
@@ -82,21 +86,46 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["success"] == true
   end
 
-  test "linear_graphql ignores legacy operationName arguments" do
-    test_pid = self()
-
+  test "linear_graphql rejects unexpected top-level arguments without calling Linear" do
     response =
       DynamicTool.execute(
         "linear_graphql",
         %{"query" => "query Viewer { viewer { id } }", "operationName" => "Viewer"},
-        linear_client: fn query, variables, opts ->
-          send(test_pid, {:linear_client_called, query, variables, opts})
-          {:ok, %{"data" => %{"viewer" => %{"id" => "usr_789"}}}}
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not be called when arguments contain unexpected keys")
         end
       )
 
-    assert_received {:linear_client_called, "query Viewer { viewer { id } }", %{}, []}
-    assert response["success"] == true
+    assert response["success"] == false
+
+    assert Jason.decode!(response["output"]) == %{
+             "error" => %{
+               "message" => "`linear_graphql` accepts only `query` and optional `variables` arguments."
+             }
+           }
+  end
+
+  test "linear_graphql normalizes missing and null variables while preserving maps" do
+    query = "query Viewer { viewer { id } }"
+    variables = %{"includeTeams" => false}
+
+    for {arguments, expected_variables} <- [
+          {%{"query" => query}, %{}},
+          {%{"query" => query, "variables" => nil}, %{}},
+          {%{"query" => query, "variables" => variables}, variables}
+        ] do
+      response =
+        DynamicTool.execute("linear_graphql", arguments,
+          linear_client: fn forwarded_query, forwarded_variables, opts ->
+            assert forwarded_query == query
+            assert forwarded_variables == expected_variables
+            assert opts == []
+            {:ok, %{"data" => %{}}}
+          end
+        )
+
+      assert response["success"] == true
+    end
   end
 
   test "linear_graphql passes multi-operation documents through unchanged" do
@@ -214,23 +243,25 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
-  test "linear_graphql rejects invalid variables" do
-    response =
-      DynamicTool.execute(
-        "linear_graphql",
-        %{"query" => "query Viewer { viewer { id } }", "variables" => ["bad"]},
-        linear_client: fn _query, _variables, _opts ->
-          flunk("linear client should not be called when variables are invalid")
-        end
-      )
+  test "linear_graphql rejects every non-object JSON variables value" do
+    for variables <- [false, true, 0, 1.5, "bad", ["bad"]] do
+      response =
+        DynamicTool.execute(
+          "linear_graphql",
+          %{"query" => "query Viewer { viewer { id } }", "variables" => variables},
+          linear_client: fn _query, _variables, _opts ->
+            flunk("linear client should not be called when variables are invalid")
+          end
+        )
 
-    assert response["success"] == false
+      assert response["success"] == false
 
-    assert Jason.decode!(response["output"]) == %{
-             "error" => %{
-               "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      assert Jason.decode!(response["output"]) == %{
+               "error" => %{
+                 "message" => "`linear_graphql.variables` must be a JSON object when provided."
+               }
              }
-           }
+    end
   end
 
   test "linear_graphql formats transport and auth failures" do

@@ -1,120 +1,141 @@
-# Modified for Symphony Studio on 2026-07-14: make retry-scheduling tests
-# hermetic and use deterministic scheduling-time assertions.
+# Modified for Symphony Studio on 2026-07-14: make retry scheduling and App
+# Server policy compatibility tests hermetic and deterministic.
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
   test "config defaults and validation checks" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
-      tracker_project_slug: nil,
-      poll_interval_ms: nil,
-      tracker_active_states: nil,
-      tracker_terminal_states: nil,
-      codex_command: nil
-    )
+    with_default_orchestrator_stopped(fn ->
+      try do
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_api_token: nil,
+          tracker_project_slug: nil,
+          poll_interval_ms: nil,
+          tracker_active_states: nil,
+          tracker_terminal_states: nil,
+          codex_command: nil
+        )
 
-    config = Config.settings!()
-    assert config.polling.interval_ms == 30_000
-    assert config.tracker.active_states == ["Todo", "In Progress"]
-    assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
-    assert config.tracker.assignee == nil
-    assert config.agent.max_turns == 20
+        config = Config.settings!()
+        assert config.polling.interval_ms == 30_000
+        assert config.tracker.active_states == ["Todo", "In Progress"]
+        assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+        assert config.tracker.assignee == nil
+        assert config.agent.max_turns == 20
 
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
+        write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
-    assert_raise ArgumentError, ~r/interval_ms/, fn ->
-      Config.settings!().polling.interval_ms
-    end
+        assert_raise ArgumentError, ~r/interval_ms/, fn ->
+          Config.settings!().polling.interval_ms
+        end
 
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "polling.interval_ms"
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "polling.interval_ms"
 
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
-    assert Config.settings!().polling.interval_ms == 45_000
+        write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
+        assert Config.settings!().polling.interval_ms == 45_000
 
-    write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "agent.max_turns"
+        write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "agent.max_turns"
 
-    write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
-    assert Config.settings!().agent.max_turns == 5
+        write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
+        assert Config.settings!().agent.max_turns == 5
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "tracker.active_states"
+        write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "tracker.active_states"
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "token",
-      tracker_project_slug: nil
-    )
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_kind: "linear",
+          tracker_api_token: "token",
+          tracker_project_slug: nil
+        )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+        assert {:error, :missing_linear_project_slug} = Config.validate!()
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_project_slug: "project",
-      codex_command: ""
-    )
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_project_slug: "project",
+          codex_command: ""
+        )
 
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.command"
-    assert message =~ "can't be blank"
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "codex.command"
+        assert message =~ "can't be blank"
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "   ")
-    assert :ok = Config.validate!()
-    assert Config.settings!().codex.command == "   "
+        write_workflow_file!(Workflow.workflow_file_path(), codex_command: "   ")
+        assert :ok = Config.validate!()
+        assert Config.settings!().codex.command == "   "
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
-    assert :ok = Config.validate!()
+        write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
+        assert :ok = Config.validate!()
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "definitely-not-valid")
-    assert :ok = Config.validate!()
+        write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "definitely-not-valid")
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "codex.approval_policy"
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "unsafe-ish")
-    assert :ok = Config.validate!()
+        write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "unsafe-ish")
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "codex.thread_sandbox"
 
-    write_workflow_file!(Workflow.workflow_file_path(),
-      codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["relative/path"]}
-    )
+        write_workflow_file!(Workflow.workflow_file_path(),
+          codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["relative/path"]}
+        )
 
-    assert :ok = Config.validate!()
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "codex.turn_sandbox_policy"
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: 123)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.approval_policy"
+        write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: 123)
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "codex.approval_policy"
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: 123)
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.thread_sandbox"
+        write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: 123)
+        assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+        assert message =~ "codex.thread_sandbox"
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
-    assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+        write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
+        assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+      after
+        write_workflow_file!(Workflow.workflow_file_path())
+      end
+    end)
   end
 
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
-    on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
-    Workflow.clear_workflow_file_path()
+    repo_workflow_path = Path.expand("WORKFLOW.md", File.cwd!())
 
-    assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
-    assert is_map(config)
+    with_default_orchestrator_stopped(fn ->
+      try do
+        Workflow.set_workflow_file_path(repo_workflow_path)
+        refute Process.whereis(SymphonyElixir.Orchestrator)
 
-    tracker = Map.get(config, "tracker", %{})
-    assert is_map(tracker)
-    assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(Map.get(tracker, "project_slug"))
-    assert is_list(Map.get(tracker, "active_states"))
-    assert is_list(Map.get(tracker, "terminal_states"))
+        assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
+        assert is_map(config)
 
-    hooks = Map.get(config, "hooks", %{})
-    assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
-    assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+        tracker = Map.get(config, "tracker", %{})
+        assert is_map(tracker)
+        assert Map.get(tracker, "kind") == "linear"
+        assert is_binary(Map.get(tracker, "project_slug"))
+        assert is_list(Map.get(tracker, "active_states"))
+        assert is_list(Map.get(tracker, "terminal_states"))
 
-    assert String.trim(prompt) != ""
-    assert is_binary(Config.workflow_prompt())
-    assert Config.workflow_prompt() == prompt
+        hooks = Map.get(config, "hooks", %{})
+        assert is_map(hooks)
+        assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
+        assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
+        assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
+        assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+
+        assert String.trim(prompt) != ""
+        assert is_binary(Config.workflow_prompt())
+        assert Config.workflow_prompt() == prompt
+      after
+        Workflow.set_workflow_file_path(original_workflow_path)
+      end
+    end)
+
+    assert Workflow.workflow_file_path() == original_workflow_path
+    assert Process.whereis(SymphonyElixir.Orchestrator)
   end
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
@@ -154,25 +175,38 @@ defmodule SymphonyElixir.CoreTest do
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
     original_workflow_path = Workflow.workflow_file_path()
 
-    on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
+    with_default_orchestrator_stopped(fn ->
+      try do
+        Workflow.clear_workflow_file_path()
+        refute Process.whereis(SymphonyElixir.Orchestrator)
+
+        assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "WORKFLOW.md")
+      after
+        Workflow.set_workflow_file_path(original_workflow_path)
+      end
     end)
 
-    Workflow.clear_workflow_file_path()
-
-    assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "WORKFLOW.md")
+    assert Workflow.workflow_file_path() == original_workflow_path
+    assert Process.whereis(SymphonyElixir.Orchestrator)
   end
 
   test "workflow file path resolves from app env when set" do
+    original_workflow_path = Workflow.workflow_file_path()
     app_workflow_path = "/tmp/app/WORKFLOW.md"
 
-    on_exit(fn ->
-      Workflow.clear_workflow_file_path()
+    with_default_orchestrator_stopped(fn ->
+      try do
+        Workflow.set_workflow_file_path(app_workflow_path)
+        refute Process.whereis(SymphonyElixir.Orchestrator)
+
+        assert Workflow.workflow_file_path() == app_workflow_path
+      after
+        Workflow.set_workflow_file_path(original_workflow_path)
+      end
     end)
 
-    Workflow.set_workflow_file_path(app_workflow_path)
-
-    assert Workflow.workflow_file_path() == app_workflow_path
+    assert Workflow.workflow_file_path() == original_workflow_path
+    assert Process.whereis(SymphonyElixir.Orchestrator)
   end
 
   test "workflow load accepts prompt-only files without front matter" do
@@ -1052,63 +1086,80 @@ defmodule SymphonyElixir.CoreTest do
   test "prompt builder reports workflow load failures separately from template parse errors" do
     original_workflow_path = Workflow.workflow_file_path()
     workflow_store_pid = Process.whereis(SymphonyElixir.WorkflowStore)
+    assert is_pid(workflow_store_pid), "expected the supervised WorkflowStore to be running"
 
-    on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
+    with_default_orchestrator_stopped(fn ->
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
 
-      if is_pid(workflow_store_pid) and is_nil(Process.whereis(SymphonyElixir.WorkflowStore)) do
-        Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+      try do
+        Workflow.set_workflow_file_path(Path.join(System.tmp_dir!(), "missing-workflow-#{System.unique_integer([:positive])}.md"))
+
+        issue = %Issue{
+          identifier: "MT-780",
+          title: "Workflow unavailable",
+          description: "Missing workflow file",
+          state: "Todo",
+          url: "https://example.org/issues/MT-780",
+          labels: []
+        }
+
+        assert_raise RuntimeError, ~r/workflow_unavailable:/, fn ->
+          PromptBuilder.build_prompt(issue)
+        end
+      after
+        Workflow.set_workflow_file_path(original_workflow_path)
+
+        if is_nil(Process.whereis(SymphonyElixir.WorkflowStore)) do
+          {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+        end
       end
     end)
 
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
-
-    Workflow.set_workflow_file_path(Path.join(System.tmp_dir!(), "missing-workflow-#{System.unique_integer([:positive])}.md"))
-
-    issue = %Issue{
-      identifier: "MT-780",
-      title: "Workflow unavailable",
-      description: "Missing workflow file",
-      state: "Todo",
-      url: "https://example.org/issues/MT-780",
-      labels: []
-    }
-
-    assert_raise RuntimeError, ~r/workflow_unavailable:/, fn ->
-      PromptBuilder.build_prompt(issue)
-    end
+    assert Workflow.workflow_file_path() == original_workflow_path
+    assert Process.whereis(SymphonyElixir.WorkflowStore)
+    assert Process.whereis(SymphonyElixir.Orchestrator)
   end
 
   test "in-repo WORKFLOW.md renders correctly" do
-    workflow_path = Workflow.workflow_file_path()
-    Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    original_workflow_path = Workflow.workflow_file_path()
+    repo_workflow_path = Path.expand("WORKFLOW.md", File.cwd!())
 
-    issue = %Issue{
-      identifier: "MT-616",
-      title: "Use rich templates for WORKFLOW.md",
-      description: "Render with rich template variables",
-      state: "In Progress",
-      url: "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd",
-      labels: ["templating", "workflow"]
-    }
+    with_default_orchestrator_stopped(fn ->
+      try do
+        Workflow.set_workflow_file_path(repo_workflow_path)
+        refute Process.whereis(SymphonyElixir.Orchestrator)
 
-    on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
+        issue = %Issue{
+          identifier: "MT-616",
+          title: "Use rich templates for WORKFLOW.md",
+          description: "Render with rich template variables",
+          state: "In Progress",
+          url: "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd",
+          labels: ["templating", "workflow"]
+        }
 
-    prompt = PromptBuilder.build_prompt(issue, attempt: 2)
+        prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
-    assert prompt =~ "Issue context:"
-    assert prompt =~ "Identifier: MT-616"
-    assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
-    assert prompt =~ "Current status: In Progress"
-    assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
-    assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
-    assert prompt =~ "Do not call `gh pr merge` directly"
-    assert prompt =~ "Continuation context:"
-    assert prompt =~ "retry attempt #2"
+        assert prompt =~ "You are working on a Linear ticket `MT-616`"
+        assert prompt =~ "Issue context:"
+        assert prompt =~ "Identifier: MT-616"
+        assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
+        assert prompt =~ "Current status: In Progress"
+        assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
+        assert prompt =~ "This is an unattended orchestration session."
+        assert prompt =~ "Only stop early for a true blocker"
+        assert prompt =~ "Do not include \"next steps for user\""
+        assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
+        assert prompt =~ "Do not call `gh pr merge` directly"
+        assert prompt =~ "Continuation context:"
+        assert prompt =~ "retry attempt #2"
+      after
+        Workflow.set_workflow_file_path(original_workflow_path)
+      end
+    end)
+
+    assert Workflow.workflow_file_path() == original_workflow_path
+    assert Process.whereis(SymphonyElixir.Orchestrator)
   end
 
   test "prompt builder adds continuation guidance for retries" do
@@ -1690,13 +1741,7 @@ defmodule SymphonyElixir.CoreTest do
                  |> String.trim_leading("JSON:")
                  |> Jason.decode!()
                  |> then(fn payload ->
-                   expected_approval_policy = %{
-                     "reject" => %{
-                       "sandbox_approval" => true,
-                       "rules" => true,
-                       "mcp_elicitations" => true
-                     }
-                   }
+                   expected_approval_policy = default_granular_approval_policy()
 
                    payload["method"] == "thread/start" &&
                      get_in(payload, ["params", "approvalPolicy"]) == expected_approval_policy &&
@@ -1711,7 +1756,6 @@ defmodule SymphonyElixir.CoreTest do
       expected_turn_sandbox_policy = %{
         "type" => "workspaceWrite",
         "writableRoots" => [canonical_workspace],
-        "readOnlyAccess" => %{"type" => "fullAccess"},
         "networkAccess" => false,
         "excludeTmpdirEnvVar" => false,
         "excludeSlashTmp" => false
@@ -1723,18 +1767,13 @@ defmodule SymphonyElixir.CoreTest do
                  |> String.trim_leading("JSON:")
                  |> Jason.decode!()
                  |> then(fn payload ->
-                   expected_approval_policy = %{
-                     "reject" => %{
-                       "sandbox_approval" => true,
-                       "rules" => true,
-                       "mcp_elicitations" => true
-                     }
-                   }
+                   expected_approval_policy = default_granular_approval_policy()
 
                    payload["method"] == "turn/start" &&
                      get_in(payload, ["params", "cwd"]) == canonical_workspace &&
                      get_in(payload, ["params", "approvalPolicy"]) == expected_approval_policy &&
-                     get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_sandbox_policy
+                     get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_sandbox_policy &&
+                     not Map.has_key?(payload["params"], "title")
                  end)
                else
                  false
@@ -1743,6 +1782,18 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp default_granular_approval_policy do
+    %{
+      "granular" => %{
+        "sandbox_approval" => false,
+        "rules" => false,
+        "mcp_elicitations" => false,
+        "skill_approval" => false,
+        "request_permissions" => false
+      }
+    }
   end
 
   test "app server startup command supports codex args override from workflow config" do
@@ -1951,6 +2002,33 @@ defmodule SymphonyElixir.CoreTest do
              end)
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  # Workflow path changes reload the shared WorkflowStore immediately. Stop the
+  # supervised poller before a test activates the repository Linear workflow or
+  # a deliberately invalid path, then restart it only after the safe path has
+  # been restored by the caller's `after` block.
+  defp with_default_orchestrator_stopped(fun) when is_function(fun, 0) do
+    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+    assert is_pid(orchestrator_pid), "expected the default Orchestrator to be running"
+
+    assert :ok =
+             Supervisor.terminate_child(
+               SymphonyElixir.Supervisor,
+               SymphonyElixir.Orchestrator
+             )
+
+    try do
+      fun.()
+    after
+      if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+        assert {:ok, _pid} =
+                 Supervisor.restart_child(
+                   SymphonyElixir.Supervisor,
+                   SymphonyElixir.Orchestrator
+                 )
+      end
     end
   end
 end

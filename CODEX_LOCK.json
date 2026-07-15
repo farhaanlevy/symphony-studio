@@ -1,0 +1,20 @@
+{
+  "lockVersion": 1,
+  "package": "@openai/codex",
+  "version": "0.144.3",
+  "versionOutput": "codex-cli 0.144.3",
+  "npmIntegrity": "sha512-8Re3wp5CdYiM7nsF4StFa5js6IT11N7srhxfvwtol7ENHDht05C+HS4e1CTmYjqkhgsUzl2R1gB27iN2pdbVnA==",
+  "platforms": [
+    {
+      "architecture": "x86_64",
+      "launcherSha256": "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+      "nativeSha256": "37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b",
+      "npmIntegrity": "sha512-xtDY5sWQPbYBj2lLWZJvc0jBre0XQ7ZmN4VbSEvazbQ2X7uHhm1D/0oZ7AI+SgC/VfZrUhvxRHd43/AmXSaAzA==",
+      "operatingSystem": "linux",
+      "installedPackageAlias": "@openai/codex-linux-x64",
+      "publishedPackage": "@openai/codex",
+      "publishedVersion": "0.144.3-linux-x64",
+      "target": "x86_64-unknown-linux-musl"
+    }
+  ]
+}

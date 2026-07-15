@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-14): Symphony Studio loads a
+# network-hermetic workflow before the OTP supervision tree starts in tests.
 import Config
 
 config :phoenix, :json_library, Jason
@@ -14,3 +16,7 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   secret_key_base: String.duplicate("s", 64),
   check_origin: false,
   server: false
+
+if config_env() == :test do
+  import_config "test.exs"
+end
