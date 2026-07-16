@@ -31,14 +31,19 @@ package is accepted:
 3. Release 1.1 freezes features and completes submission hardening, packaging,
    judge-path verification, and external-media preparation.
 
-Accepted downstream packages currently include R0-01 provenance/governance and
+Accepted downstream packages currently include R0-01 provenance/governance;
 R0-02 Codex 0.144.3 pinning, generated stable/experimental schema contracts,
 exact outbound-request validation, and deterministic App Server and loopback
-Linear fixtures. R0-02 passed its source-bound fixture seal, deterministic
-regeneration, full 266-test/100%-coverage gate, Dialyzer, and independent
-adversarial review on 2026-07-15. Transport conformance, runtime capability
-discovery, durable Studio state, the operator UI, and submission hardening
-remain unclaimed until their later packages pass.
+Linear fixtures; and R0-03 strict JSONL transport, bounded content-free stderr
+diagnostics, absolute request deadlines, conservative uncertain outcomes,
+source-identity compatibility circuit, shell-free App Server argv and
+PID-namespace containment, and fail-closed remote release gating. R0-03 passed
+its 113-file/276-test source seal, clean regeneration, 73-test schema harness,
+full 398-test gate with 100% of measured modules covered, zero-error Dialyzer
+analysis, real no-model App Server smoke, and independent adversarial review on
+2026-07-16. Runtime
+capability discovery, durable Studio state, the operator UI, and submission
+hardening remain unclaimed until their later packages pass.
 
 ## Build Week execution configuration
 

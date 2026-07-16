@@ -3,6 +3,8 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Codex.TransportError
+
   test "config defaults and validation checks" do
     with_default_orchestrator_stopped(fn ->
       try do
@@ -63,8 +65,7 @@ defmodule SymphonyElixir.CoreTest do
         assert message =~ "can't be blank"
 
         write_workflow_file!(Workflow.workflow_file_path(), codex_command: "   ")
-        assert :ok = Config.validate!()
-        assert Config.settings!().codex.command == "   "
+        assert {:error, {:invalid_codex_command, :blank}} = Config.validate!()
 
         write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
         assert :ok = Config.validate!()
@@ -254,6 +255,14 @@ defmodule SymphonyElixir.CoreTest do
     assert Process.whereis(SymphonyElixir.Orchestrator) == pid
 
     GenServer.stop(pid)
+  end
+
+  test "duplicate application start releases its runtime lease and supervised stop state" do
+    assert {:error, {:already_started, supervisor}} =
+             SymphonyElixir.Application.start(:normal, [])
+
+    assert supervisor == Process.whereis(SymphonyElixir.Supervisor)
+    assert :ok = SymphonyElixir.Application.stop(%{erlexec_runtime: nil})
   end
 
   test "linear issue state reconciliation fetch with no running issues is a no-op" do
@@ -752,7 +761,12 @@ defmodule SymphonyElixir.CoreTest do
     state = :sys.get_state(pid)
     observed_at_ms = System.monotonic_time(:millisecond)
 
-    assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
+    assert %{
+             attempt: 3,
+             due_at_ms: due_at_ms,
+             identifier: "MT-559",
+             error: "agent exited: worker_failure"
+           } =
              state.retry_attempts[issue_id]
 
     assert_retry_scheduled_between(due_at_ms, 40_000, sent_at_ms, observed_at_ms)
@@ -793,7 +807,12 @@ defmodule SymphonyElixir.CoreTest do
     state = :sys.get_state(pid)
     observed_at_ms = System.monotonic_time(:millisecond)
 
-    assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
+    assert %{
+             attempt: 1,
+             due_at_ms: due_at_ms,
+             identifier: "MT-560",
+             error: "agent exited: worker_failure"
+           } =
              state.retry_attempts[issue_id]
 
     assert_retry_scheduled_between(due_at_ms, 10_000, sent_at_ms, observed_at_ms)
@@ -1217,7 +1236,8 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            sleep 0.1
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\"}}}'
             exit 0
             ;;
           *)
@@ -1264,6 +1284,20 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner recognizes promoted process cleanup failures as blocker updates" do
+    error =
+      TransportError.new(:process_cleanup_failed, %{
+        cause: %{kind: :stdout_contamination},
+        cleanup: %{reason: :process_group_still_alive}
+      })
+
+    assert %{
+             event: :process_cleanup_failed,
+             reason: ^error,
+             timestamp: %DateTime{}
+           } = AgentRunner.transport_blocker_update_for_test(error)
+  end
+
   test "agent runner forwards timestamped codex updates to recipient" do
     test_root =
       Path.join(
@@ -1296,13 +1330,14 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"id\":1,\"result\":{}}'
               ;;
             2)
-              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
               ;;
             3)
-              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-live\"}}}'
               ;;
             4)
-              printf '%s\\n' '{\"method\":\"turn/completed\"}'
+              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
+              sleep 0.1
+              printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-live\",\"turn\":{\"id\":\"turn-live\"}}}'
               ;;
             *)
               ;;
@@ -1346,13 +1381,14 @@ defmodule SymphonyElixir.CoreTest do
                       }},
                      500
 
-      assert session_id == "thread-live-turn-live"
+      assert String.starts_with?(session_id, "session-")
+      assert byte_size(session_id) == byte_size("session-") + 24
     after
       File.rm_rf(test_root)
     end
   end
 
-  test "agent runner surfaces ssh startup failures instead of silently hopping hosts" do
+  test "agent runner rejects Release 5 ssh workers before startup without exposing details" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1361,6 +1397,7 @@ defmodule SymphonyElixir.CoreTest do
 
     previous_path = System.get_env("PATH")
     previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+    raw_failure_canary = "RAW-WORKSPACE-PREPARE-FAILURE-MUST-NOT-LEAK"
 
     on_exit(fn ->
       restore_env("PATH", previous_path)
@@ -1382,7 +1419,7 @@ defmodule SymphonyElixir.CoreTest do
 
       case "$*" in
         *worker-a*"__SYMPHONY_WORKSPACE__"*)
-          printf '%s\\n' 'worker-a prepare failed' >&2
+          printf '%s\\n' '#{raw_failure_canary}' >&2
           exit 75
           ;;
         *worker-b*"__SYMPHONY_WORKSPACE__"*)
@@ -1410,13 +1447,22 @@ defmodule SymphonyElixir.CoreTest do
         state: "In Progress"
       }
 
-      assert_raise RuntimeError, ~r/workspace_prepare_failed/, fn ->
-        AgentRunner.run(issue, nil, worker_host: "worker-a")
-      end
+      log =
+        capture_log(fn ->
+          exception =
+            assert_raise RuntimeError, ~r/failure_kind=unsupported_release_feature/, fn ->
+              AgentRunner.run(issue, nil, worker_host: "worker-a")
+            end
 
-      trace = File.read!(trace_file)
-      assert trace =~ "worker-a bash -lc"
-      refute trace =~ "worker-b bash -lc"
+          refute Exception.message(exception) =~ raw_failure_canary
+          refute Exception.message(exception) =~ "remote_workers"
+          refute Exception.message(exception) =~ "release_5"
+        end)
+
+      refute log =~ raw_failure_canary
+      refute log =~ "remote_workers"
+      refute log =~ "release_5"
+      refute File.exists?(trace_file)
     after
       File.rm_rf(test_root)
     end
@@ -1464,11 +1510,13 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-1"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            sleep 0.1
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-cont","turn":{"id":"turn-cont-1"}}}'
             ;;
           5)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-2"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"id":4,"result":{"turn":{"id":"turn-cont-2"}}}'
+            sleep 0.1
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-cont","turn":{"id":"turn-cont-2"}}}'
             ;;
         esac
       done
@@ -1594,11 +1642,13 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-1"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            sleep 0.1
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-max","turn":{"id":"turn-max-1"}}}'
             ;;
           5)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-2"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"id":4,"result":{"turn":{"id":"turn-max-2"}}}'
+            sleep 0.1
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-max","turn":{"id":"turn-max-2"}}}'
             ;;
         esac
       done
@@ -1690,13 +1740,14 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-77\"}}}'
             ;;
           3)
-            printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-77\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-77\"}}}'
             ;;
           4)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-77\"}}}'
+            sleep 0.1
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-77\",\"turn\":{\"id\":\"turn-77\"}}}'
             exit 0
             ;;
           *)
@@ -1834,13 +1885,14 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"}}}'
             ;;
           3)
-            printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"}}}'
             ;;
           4)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
+            sleep 0.1
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-88\",\"turn\":{\"id\":\"turn-88\"}}}'
             exit 0
             ;;
           *)
@@ -1920,13 +1972,14 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-99"}}}'
             ;;
           3)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-99"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-99"}}}'
             ;;
           4)
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-99"}}}'
+            sleep 0.1
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-99","turn":{"id":"turn-99"}}}'
             exit 0
             ;;
           *)

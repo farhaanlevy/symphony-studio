@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-15): Symphony Studio starts its
+# vendored process supervisor after establishing a systemd-safe shell fallback.
 defmodule SymphonyElixir do
   @moduledoc """
   Entry point for the Symphony orchestrator.
@@ -19,29 +21,78 @@ defmodule SymphonyElixir.Application do
 
   use Application
 
+  alias SymphonyElixir.ErlexecRuntime
+
   @impl true
   def start(_type, _args) do
     :ok = SymphonyElixir.LogFile.configure()
 
-    children = [
-      {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-      {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
-      SymphonyElixir.WorkflowStore,
-      SymphonyElixir.Orchestrator,
-      SymphonyElixir.HttpServer,
-      SymphonyElixir.StatusDashboard
-    ]
+    with {:ok, erlexec_runtime} <- ErlexecRuntime.prepare() do
+      children = [
+        erlexec_child_spec(),
+        {Phoenix.PubSub, name: SymphonyElixir.PubSub},
+        {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
+        SymphonyElixir.WorkflowStore,
+        SymphonyElixir.Orchestrator,
+        SymphonyElixir.HttpServer,
+        SymphonyElixir.StatusDashboard
+      ]
 
-    Supervisor.start_link(
-      children,
-      strategy: :one_for_one,
-      name: SymphonyElixir.Supervisor
-    )
+      case Supervisor.start_link(
+             children,
+             strategy: :one_for_one,
+             name: SymphonyElixir.Supervisor
+           ) do
+        {:ok, supervisor} ->
+          {:ok, supervisor, %{erlexec_runtime: erlexec_runtime}}
+
+        {:error, _reason} = error ->
+          _cleanup_result = ErlexecRuntime.cleanup(erlexec_runtime)
+          error
+      end
+    end
+  end
+
+  @doc """
+  Prepares the deterministic shell environment required by vendored `erlexec`.
+
+  `erlexec` requires a nonblank `SHELL` value even when callers use its
+  shell-free argv mode. Service managers commonly omit that interactive-shell
+  variable, so Symphony supplies `/bin/sh` only when no usable operator value
+  is present.
+  """
+  @spec prepare_erlexec_environment() :: :ok
+  def prepare_erlexec_environment do
+    ErlexecRuntime.prepare_shell_environment()
+  end
+
+  @doc false
+  @spec start_erlexec_supervisor() :: Supervisor.on_start()
+  def start_erlexec_supervisor do
+    :ok = prepare_erlexec_environment()
+    :exec_app.start(:normal, [])
   end
 
   @impl true
-  def stop(_state) do
+  def stop(state) do
     SymphonyElixir.StatusDashboard.render_offline_status()
+    _cleanup_result = cleanup_erlexec_runtime(state)
     :ok
+  end
+
+  defp cleanup_erlexec_runtime(%{erlexec_runtime: runtime}),
+    do: ErlexecRuntime.cleanup(runtime)
+
+  defp cleanup_erlexec_runtime(_state), do: :ok
+
+  defp erlexec_child_spec do
+    %{
+      id: :erlexec,
+      start: {__MODULE__, :start_erlexec_supervisor, []},
+      restart: :permanent,
+      shutdown: 10_000,
+      type: :supervisor,
+      modules: [:exec_app]
+    }
   end
 end

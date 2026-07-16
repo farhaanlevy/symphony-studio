@@ -18,6 +18,9 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
   @runner Path.expand("fake_codex_app_server/runner.exs", __DIR__)
   @default_codex_home "/tmp/symphony-fake-codex-home"
   @default_cwd "/tmp/symphony-fake-codex-workspace"
+  @default_wait_timeout_ms 5_000
+  @wait_poll_interval_ms 5
+  @max_generated_bytes 64 * 1024 * 1024
   @client_params_schemas %{
     "initialize" => "json/v1/InitializeParams.json",
     "thread/start" => "experimental/json/v2/ThreadStartParams.json",
@@ -25,6 +28,7 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
   }
 
   @type fixture :: %{
+          argv: [String.t()],
           command: String.t(),
           root: String.t(),
           scenario_path: String.t(),
@@ -33,7 +37,9 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
 
   @spec create!(String.t(), [map()]) :: fixture()
   def create!(root, steps) when is_binary(root) and is_list(steps) do
+    validate_steps!(steps)
     validate_terminal_exit!(steps)
+    validate_named_steps_unique!(steps, "barrier")
 
     fixture_root =
       Path.join(root, "fake-codex-app-server-#{System.unique_integer([:positive, :monotonic])}")
@@ -44,24 +50,17 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
     File.write!(scenario_path, Jason.encode!(%{"schemaVersion" => 1, "steps" => steps}, pretty: true))
 
     elixir = System.find_executable("elixir") || raise "elixir executable not found"
+    env = System.find_executable("env") || raise "env executable not found"
 
-    command =
-      ([
-         "export PATH=#{shell_quote(System.fetch_env!("PATH"))};",
-         "exec",
-         shell_quote(elixir)
-       ] ++
-         runner_code_path_arguments() ++
-         [
-           shell_quote(@runner),
-           "--scenario",
-           shell_quote(scenario_path),
-           "--trace",
-           shell_quote(trace_path)
-         ])
-      |> Enum.join(" ")
+    argv =
+      [env, "PATH=#{System.fetch_env!("PATH")}", elixir] ++
+        runner_code_path_arguments() ++
+        [@runner, "--scenario", scenario_path, "--trace", trace_path]
+
+    command = Enum.map_join(argv, " ", &shell_quote/1)
 
     %{
+      argv: argv,
       command: command,
       root: fixture_root,
       scenario_path: scenario_path,
@@ -293,8 +292,66 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
     }
   end
 
-  @spec stderr(binary()) :: map()
-  def stderr(bytes) when is_binary(bytes), do: %{"type" => "stderr", "base64" => Base.encode64(bytes)}
+  @doc "Build compact deterministic stdout by repeating a byte pattern without expanding scenario.json."
+  @spec generated_stdout(binary(), non_neg_integer(), keyword()) :: map()
+  def generated_stdout(repeated_bytes, repeat_count, opts \\ [])
+      when is_binary(repeated_bytes) and is_integer(repeat_count) and repeat_count >= 0 and is_list(opts) do
+    generated_stream("stdout", repeated_bytes, repeat_count, opts)
+  end
+
+  @doc "Build compact deterministic stderr by repeating a byte pattern without expanding scenario.json."
+  @spec generated_stderr(binary(), non_neg_integer(), keyword()) :: map()
+  def generated_stderr(repeated_bytes, repeat_count, opts \\ [])
+      when is_binary(repeated_bytes) and is_integer(repeat_count) and repeat_count >= 0 and is_list(opts) do
+    generated_stream("stderr", repeated_bytes, repeat_count, opts)
+  end
+
+  @spec stderr(binary(), keyword()) :: map()
+  def stderr(bytes, opts \\ []) when is_binary(bytes) and is_list(opts) do
+    %{
+      "type" => "stderr",
+      "base64" => Base.encode64(bytes),
+      "fragments" => normalize_fragments(Keyword.get(opts, :fragments, [])),
+      "delayMs" => Keyword.get(opts, :delay_ms, 0)
+    }
+  end
+
+  @doc "Pause the runner at a file-backed named barrier until release!/3 is called."
+  @spec barrier(String.t(), keyword()) :: map()
+  def barrier(name, opts \\ []) when is_binary(name) and is_list(opts) do
+    validate_name!(name)
+
+    %{
+      "type" => "barrier",
+      "name" => name,
+      "timeoutMs" => Keyword.get(opts, :timeout_ms, @default_wait_timeout_ms)
+    }
+  end
+
+  @doc "Release a reached named barrier atomically, waiting for its readiness marker first."
+  @spec release!(fixture(), String.t(), pos_integer()) :: :ok
+  def release!(fixture, name, timeout_ms \\ @default_wait_timeout_ms)
+      when is_map(fixture) and is_binary(name) and is_integer(timeout_ms) and timeout_ms > 0 do
+    validate_name!(name)
+    barrier_root = Path.join(fixture.root, "barriers")
+    waiting_path = Path.join(barrier_root, "#{name}.waiting")
+    release_path = Path.join(barrier_root, "#{name}.release")
+    released_path = Path.join(barrier_root, "#{name}.released")
+    timed_out_path = Path.join(barrier_root, "#{name}.timed_out")
+    wait_for_file!(waiting_path, timeout_ms, "barrier #{inspect(name)} was not reached")
+
+    cond do
+      File.regular?(released_path) ->
+        :ok
+
+      File.regular?(timed_out_path) ->
+        raise ExUnit.AssertionError, message: "barrier #{inspect(name)} already timed out"
+
+      true ->
+        atomic_write_once!(release_path, "release\n")
+        wait_for_barrier_outcome!(released_path, timed_out_path, name, timeout_ms)
+    end
+  end
 
   @spec sleep(non_neg_integer()) :: map()
   def sleep(milliseconds) when is_integer(milliseconds) and milliseconds >= 0,
@@ -335,11 +392,95 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
     :ok
   end
 
+  defp generated_stream(stream, repeated_bytes, repeat_count, opts) do
+    prefix = Keyword.get(opts, :prefix, "")
+    suffix = Keyword.get(opts, :suffix, "")
+
+    unless is_binary(prefix) and is_binary(suffix) do
+      raise ArgumentError, "generated stream prefix and suffix must be binaries"
+    end
+
+    generated_bytes = byte_size(prefix) + byte_size(repeated_bytes) * repeat_count + byte_size(suffix)
+
+    if generated_bytes > @max_generated_bytes do
+      raise ArgumentError,
+            "generated stream exceeds #{@max_generated_bytes} byte fixture limit: #{generated_bytes}"
+    end
+
+    %{
+      "type" => "generated",
+      "stream" => stream,
+      "prefixBase64" => Base.encode64(prefix),
+      "repeatBase64" => Base.encode64(repeated_bytes),
+      "repeatCount" => repeat_count,
+      "suffixBase64" => Base.encode64(suffix),
+      "fragments" => normalize_fragments(Keyword.get(opts, :fragments, [])),
+      "delayMs" => Keyword.get(opts, :delay_ms, 0)
+    }
+  end
+
   defp normalize_fragments(fragments) do
-    Enum.map(fragments, fn
-      :rest -> "rest"
-      size when is_integer(size) and size > 0 -> size
-    end)
+    normalized =
+      Enum.map(fragments, fn
+        :rest -> "rest"
+        size when is_integer(size) and size > 0 -> size
+        other -> raise ArgumentError, "invalid fake App Server fragment size: #{inspect(other)}"
+      end)
+
+    validate_fragments!(normalized)
+    normalized
+  end
+
+  defp wait_for_file!(path, timeout_ms, timeout_message) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_file!(path, deadline, timeout_message)
+  end
+
+  defp do_wait_for_file!(path, deadline, timeout_message) do
+    cond do
+      File.regular?(path) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        raise ExUnit.AssertionError, message: timeout_message
+
+      true ->
+        Process.sleep(@wait_poll_interval_ms)
+        do_wait_for_file!(path, deadline, timeout_message)
+    end
+  end
+
+  defp atomic_write_once!(path, bytes) do
+    File.mkdir_p!(Path.dirname(path))
+
+    case File.write(path, bytes, [:exclusive]) do
+      :ok -> :ok
+      {:error, :eexist} -> :ok
+      {:error, reason} -> raise File.Error, reason: reason, action: "write", path: path
+    end
+  end
+
+  defp wait_for_barrier_outcome!(released_path, timed_out_path, name, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_barrier_outcome!(released_path, timed_out_path, name, deadline)
+  end
+
+  defp do_wait_for_barrier_outcome!(released_path, timed_out_path, name, deadline) do
+    cond do
+      File.regular?(released_path) ->
+        :ok
+
+      File.regular?(timed_out_path) ->
+        raise ExUnit.AssertionError, message: "barrier #{inspect(name)} timed out before release"
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        raise ExUnit.AssertionError,
+          message: "barrier #{inspect(name)} did not acknowledge release"
+
+      true ->
+        Process.sleep(@wait_poll_interval_ms)
+        do_wait_for_barrier_outcome!(released_path, timed_out_path, name, deadline)
+    end
   end
 
   defp subset?(expected, actual) when is_map(expected) and is_map(actual) do
@@ -536,20 +677,240 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
     |> Enum.map(&(&1 |> to_string() |> Path.expand()))
     |> Enum.filter(&File.dir?/1)
     |> Enum.uniq()
-    |> Enum.flat_map(fn path -> ["-pa", shell_quote(path)] end)
+    |> Enum.flat_map(fn path -> ["-pa", path] end)
+  end
+
+  defp validate_steps!(steps) do
+    Enum.with_index(steps)
+    |> Enum.each(fn {step, index} -> validate_step!(step, index) end)
+  end
+
+  defp validate_step!(%{"type" => "expect"} = step, index) do
+    validate_step_keys!(step, ~w(type expected absent match), ["validation"], index)
+    require_map!(step["expected"], "expect.expected", index)
+
+    unless is_list(step["absent"]) and
+             Enum.all?(step["absent"], fn path ->
+               is_list(path) and path != [] and Enum.all?(path, &is_binary/1)
+             end) do
+      invalid_step!(index, "expect.absent must contain non-empty string paths")
+    end
+
+    unless step["match"] in ~w(exact subset) do
+      invalid_step!(index, "expect.match must be exact or subset")
+    end
+
+    validate_expect_contract!(step, index)
+  end
+
+  defp validate_step!(%{"type" => "send_json"} = step, index) do
+    validate_step_keys!(step, ~w(type payload fragments delayMs), [], index)
+    require_map!(step["payload"], "send_json.payload", index)
+    validate_output_options!(step, index)
+  end
+
+  defp validate_step!(%{"type" => "stdout"} = step, index) do
+    validate_step_keys!(step, ~w(type base64 fragments delayMs), [], index)
+    decode_base64!(step["base64"], "stdout.base64", index)
+    validate_output_options!(step, index)
+  end
+
+  # schemaVersion 1 originally encoded stderr with only type/base64. Keep that
+  # representation valid while new builders add deterministic output options.
+  defp validate_step!(%{"type" => "stderr"} = step, index) do
+    validate_step_keys!(step, ~w(type base64), ~w(fragments delayMs), index)
+    decode_base64!(step["base64"], "stderr.base64", index)
+    validate_output_options!(step, index)
+  end
+
+  defp validate_step!(%{"type" => "generated"} = step, index) do
+    validate_step_keys!(
+      step,
+      ~w(type stream prefixBase64 repeatBase64 repeatCount suffixBase64 fragments delayMs),
+      [],
+      index
+    )
+
+    unless step["stream"] in ~w(stdout stderr) do
+      invalid_step!(index, "generated.stream must be stdout or stderr")
+    end
+
+    prefix = decode_base64!(step["prefixBase64"], "generated.prefixBase64", index)
+    repeated = decode_base64!(step["repeatBase64"], "generated.repeatBase64", index)
+    suffix = decode_base64!(step["suffixBase64"], "generated.suffixBase64", index)
+    repeat_count = step["repeatCount"]
+
+    unless is_integer(repeat_count) and repeat_count >= 0 do
+      invalid_step!(index, "generated.repeatCount must be a non-negative integer")
+    end
+
+    if repeated == "" and repeat_count > 0 do
+      invalid_step!(index, "generated.repeatBase64 must decode to bytes when repeatCount is positive")
+    end
+
+    generated_bytes = byte_size(prefix) + byte_size(repeated) * repeat_count + byte_size(suffix)
+
+    if generated_bytes > @max_generated_bytes do
+      invalid_step!(index, "generated output exceeds #{@max_generated_bytes} bytes")
+    end
+
+    validate_output_options!(step, index)
+  end
+
+  defp validate_step!(%{"type" => "barrier"} = step, index) do
+    validate_step_keys!(step, ~w(type name timeoutMs), [], index)
+    validate_name!(step["name"])
+
+    unless is_integer(step["timeoutMs"]) and step["timeoutMs"] > 0 do
+      invalid_step!(index, "barrier.timeoutMs must be a positive integer")
+    end
+  end
+
+  defp validate_step!(%{"type" => "sleep"} = step, index) do
+    validate_step_keys!(step, ~w(type milliseconds), [], index)
+
+    unless is_integer(step["milliseconds"]) and step["milliseconds"] >= 0 do
+      invalid_step!(index, "sleep.milliseconds must be a non-negative integer")
+    end
+  end
+
+  defp validate_step!(%{"type" => "exit"} = step, index) do
+    validate_step_keys!(step, ~w(type status), [], index)
+
+    unless is_integer(step["status"]) and step["status"] >= 0 do
+      invalid_step!(index, "exit.status must be a non-negative integer")
+    end
+  end
+
+  defp validate_step!(step, index) do
+    invalid_step!(index, "unknown or malformed step #{inspect(step)}")
+  end
+
+  defp validate_step_keys!(step, required, optional, index) do
+    keys = Map.keys(step)
+
+    case required -- keys do
+      [] -> :ok
+      missing -> invalid_step!(index, "missing fields #{inspect(missing)}")
+    end
+
+    case keys -- (required ++ optional) do
+      [] -> :ok
+      extra -> invalid_step!(index, "unexpected fields #{inspect(extra)}")
+    end
+  end
+
+  defp validate_output_options!(step, index) do
+    validate_fragments!(Map.get(step, "fragments", []))
+
+    delay_ms = Map.get(step, "delayMs", 0)
+
+    unless is_integer(delay_ms) and delay_ms >= 0 do
+      invalid_step!(index, "delayMs must be a non-negative integer")
+    end
+  end
+
+  defp validate_expect_contract!(step, index) do
+    expected_contract = validation_contract(step["expected"])
+
+    case {expected_contract, Map.fetch(step, "validation")} do
+      {nil, :error} ->
+        :ok
+
+      {nil, {:ok, _unexpected}} ->
+        invalid_step!(index, "expect.validation is not supported for this expectation")
+
+      {_expected, :error} ->
+        invalid_step!(index, "expect.validation is required for this pinned expectation")
+
+      {expected, {:ok, actual}} when expected == actual ->
+        :ok
+
+      {_expected, {:ok, _actual}} ->
+        invalid_step!(index, "expect.validation does not match the pinned validation contract")
+    end
+  end
+
+  defp validate_fragments!(fragments) when is_list(fragments) do
+    unless Enum.all?(fragments, &((is_integer(&1) and &1 > 0) or &1 == "rest")) do
+      raise ArgumentError, "fake App Server fragments must be positive integers or a final :rest"
+    end
+
+    rest_indexes =
+      fragments
+      |> Enum.with_index()
+      |> Enum.filter(fn {fragment, _index} -> fragment == "rest" end)
+      |> Enum.map(&elem(&1, 1))
+
+    case rest_indexes do
+      [] -> :ok
+      [index] when index == length(fragments) - 1 -> :ok
+      _ -> raise ArgumentError, "fake App Server :rest fragment must appear at most once and be final"
+    end
+  end
+
+  defp validate_fragments!(_fragments) do
+    raise ArgumentError, "fake App Server fragments must be a list"
+  end
+
+  defp decode_base64!(encoded, label, index) when is_binary(encoded) do
+    case Base.decode64(encoded) do
+      {:ok, bytes} -> bytes
+      :error -> invalid_step!(index, "#{label} is not canonical base64")
+    end
+  end
+
+  defp decode_base64!(_encoded, label, index), do: invalid_step!(index, "#{label} must be a string")
+
+  defp require_map!(value, _label, _index) when is_map(value), do: :ok
+  defp require_map!(_value, label, index), do: invalid_step!(index, "#{label} must be an object")
+
+  defp validate_name!(name) when is_binary(name) do
+    if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/, name) do
+      :ok
+    else
+      raise ArgumentError,
+            "fake App Server names must use 1-64 ASCII letters, digits, dot, underscore, or hyphen"
+    end
+  end
+
+  defp validate_name!(_name) do
+    raise ArgumentError, "fake App Server name must be a string"
+  end
+
+  defp validate_named_steps_unique!(steps, type) do
+    names = for %{"type" => ^type, "name" => name} <- steps, do: name
+
+    if Enum.uniq(names) != names do
+      raise ArgumentError, "fake App Server #{type} names must be unique within a scenario"
+    end
+  end
+
+  defp invalid_step!(index, message) do
+    raise ArgumentError, "invalid fake App Server step at index #{index}: #{message}"
   end
 
   defp validate_terminal_exit!(steps) do
-    case Enum.find_index(steps, &match?(%{"type" => "exit"}, &1)) do
-      nil ->
+    exit_indexes =
+      steps
+      |> Enum.with_index()
+      |> Enum.filter(fn {step, _index} -> match?(%{"type" => "exit"}, step) end)
+      |> Enum.map(&elem(&1, 1))
+
+    case exit_indexes do
+      [] ->
         :ok
 
-      index when index == length(steps) - 1 ->
+      [index] when index == length(steps) - 1 ->
         :ok
 
-      index ->
+      [index] ->
         raise ArgumentError,
               "fake App Server exit step at index #{index} must be the final scenario step"
+
+      indexes ->
+        raise ArgumentError,
+              "fake App Server scenario must contain at most one exit step, got indexes #{inspect(indexes)}"
     end
   end
 

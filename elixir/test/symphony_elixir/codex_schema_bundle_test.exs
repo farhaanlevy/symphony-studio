@@ -40,7 +40,7 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
                       "mcpServer/elicitation/request"
                     ])
 
-  test "pinned manifest and matrix expose the static R0-02 contract" do
+  test "pinned manifest and matrix expose the source-bound compatibility contract" do
     assert SchemaBundle.version() == "0.144.3"
     assert File.dir?(SchemaBundle.bundle_path())
 
@@ -67,6 +67,13 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
 
     assert compatibility["fixtures"] == expected_fixture_status
 
+    expected_test_count =
+      case {compatibility["fixtures"], compatibility["transportConformance"]} do
+        {"pass", "not_run"} -> 55
+        {status, status} when status in ["under_test", "pass"] -> 276
+        statuses -> flunk("unexpected fixture/transport transition state: #{inspect(statuses)}")
+      end
+
     if System.get_env(@test_manifest_env) do
       expected_log_file = Path.join(System.fetch_env!("TMPDIR"), "symphony.log")
       assert System.fetch_env!("SYMPHONY_FIXTURE_LOG_FILE") == expected_log_file
@@ -82,7 +89,7 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
 
     evidence = compatibility["fixtureEvidence"]
     assert evidence["sourceSha256"] =~ @sha256_regex
-    assert evidence["testCount"] == 55
+    assert evidence["testCount"] == expected_test_count
 
     assert evidence["dependencyCommand"] == [
              "mise",
@@ -108,7 +115,6 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
     assert evidence["artifactBundleSha256"] =~ @sha256_regex
     assert evidence["schemaBundleSha256"] =~ @sha256_regex
     assert evidence["matrixSha256"] =~ @sha256_regex
-    assert compatibility["transportConformance"] == "not_run"
     assert compatibility["runtimeCapabilities"] == "not_run"
 
     assert {:ok, matrix} = SchemaBundle.matrix()

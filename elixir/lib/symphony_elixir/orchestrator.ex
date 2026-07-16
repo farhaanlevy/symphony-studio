@@ -1,3 +1,6 @@
+# Downstream modification notice (2026-07-15): Symphony Studio preserves typed
+# App Server blockers across worker exit and gates dispatch through a durable,
+# identity-bound protocol compatibility circuit.
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
   Polls Linear and dispatches repository copies to Codex-backed workers.
@@ -8,10 +11,27 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Codex.{CompatibilityCircuit, TransportError}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @transport_blocker_events [
+    :app_server_protocol_failure,
+    :process_cleanup_failed,
+    :uncertain_external_outcome
+  ]
+  @protocol_failure_kinds [
+    :duplicate_response_id,
+    :frame_too_large,
+    :inbound_state_overflow,
+    :invalid_json_rpc_frame,
+    :malformed_json,
+    :stdout_contamination,
+    :truncated_frame,
+    :unexpected_response_id
+  ]
+  @compatibility_circuit_error "codex App Server compatibility circuit is open for the pinned identity"
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -33,6 +53,9 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :compatibility_manifest_path,
+      :compatibility_schema_version,
+      :compatibility_circuit,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -50,7 +73,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
 
@@ -62,10 +85,15 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      compatibility_manifest_path: Keyword.get(opts, :compatibility_manifest_path),
+      compatibility_schema_version: Keyword.get(opts, :compatibility_schema_version),
+      compatibility_circuit: nil
     }
 
-    run_terminal_workspace_cleanup()
+    state = refresh_compatibility_circuit(state)
+
+    run_terminal_workspace_cleanup_if_valid()
     state = schedule_tick(state, 0)
 
     {:ok, state}
@@ -132,7 +160,9 @@ defmodule SymphonyElixir.Orchestrator do
 
         state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
 
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+        exit_category = agent_exit_category(reason)
+
+        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} exit_category=#{exit_category}")
 
         notify_dashboard()
         {:noreply, state}
@@ -158,11 +188,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(
         {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
-        %{running: running} = state
+        %State{} = state
       ) do
+    state = maybe_trip_compatibility_circuit(state, update)
+    running = state.running
+
     case Map.get(running, issue_id) do
       nil ->
-        {:noreply, state}
+        next_state = integrate_late_transport_blocker(state, issue_id, update)
+        notify_dashboard()
+        {:noreply, next_state}
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
@@ -180,6 +215,8 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
+    state = refresh_compatibility_circuit(state)
+
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
         {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
@@ -193,7 +230,7 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
   def handle_info(msg, state) do
-    Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
+    Logger.debug("Orchestrator ignored message_category=#{message_category(msg)}")
     {:noreply, state}
   end
 
@@ -216,15 +253,35 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
-    else
-      retry_agent_down(state, issue_id, running_entry, session_id, reason)
+    cond do
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
+
+      app_server_session_started?(running_entry) ->
+        timestamp = DateTime.utc_now()
+
+        uncertain_entry = %{
+          running_entry
+          | last_codex_event: :uncertain_external_outcome,
+            last_codex_timestamp: timestamp
+        }
+
+        block_input_required_agent_down(
+          state,
+          issue_id,
+          uncertain_entry,
+          session_id,
+          :uncertain_external_outcome
+        )
+
+      true ->
+        retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
   end
 
   defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do
-    error = blocker_error(running_entry, "agent exited: #{inspect(reason)}")
+    exit_category = agent_exit_category(reason)
+    error = blocker_error(running_entry, "agent exited: #{exit_category}")
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
@@ -232,71 +289,90 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+    exit_category = agent_exit_category(reason)
+
+    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} exit_category=#{exit_category}; scheduling retry")
 
     next_attempt = next_retry_attempt_from_running(running_entry)
 
     schedule_issue_retry(state, issue_id, next_attempt, %{
       identifier: running_entry.identifier,
       issue_url: running_entry.issue.url,
-      error: "agent exited: #{inspect(reason)}",
+      error: "agent exited: #{exit_category}",
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path)
     })
   end
 
   defp maybe_dispatch(%State{} = state) do
-    state =
-      state
-      |> reconcile_running_issues()
-      |> reconcile_blocked_issues()
+    state = refresh_compatibility_circuit(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
-    else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
+    case Config.validate!() do
+      :ok ->
+        state =
+          state
+          |> reconcile_running_issues()
+          |> reconcile_blocked_issues()
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
+        with false <- compatibility_circuit_open?(state),
+             {:ok, issues} <- Tracker.fetch_candidate_issues(),
+             true <- available_slots(state) > 0 do
+          choose_issues(issues, state)
+        else
+          result -> dispatch_failure(state, result)
+        end
 
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
-        state
-
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
-        state
-
-      {:error, {:invalid_workflow_config, message}} ->
-        Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
-
-      {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
-        state
+      result ->
+        dispatch_failure(state, result)
     end
+  end
+
+  defp dispatch_failure(state, true), do: state
+  defp dispatch_failure(state, false), do: state
+
+  defp dispatch_failure(state, {:error, :missing_linear_api_token}) do
+    Logger.error("Linear API token missing in WORKFLOW.md")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, :missing_linear_project_slug}) do
+    Logger.error("Linear project slug missing in WORKFLOW.md")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, :missing_tracker_kind}) do
+    Logger.error("Tracker kind missing in WORKFLOW.md")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, {:unsupported_tracker_kind, kind}}) do
+    Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, {:invalid_workflow_config, message}}) do
+    Logger.error("Invalid WORKFLOW.md config: #{message}")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, {:missing_workflow_file, path, reason}}) do
+    Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, :workflow_front_matter_not_a_map}) do
+    Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, {:workflow_parse_error, reason}}) do
+    Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+    state
+  end
+
+  defp dispatch_failure(state, {:error, reason}) do
+    Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
+    state
   end
 
   defp reconcile_running_issues(%State{} = state) do
@@ -602,33 +678,72 @@ defmodule SymphonyElixir.Orchestrator do
     elapsed_ms = stall_elapsed_ms(running_entry, now)
 
     if is_integer(elapsed_ms) and elapsed_ms > timeout_ms do
-      identifier = Map.get(running_entry, :identifier, issue_id)
-      session_id = running_entry_session_id(running_entry)
-
-      if input_required_blocker?(running_entry) do
-        error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
-
-        Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
-
-        state
-        |> record_session_completion_totals(running_entry)
-        |> stop_and_block_issue(issue_id, running_entry, error)
-      else
-        Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
-
-        next_attempt = next_retry_attempt_from_running(running_entry)
-
-        state
-        |> terminate_running_issue(issue_id, false)
-        |> schedule_issue_retry(issue_id, next_attempt, %{
-          identifier: identifier,
-          issue_url: running_entry.issue.url,
-          error: "stalled for #{elapsed_ms}ms without codex activity"
-        })
-      end
+      handle_stalled_issue(state, issue_id, running_entry, now, elapsed_ms)
     else
       state
     end
+  end
+
+  defp handle_stalled_issue(state, issue_id, running_entry, now, elapsed_ms) do
+    cond do
+      input_required_blocker?(running_entry) ->
+        block_stalled_input_required_issue(state, issue_id, running_entry, elapsed_ms)
+
+      app_server_session_started?(running_entry) ->
+        block_stalled_app_server_issue(state, issue_id, running_entry, now, elapsed_ms)
+
+      true ->
+        retry_stalled_issue(state, issue_id, running_entry, elapsed_ms)
+    end
+  end
+
+  defp block_stalled_input_required_issue(state, issue_id, running_entry, elapsed_ms) do
+    error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
+    log_stalled_block(issue_id, running_entry, elapsed_ms, error)
+
+    state
+    |> record_session_completion_totals(running_entry)
+    |> stop_and_block_issue(issue_id, running_entry, error)
+  end
+
+  defp block_stalled_app_server_issue(state, issue_id, running_entry, now, elapsed_ms) do
+    error = "codex App Server session stalled with an uncertain external outcome; reconciliation required"
+
+    uncertain_entry = %{
+      running_entry
+      | last_codex_event: :uncertain_external_outcome,
+        last_codex_timestamp: now
+    }
+
+    log_stalled_block(issue_id, uncertain_entry, elapsed_ms, error)
+
+    state
+    |> record_session_completion_totals(uncertain_entry)
+    |> stop_and_block_issue(issue_id, uncertain_entry, error)
+  end
+
+  defp log_stalled_block(issue_id, running_entry, elapsed_ms, error) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    session_id = running_entry_session_id(running_entry)
+
+    Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
+  end
+
+  defp retry_stalled_issue(state, issue_id, running_entry, elapsed_ms) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    session_id = running_entry_session_id(running_entry)
+
+    Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
+
+    next_attempt = next_retry_attempt_from_running(running_entry)
+
+    state
+    |> terminate_running_issue(issue_id, false)
+    |> schedule_issue_retry(issue_id, next_attempt, %{
+      identifier: identifier,
+      issue_url: running_entry.issue.url,
+      error: "stalled for #{elapsed_ms}ms without codex activity"
+    })
   end
 
   defp stall_elapsed_ms(running_entry, now) do
@@ -649,8 +764,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp last_activity_timestamp(_running_entry), do: nil
 
+  defp app_server_session_started?(running_entry) when is_map(running_entry) do
+    value = Map.get(running_entry, :codex_app_server_pid)
+    (is_binary(value) and value != "") or is_integer(value)
+  end
+
+  defp app_server_session_started?(_running_entry), do: false
+
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
+    Map.get(running_entry, :last_codex_event) in [
+      :turn_input_required,
+      :approval_required,
+      :app_server_protocol_failure,
+      :process_cleanup_failed,
+      :uncertain_external_outcome
+    ] or
       not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
       codex_message_method(Map.get(running_entry, :last_codex_message)) ==
         "mcpServer/elicitation/request"
@@ -691,6 +819,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp codex_event_blocker_error(:turn_input_required), do: "codex turn requires operator input"
   defp codex_event_blocker_error(:approval_required), do: "codex turn requires approval"
+
+  defp codex_event_blocker_error(:uncertain_external_outcome),
+    do: "codex operation has an uncertain external outcome and requires reconciliation"
+
+  defp codex_event_blocker_error(:process_cleanup_failed),
+    do: "codex process cleanup failed and requires operator reconciliation"
+
+  defp codex_event_blocker_error(:app_server_protocol_failure),
+    do: "codex App Server protocol failed and requires compatibility reconciliation"
+
   defp codex_event_blocker_error(_event), do: nil
 
   defp completion_blocker_error(completion) do
@@ -754,17 +892,260 @@ defmodule SymphonyElixir.Orchestrator do
       blocked_at: DateTime.utc_now(),
       last_codex_message: Map.get(running_entry, :last_codex_message),
       last_codex_event: Map.get(running_entry, :last_codex_event),
-      last_codex_timestamp: Map.get(running_entry, :last_codex_timestamp)
+      last_codex_timestamp: Map.get(running_entry, :last_codex_timestamp),
+      compatibility_circuit_block?: Map.get(running_entry, :compatibility_circuit_block?, false)
     }
 
     %{
       state
       | running: Map.delete(state.running, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        completed: MapSet.delete(state.completed, issue_id),
         claimed: MapSet.put(state.claimed, issue_id),
         blocked: Map.put(state.blocked, issue_id, blocked_entry)
     }
   end
+
+  defp integrate_late_transport_blocker(%State{} = state, issue_id, %{event: event} = update)
+       when event in @transport_blocker_events do
+    case {Map.get(state.blocked, issue_id), Map.get(state.retry_attempts, issue_id)} do
+      {%{} = blocked_entry, _retry_entry} ->
+        error = codex_event_blocker_error(event) || Map.get(blocked_entry, :error)
+
+        updated_entry = %{
+          blocked_entry
+          | error: error,
+            last_codex_event: event,
+            last_codex_timestamp: update.timestamp,
+            last_codex_message: summarize_codex_update(update),
+            compatibility_circuit_block?: false
+        }
+
+        %{state | blocked: Map.put(state.blocked, issue_id, updated_entry)}
+
+      {nil, %{} = retry_entry} ->
+        block_retry_entry(
+          state,
+          issue_id,
+          retry_entry,
+          event,
+          update.timestamp,
+          summarize_codex_update(update),
+          false
+        )
+
+      {nil, nil} ->
+        state
+    end
+  end
+
+  defp integrate_late_transport_blocker(%State{} = state, _issue_id, _update), do: state
+
+  defp block_retry_entry(
+         state,
+         issue_id,
+         retry_entry,
+         event,
+         timestamp,
+         last_message,
+         compatibility_circuit_block?
+       ) do
+    cancel_retry_timer(retry_entry)
+
+    identifier = Map.get(retry_entry, :identifier) || issue_id
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: identifier,
+      url: Map.get(retry_entry, :issue_url)
+    }
+
+    blocked_entry = %{
+      issue_id: issue_id,
+      identifier: identifier,
+      issue: issue,
+      worker_host: Map.get(retry_entry, :worker_host),
+      workspace_path: Map.get(retry_entry, :workspace_path),
+      session_id: "n/a",
+      error: codex_event_blocker_error(event) || @compatibility_circuit_error,
+      blocked_at: DateTime.utc_now(),
+      last_codex_message: last_message,
+      last_codex_event: event,
+      last_codex_timestamp: timestamp,
+      compatibility_circuit_block?: compatibility_circuit_block?
+    }
+
+    %{
+      state
+      | retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        completed: MapSet.delete(state.completed, issue_id),
+        claimed: MapSet.put(state.claimed, issue_id),
+        blocked: Map.put(state.blocked, issue_id, blocked_entry)
+    }
+  end
+
+  defp block_retry_metadata_for_circuit(state, issue_id, metadata) do
+    retry_entry = %{
+      identifier: metadata[:identifier],
+      issue_url: metadata[:issue_url],
+      worker_host: metadata[:worker_host],
+      workspace_path: metadata[:workspace_path]
+    }
+
+    block_retry_entry(
+      state,
+      issue_id,
+      retry_entry,
+      :app_server_protocol_failure,
+      DateTime.utc_now(),
+      nil,
+      true
+    )
+  end
+
+  defp block_undispatched_issue_for_circuit(%State{} = state, %Issue{} = issue) do
+    running_entry = %{
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: nil,
+      workspace_path: nil,
+      session_id: "n/a",
+      last_codex_message: nil,
+      last_codex_event: :app_server_protocol_failure,
+      last_codex_timestamp: DateTime.utc_now(),
+      compatibility_circuit_block?: true
+    }
+
+    block_issue_from_entry(state, issue.id, running_entry, @compatibility_circuit_error)
+  end
+
+  defp cancel_retry_timer(retry_entry) do
+    case Map.get(retry_entry, :timer_ref) do
+      timer_ref when is_reference(timer_ref) ->
+        Process.cancel_timer(timer_ref)
+        :ok
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp maybe_trip_compatibility_circuit(%State{} = state, update) do
+    if protocol_failure_update?(update) do
+      state
+      |> trip_compatibility_circuit()
+      |> block_pending_retries_for_circuit()
+    else
+      state
+    end
+  end
+
+  defp trip_compatibility_circuit(%State{} = state) do
+    workspace_root = Config.settings!().workspace.root
+
+    case CompatibilityCircuit.trip(workspace_root, compatibility_circuit_opts(state)) do
+      {:ok, marker} ->
+        %{state | compatibility_circuit: marker}
+
+      {:error, failure_category} ->
+        Logger.error("Unable to persist App Server compatibility circuit failure_category=#{failure_category}")
+        %{state | compatibility_circuit: %{kind: :marker_persistence_failed}}
+    end
+  end
+
+  defp refresh_compatibility_circuit(%State{compatibility_circuit: %{kind: :marker_persistence_failed}} = state) do
+    state
+  end
+
+  defp refresh_compatibility_circuit(%State{} = state) do
+    workspace_root = Config.settings!().workspace.root
+
+    case CompatibilityCircuit.status(workspace_root, compatibility_circuit_opts(state)) do
+      :clear -> state
+      :cleared -> release_compatibility_circuit_blocks(%{state | compatibility_circuit: nil})
+      {:open, marker} -> %{state | compatibility_circuit: marker}
+    end
+  end
+
+  defp compatibility_circuit_opts(state) do
+    []
+    |> maybe_put_circuit_option(:manifest_path, state.compatibility_manifest_path)
+    |> maybe_put_circuit_option(:schema_version, state.compatibility_schema_version)
+  end
+
+  defp maybe_put_circuit_option(opts, _key, nil), do: opts
+  defp maybe_put_circuit_option(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp compatibility_circuit_open?(%State{compatibility_circuit: nil}), do: false
+  defp compatibility_circuit_open?(%State{}), do: true
+
+  defp block_pending_retries_for_circuit(%State{} = state) do
+    Enum.reduce(state.retry_attempts, state, fn {issue_id, retry_entry}, state_acc ->
+      block_retry_entry(
+        state_acc,
+        issue_id,
+        retry_entry,
+        :app_server_protocol_failure,
+        DateTime.utc_now(),
+        nil,
+        true
+      )
+    end)
+  end
+
+  defp release_compatibility_circuit_blocks(%State{} = state) do
+    releasable_ids =
+      state.blocked
+      |> Enum.flat_map(fn
+        {issue_id, %{compatibility_circuit_block?: true}} -> [issue_id]
+        _entry -> []
+      end)
+
+    Enum.reduce(releasable_ids, state, fn issue_id, state_acc ->
+      %{
+        state_acc
+        | blocked: Map.delete(state_acc.blocked, issue_id),
+          claimed: MapSet.delete(state_acc.claimed, issue_id),
+          completed: MapSet.delete(state_acc.completed, issue_id)
+      }
+    end)
+  end
+
+  defp protocol_failure_update?(%{event: :app_server_protocol_failure}), do: true
+
+  defp protocol_failure_update?(%{event: :uncertain_external_outcome, reason: reason}) do
+    protocol_failure_reason?(reason, 0)
+  end
+
+  defp protocol_failure_update?(%{reason: reason}) do
+    protocol_failure_reason?(reason, 0)
+  end
+
+  defp protocol_failure_update?(_update), do: false
+
+  defp protocol_failure_reason?(_reason, depth) when depth > 4, do: false
+
+  defp protocol_failure_reason?(%TransportError{kind: kind, details: details}, depth) do
+    kind in @protocol_failure_kinds or
+      protocol_failure_reason?(Map.get(details, :cause) || Map.get(details, "cause"), depth + 1)
+  end
+
+  defp protocol_failure_reason?(reason, depth) when is_map(reason) do
+    kind = Map.get(reason, :kind) || Map.get(reason, "kind")
+
+    protocol_failure_kind?(kind) or
+      protocol_failure_reason?(Map.get(reason, :cause) || Map.get(reason, "cause"), depth + 1)
+  end
+
+  defp protocol_failure_reason?(_reason, _depth), do: false
+
+  defp protocol_failure_kind?(kind) when kind in @protocol_failure_kinds, do: true
+
+  defp protocol_failure_kind?(kind) when is_binary(kind) do
+    kind in Enum.map(@protocol_failure_kinds, &Atom.to_string/1)
+  end
+
+  defp protocol_failure_kind?(_kind), do: false
 
   defp choose_issues(issues, state) do
     active_states = active_state_set()
@@ -807,7 +1188,8 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
-    candidate_issue?(issue, active_states, terminal_states) and
+    not compatibility_circuit_open?(state) and
+      candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
@@ -927,14 +1309,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+    state = refresh_compatibility_circuit(state)
     recipient = self()
 
-    case select_worker_host(state, preferred_worker_host) do
-      :no_worker_capacity ->
+    case {compatibility_circuit_open?(state), select_worker_host(state, preferred_worker_host)} do
+      {true, _worker_host} ->
+        block_undispatched_issue_for_circuit(state, issue)
+
+      {false, :no_worker_capacity} ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
         state
 
-      worker_host ->
+      {false, worker_host} ->
         spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
     end
   end
@@ -980,13 +1366,15 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       {:error, reason} ->
-        Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+        failure_category = task_start_failure_category(reason)
+
+        Logger.error("Unable to spawn agent for #{issue_context(issue)} failure_category=#{failure_category}")
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
           identifier: issue.identifier,
           issue_url: issue.url,
-          error: "failed to spawn agent: #{inspect(reason)}",
+          error: "failed to spawn agent: #{failure_category}",
           worker_host: worker_host
         })
     end
@@ -1022,6 +1410,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
+    if compatibility_circuit_open?(state) do
+      block_retry_metadata_for_circuit(state, issue_id, metadata)
+    else
+      do_schedule_issue_retry(state, issue_id, attempt, metadata)
+    end
+  end
+
+  defp do_schedule_issue_retry(%State{} = state, issue_id, attempt, metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
     delay_ms = retry_delay(next_attempt, metadata)
@@ -1080,6 +1476,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
+    state = refresh_compatibility_circuit(state)
+
+    case Config.validate!() do
+      :ok ->
+        if compatibility_circuit_open?(state) do
+          {:noreply, block_retry_metadata_for_circuit(state, issue_id, metadata)}
+        else
+          do_handle_retry_issue(state, issue_id, attempt, metadata)
+        end
+
+      {:error, _reason} ->
+        Logger.warning("Retry deferred for issue_id=#{issue_id}; workflow validation failed")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue_id,
+           attempt,
+           Map.put(metadata, :error, "workflow validation failed")
+         )}
+    end
+  end
+
+  defp do_handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
     case Tracker.fetch_candidate_issues() do
       {:ok, issues} ->
         issues
@@ -1087,14 +1507,16 @@ defmodule SymphonyElixir.Orchestrator do
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
 
       {:error, reason} ->
-        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+        failure_category = retry_lookup_failure_category(reason)
+
+        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id} failure_category=#{failure_category}")
 
         {:noreply,
          schedule_issue_retry(
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{error: "retry poll failed: #{failure_category}"})
          )}
     end
   end
@@ -1155,11 +1577,31 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp run_terminal_workspace_cleanup_if_valid do
+    case Config.validate!() do
+      :ok ->
+        run_terminal_workspace_cleanup()
+
+      {:error, _reason} ->
+        Logger.warning("Skipping startup terminal workspace cleanup because workflow validation failed")
+    end
+  end
+
   defp notify_dashboard do
     StatusDashboard.notify_update()
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
+    state = refresh_compatibility_circuit(state)
+
+    if compatibility_circuit_open?(state) do
+      {:noreply, block_undispatched_issue_for_circuit(state, issue)}
+    else
+      do_handle_active_retry(state, issue, attempt, metadata)
+    end
+  end
+
+  defp do_handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
@@ -1326,6 +1768,32 @@ defmodule SymphonyElixir.Orchestrator do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
+  defp agent_exit_category(:normal), do: :normal
+  defp agent_exit_category(:shutdown), do: :shutdown
+  defp agent_exit_category({:shutdown, _reason}), do: :shutdown
+  defp agent_exit_category(:killed), do: :killed
+  defp agent_exit_category(:kill), do: :killed
+  defp agent_exit_category(:noproc), do: :process_missing
+  defp agent_exit_category(:noconnection), do: :node_disconnected
+  defp agent_exit_category({kind, _reason}) when kind in [:error, :exit, :throw], do: :exception
+  defp agent_exit_category(_reason), do: :worker_failure
+
+  defp task_start_failure_category(:max_children), do: :capacity_exhausted
+  defp task_start_failure_category(:already_present), do: :already_present
+  defp task_start_failure_category(_reason), do: :task_start_failed
+
+  defp retry_lookup_failure_category(_reason), do: :tracker_lookup_failed
+
+  defp message_category(message) when is_tuple(message) and tuple_size(message) > 0 do
+    case elem(message, 0) do
+      tag when is_atom(tag) -> tag
+      _other -> :unclassified
+    end
+  end
+
+  defp message_category(message) when is_atom(message), do: message
+  defp message_category(_message), do: :unclassified
+
   defp available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
@@ -1434,6 +1902,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
+       compatibility_circuit: compatibility_circuit_snapshot(state.compatibility_circuit),
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1464,6 +1933,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp blocked_issue_url(%{issue: %Issue{url: url}}), do: url
   defp blocked_issue_url(_metadata), do: nil
+
+  defp compatibility_circuit_snapshot(nil), do: %{open?: false}
+
+  defp compatibility_circuit_snapshot(marker) when is_map(marker) do
+    %{
+      open?: true,
+      kind: Map.get(marker, :kind),
+      schema_version: Map.get(marker, :schema_version),
+      codex_version: Map.get(marker, :codex_version),
+      compatibility_manifest_sha256: Map.get(marker, :compatibility_manifest_sha256)
+    }
+  end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
@@ -1534,7 +2015,19 @@ defmodule SymphonyElixir.Orchestrator do
   defp summarize_codex_update(update) do
     %{
       event: update[:event],
-      message: update[:payload] || update[:raw],
+      message:
+        Map.take(update, [
+          :decision,
+          :method_category,
+          :operation,
+          :reason,
+          :request_id_type,
+          :request_kind,
+          :session_id,
+          :terminal,
+          :tool_kind,
+          :usage
+        ]),
       timestamp: update[:timestamp]
     }
   end

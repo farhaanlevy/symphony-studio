@@ -1,10 +1,20 @@
+# Downstream modification notice (2026-07-15): Symphony Studio exposes the
+# trusted SSH executable and argv separately for shell-free local launch.
 defmodule SymphonyElixir.SSH do
   @moduledoc false
 
   @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
+    with {:ok, [executable | args]} <- command_argv(host, command) do
+      {:ok, System.cmd(executable, args, opts)}
+    end
+  end
+
+  @doc "Returns the trusted local SSH executable and argument vector for a remote command."
+  @spec command_argv(String.t(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def command_argv(host, command) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
-      {:ok, System.cmd(executable, ssh_args(host, command), opts)}
+      {:ok, [executable | ssh_args(host, command)]}
     end
   end
 

@@ -66,6 +66,13 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def write_workflow_file!(path, overrides \\ []) do
+    overrides =
+      Keyword.put_new(
+        overrides,
+        :workspace_root,
+        Path.join(Path.dirname(Path.expand(path)), "workspaces")
+      )
+
     workflow = workflow_content(overrides)
     File.write!(path, workflow)
 
@@ -173,6 +180,9 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_sandbox_policy: nil,
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
+          codex_initialize_timeout_ms: 15_000,
+          codex_thread_start_timeout_ms: 30_000,
+          codex_turn_start_timeout_ms: 30_000,
           codex_stall_timeout_ms: 300_000,
           hook_after_create: nil,
           hook_before_run: nil,
@@ -211,6 +221,9 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
+    codex_initialize_timeout_ms = Keyword.get(config, :codex_initialize_timeout_ms)
+    codex_thread_start_timeout_ms = Keyword.get(config, :codex_thread_start_timeout_ms)
+    codex_turn_start_timeout_ms = Keyword.get(config, :codex_turn_start_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
@@ -253,6 +266,9 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
+        "  initialize_timeout_ms: #{yaml_value(codex_initialize_timeout_ms)}",
+        "  thread_start_timeout_ms: #{yaml_value(codex_thread_start_timeout_ms)}",
+        "  turn_start_timeout_ms: #{yaml_value(codex_turn_start_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),

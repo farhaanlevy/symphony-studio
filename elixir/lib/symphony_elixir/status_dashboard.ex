@@ -1108,6 +1108,15 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp humanize_codex_event(:turn_input_required, _message, _payload), do: "turn blocked: waiting for user input"
 
+  defp humanize_codex_event(:uncertain_external_outcome, _message, _payload),
+    do: "operation blocked: outcome requires reconciliation"
+
+  defp humanize_codex_event(:process_cleanup_failed, _message, _payload),
+    do: "process cleanup failed: operator reconciliation required"
+
+  defp humanize_codex_event(:app_server_protocol_failure, _message, _payload),
+    do: "App Server protocol failed: compatibility reconciliation required"
+
   defp humanize_codex_event(:approval_auto_approved, message, payload) do
     method =
       map_value(payload, ["method", :method]) ||

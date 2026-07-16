@@ -1,21 +1,61 @@
-# Downstream modification notice (2026-07-14): Symphony Studio keeps outbound
-# initialize/turn requests within the pinned Codex 0.144.3 generated contract.
+# Downstream modification notice (2026-07-15): Symphony Studio keeps outbound
+# requests within the pinned contract, launches local Codex without a shell,
+# applies method deadlines, and gates remote execution until Release 5.
 defmodule SymphonyElixir.Codex.AppServer do
   @moduledoc """
   Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
 
-  @initialize_id 1
-  @thread_start_id 2
-  @turn_start_id 3
-  @port_line_bytes 1_048_576
-  @max_stream_log_bytes 1_000
+  alias SymphonyElixir.Codex.{
+    Connection,
+    DynamicTool,
+    RequestPolicy,
+    SchemaBundle,
+    TransportError
+  }
+
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.PathSafety
+
+  @remote_workers_error {:unsupported_release_feature, :remote_workers, :release_5}
+
+  @public_event_detail_keys %{
+    approval_auto_declined: [:decision, :request_id_type, :request_kind],
+    approval_required: [:request_id_type, :request_kind],
+    notification: [:method_category],
+    other_message: [:message_category],
+    session_started: [:session_id],
+    startup_failed: [:reason],
+    tool_call_completed: [:request_id_type, :request_kind, :tool_kind],
+    tool_call_failed: [:request_id_type, :request_kind, :tool_kind],
+    turn_cancelled: [:terminal],
+    turn_completed: [:terminal],
+    turn_ended_with_error: [:reason, :session_id],
+    turn_failed: [:terminal],
+    turn_input_required: [:request_id_type, :request_kind],
+    uncertain_external_outcome: [:operation, :reason],
+    unsupported_tool_call: [:request_id_type, :request_kind, :tool_kind]
+  }
+
+  @public_event_metadata_keys [
+    :cleanup_scope,
+    :codex_app_server_pid,
+    :remote_cleanup_conformance,
+    :usage
+  ]
+
+  @base_child_environment ~w(
+    ALL_PROXY CODEX_HOME HOME HTTPS_PROXY HTTP_PROXY LANG LC_ALL LOGNAME NO_PROXY
+    PATH SHELL SSH_AUTH_SOCK SSL_CERT_DIR
+    SSL_CERT_FILE TMPDIR USER XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME
+    all_proxy http_proxy https_proxy no_proxy
+  )
 
   @type session :: %{
-          port: port(),
+          connection: pid(),
           metadata: map(),
           approval_policy: String.t() | map(),
           fail_closed_approval_requests: boolean(),
@@ -26,13 +66,26 @@ defmodule SymphonyElixir.Codex.AppServer do
           worker_host: String.t() | nil
         }
 
+  @type turn_error ::
+          TransportError.t()
+          | {:approval_required | :turn_input_required | :turn_failed | :turn_cancelled, map()}
+
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
     with {:ok, session} <- start_session(workspace, opts) do
       try do
-        run_turn(session, prompt, issue, opts)
-      after
-        stop_session(session)
+        result = run_turn(session, prompt, issue, opts)
+
+        case stop_session(session, result) do
+          :ok -> result
+          {:error, reason} -> {:error, reason}
+        end
+      catch
+        kind, reason ->
+          case stop_session(session) do
+            :ok -> :erlang.raise(kind, reason, __STACKTRACE__)
+            {:error, cleanup_reason} -> {:error, cleanup_reason}
+          end
       end
     end
   end
@@ -41,16 +94,21 @@ defmodule SymphonyElixir.Codex.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
-      metadata = port_metadata(port, worker_host)
+    with :ok <- validate_release_worker(worker_host),
+         {:ok, settings} <- Config.settings(),
+         :ok <- validate_release_worker_config(settings.worker),
+         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, settings.workspace.root),
+         {:ok, session_policies} <- session_policies(settings, expanded_workspace),
+         {:ok, command_argv} <- Config.codex_command_argv(settings.codex.command),
+         {:ok, connection} <-
+           start_connection(expanded_workspace, command_argv, settings.codex, opts) do
+      metadata = connection_metadata(connection, worker_host)
 
-      case do_start_session(port, expanded_workspace, session_policies) do
+      case do_start_session(connection, expanded_workspace, session_policies) do
         {:ok, thread_id} ->
           {:ok,
            %{
-             port: port,
+             connection: connection,
              metadata: metadata,
              approval_policy: session_policies.approval_policy,
              fail_closed_approval_requests: session_policies.approval_policy == "never",
@@ -62,16 +120,16 @@ defmodule SymphonyElixir.Codex.AppServer do
            }}
 
         {:error, reason} ->
-          stop_port(port)
-          {:error, reason}
+          close_failed_session_start(connection, reason)
       end
     end
   end
 
-  @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @spec run_turn(session(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, turn_error()}
   def run_turn(
         %{
-          port: port,
+          connection: connection,
           metadata: metadata,
           approval_policy: approval_policy,
           fail_closed_approval_requests: fail_closed_approval_requests,
@@ -90,9 +148,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    case start_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy) do
-      {:ok, turn_id} ->
-        session_id = "#{thread_id}-#{turn_id}"
+    case start_turn(connection, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy) do
+      {:ok, turn_id, _request_metadata} ->
+        session_id = public_session_id(thread_id, turn_id)
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
         emit_message(
@@ -106,7 +164,12 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, fail_closed_approval_requests) do
+        case await_turn_completion(
+               connection,
+               on_message,
+               tool_executor,
+               fail_closed_approval_requests
+             ) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -119,36 +182,63 @@ defmodule SymphonyElixir.Codex.AppServer do
              }}
 
           {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+            public_reason = public_error(reason)
+
+            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(public_reason)}")
 
             emit_message(
               on_message,
               :turn_ended_with_error,
               %{
                 session_id: session_id,
-                reason: reason
+                reason: public_reason
               },
               metadata
             )
+
+            maybe_emit_uncertain_outcome(on_message, reason, metadata)
 
             {:error, reason}
         end
 
       {:error, reason} ->
-        Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
-        emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
+        public_reason = public_error(reason)
+        Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(public_reason)}")
+        emit_message(on_message, :startup_failed, %{reason: public_reason}, metadata)
+        maybe_emit_uncertain_outcome(on_message, reason, metadata)
         {:error, reason}
     end
   end
 
-  @spec stop_session(session()) :: :ok
-  def stop_session(%{port: port}) when is_port(port) do
-    stop_port(port)
+  @spec stop_session(session()) :: :ok | {:error, TransportError.t()}
+  def stop_session(session), do: stop_session(session, nil)
+
+  @spec stop_session(session(), term()) :: :ok | {:error, TransportError.t()}
+
+  def stop_session(%{connection: connection}, {:error, %TransportError{} = error})
+      when is_pid(connection) do
+    Connection.close_with_error(connection, error)
   end
 
-  defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
+  def stop_session(%{connection: connection}, _result) when is_pid(connection) do
+    Connection.close(connection)
+  end
+
+  @spec close_failed_session_start(pid(), TransportError.t()) :: {:error, TransportError.t()}
+  defp close_failed_session_start(connection, %TransportError{} = reason) do
+    Connection.close_with_error(connection, reason)
+  end
+
+  defp validate_release_worker(nil), do: :ok
+  defp validate_release_worker(_worker_host), do: {:error, @remote_workers_error}
+
+  defp validate_release_worker_config(%{ssh_hosts: []}), do: :ok
+  defp validate_release_worker_config(_worker), do: {:error, @remote_workers_error}
+
+  defp validate_workspace_cwd(workspace, workspace_root)
+       when is_binary(workspace) and is_binary(workspace_root) do
     expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
+    expanded_root = Path.expand(workspace_root)
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
@@ -174,71 +264,47 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp validate_workspace_cwd(workspace, worker_host)
-       when is_binary(workspace) and is_binary(worker_host) do
-    cond do
-      String.trim(workspace) == "" ->
-        {:error, {:invalid_workspace_cwd, :empty_remote_workspace, worker_host}}
-
-      String.contains?(workspace, ["\n", "\r", <<0>>]) ->
-        {:error, {:invalid_workspace_cwd, :invalid_remote_workspace, worker_host, workspace}}
-
-      Path.type(workspace) != :absolute ->
-        {:error, {:invalid_workspace_cwd, :non_absolute_remote_workspace, worker_host, workspace}}
-
-      Path.expand(workspace) != workspace ->
-        {:error, {:invalid_workspace_cwd, :unnormalized_remote_workspace, worker_host, workspace}}
-
-      true ->
-        {:ok, workspace}
-    end
+  defp start_connection(workspace, command_argv, codex, opts) do
+    Connection.start(command_argv, connection_options(workspace, codex, opts))
   end
 
-  defp start_port(workspace, nil) do
-    executable = System.find_executable("bash")
-
-    if is_nil(executable) do
-      {:error, :bash_not_found}
-    else
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
-            cd: String.to_charlist(workspace),
-            line: @port_line_bytes
-          ]
-        )
-
-      {:ok, port}
-    end
-  end
-
-  defp start_port(workspace, worker_host) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace)
-    SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
-  end
-
-  defp remote_launch_command(workspace) when is_binary(workspace) do
+  defp connection_options(workspace, codex, opts) do
     [
-      "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
+      env: child_environment(),
+      kill_timeout_ms: codex.process_kill_timeout_ms,
+      max_frame_bytes: codex.max_frame_bytes,
+      metadata: worker_metadata(nil),
+      overload_backoff_base_ms: codex.overload_backoff_base_ms,
+      overload_backoff_max_ms: codex.overload_backoff_max_ms,
+      overload_max_attempts: codex.overload_max_attempts,
+      on_transport_failure: Keyword.get(opts, :on_transport_failure, fn _error -> :ok end),
+      stderr_tail_bytes: codex.stderr_tail_bytes
     ]
-    |> Enum.join(" && ")
+    |> Keyword.put(:cd, workspace)
   end
 
-  defp port_metadata(port, worker_host) when is_port(port) do
-    base_metadata =
-      case :erlang.port_info(port, :os_pid) do
-        {:os_pid, os_pid} ->
-          %{codex_app_server_pid: to_string(os_pid)}
+  defp child_environment do
+    extra = Application.get_env(:symphony_elixir, :codex_child_environment_allowlist, [])
 
-        _ ->
-          %{}
+    (@base_child_environment ++ extra)
+    |> Enum.uniq()
+    |> Enum.flat_map(fn name ->
+      case System.get_env(name) do
+        value when is_binary(value) -> [{name, value}]
+        nil -> []
       end
+    end)
+  end
+
+  defp worker_metadata(_host), do: %{cleanup_scope: :local_pid_namespace}
+
+  defp connection_metadata(connection, worker_host) when is_pid(connection) do
+    metadata = Connection.metadata(connection)
+
+    base_metadata =
+      metadata
+      |> Map.take([:cleanup_scope, :remote_cleanup_conformance])
+      |> maybe_put_codex_pid(metadata)
 
     case worker_host do
       host when is_binary(host) -> Map.put(base_metadata, :worker_host, host)
@@ -246,496 +312,567 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp send_initialize(port) do
-    payload = %{
-      "method" => "initialize",
-      "id" => @initialize_id,
-      "params" => %{
-        "capabilities" => %{
-          "experimentalApi" => true
-        },
-        "clientInfo" => %{
-          "name" => "symphony-orchestrator",
-          "title" => "Symphony Orchestrator",
-          "version" => "0.1.0"
-        }
+  defp maybe_put_codex_pid(metadata, %{target_pid: target_pid}) do
+    Map.put(metadata, :codex_app_server_pid, to_string(target_pid))
+  end
+
+  defp maybe_put_codex_pid(metadata, _connection_metadata), do: metadata
+
+  defp send_initialize(connection) do
+    params = %{
+      "capabilities" => %{
+        "experimentalApi" => true
+      },
+      "clientInfo" => %{
+        "name" => "symphony-orchestrator",
+        "title" => "Symphony Orchestrator",
+        "version" => "0.1.0"
       }
     }
 
-    send_message(port, payload)
-
-    with {:ok, _} <- await_response(port, @initialize_id) do
-      send_message(port, %{"method" => "initialized"})
-      :ok
+    case request(connection, "initialize", params) do
+      {:ok, _result, _metadata} -> Connection.notify(connection, "initialized")
+      other -> other
     end
   end
 
-  defp session_policies(workspace, nil) do
-    Config.codex_runtime_settings(workspace)
+  defp session_policies(settings, workspace) do
+    with {:ok, turn_sandbox_policy} <-
+           Schema.resolve_runtime_turn_sandbox_policy(settings, workspace) do
+      {:ok,
+       %{
+         approval_policy: settings.codex.approval_policy,
+         thread_sandbox: settings.codex.thread_sandbox,
+         turn_sandbox_policy: turn_sandbox_policy
+       }}
+    end
   end
 
-  defp session_policies(workspace, worker_host) when is_binary(worker_host) do
-    Config.codex_runtime_settings(workspace, remote: true)
-  end
-
-  defp do_start_session(port, workspace, session_policies) do
-    case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies)
+  defp do_start_session(connection, workspace, session_policies) do
+    case send_initialize(connection) do
+      :ok -> start_thread(connection, workspace, session_policies)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
-    send_message(port, %{
-      "method" => "thread/start",
-      "id" => @thread_start_id,
-      "params" => %{
-        "approvalPolicy" => approval_policy,
-        "sandbox" => thread_sandbox,
-        "cwd" => workspace,
-        "dynamicTools" => DynamicTool.tool_specs()
-      }
-    })
+  defp start_thread(connection, workspace, %{
+         approval_policy: approval_policy,
+         thread_sandbox: thread_sandbox
+       }) do
+    params = %{
+      "approvalPolicy" => approval_policy,
+      "sandbox" => thread_sandbox,
+      "cwd" => workspace,
+      "dynamicTools" => DynamicTool.tool_specs()
+    }
 
-    case await_response(port, @thread_start_id) do
-      {:ok, %{"thread" => thread_payload}} ->
-        case thread_payload do
-          %{"id" => thread_id} -> {:ok, thread_id}
-          _ -> {:error, {:invalid_thread_payload, thread_payload}}
-        end
+    case request(connection, "thread/start", params) do
+      {:ok, %{"thread" => %{"id" => thread_id}}, _metadata}
+      when is_binary(thread_id) and thread_id != "" ->
+        {:ok, thread_id}
+
+      {:ok, _invalid_result, request_metadata} ->
+        {:error, invalid_side_effect_response(request_metadata)}
 
       other ->
         other
     end
   end
 
-  defp start_turn(port, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
-        "threadId" => thread_id,
-        "input" => [
-          %{
-            "type" => "text",
-            "text" => prompt
-          }
-        ],
-        "cwd" => workspace,
-        "approvalPolicy" => approval_policy,
-        "sandboxPolicy" => turn_sandbox_policy
-      }
-    })
+  defp start_turn(connection, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy) do
+    params = %{
+      "threadId" => thread_id,
+      "input" => [
+        %{
+          "type" => "text",
+          "text" => prompt
+        }
+      ],
+      "cwd" => workspace,
+      "approvalPolicy" => approval_policy,
+      "sandboxPolicy" => turn_sandbox_policy
+    }
 
-    case await_response(port, @turn_start_id) do
-      {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
-      other -> other
+    case request(connection, "turn/start", params) do
+      {:ok, %{"turn" => %{"id" => turn_id}}, request_metadata}
+      when is_binary(turn_id) and turn_id != "" ->
+        {:ok, turn_id, request_metadata}
+
+      {:ok, _invalid_result, request_metadata} ->
+        {:error, invalid_side_effect_response(request_metadata)}
+
+      other ->
+        other
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, fail_closed_approval_requests) do
+  defp invalid_side_effect_response(request_metadata) when is_map(request_metadata) do
+    TransportError.new(:uncertain_external_outcome, %{
+      cause: %{
+        kind: :invalid_side_effect_response,
+        message: "Codex App Server returned an invalid side-effect response"
+      },
+      operation:
+        Map.take(request_metadata, [
+          :attempt,
+          :classification,
+          :method,
+          :request_hash,
+          :request_id,
+          :send_state
+        ]),
+      reconciliation_required: true,
+      schema_version: SchemaBundle.version()
+    })
+  end
+
+  defp request(connection, method, params) do
+    Connection.request(connection, method, params, Config.codex_request_timeout(method))
+  end
+
+  defp await_turn_completion(connection, on_message, tool_executor, fail_closed_approval_requests) do
+    deadline_ms = monotonic_ms() + Config.settings!().codex.turn_timeout_ms
+
     receive_loop(
-      port,
+      connection,
       on_message,
-      Config.settings!().codex.turn_timeout_ms,
-      "",
+      deadline_ms,
       tool_executor,
       fail_closed_approval_requests
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, fail_closed_approval_requests) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, fail_closed_approval_requests)
+  defp receive_loop(
+         connection,
+         on_message,
+         deadline_ms,
+         tool_executor,
+         fail_closed_approval_requests
+       ) do
+    remaining_ms = deadline_ms - monotonic_ms()
 
-      {^port, {:data, {:noeol, chunk}}} ->
-        receive_loop(
-          port,
-          on_message,
-          timeout_ms,
-          pending_line <> to_string(chunk),
-          tool_executor,
-          fail_closed_approval_requests
-        )
+    if remaining_ms <= 0 do
+      details =
+        connection
+        |> Connection.diagnostics()
+        |> Map.put(:phase, :turn)
 
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
-    after
-      timeout_ms ->
-        {:error, :turn_timeout}
+      {:error, TransportError.new(:request_timeout, details)}
+    else
+      case Connection.next_message_until(connection, deadline_ms) do
+        {:ok, %{payload: payload, raw: payload_string}} ->
+          handle_incoming(
+            connection,
+            on_message,
+            payload,
+            payload_string,
+            deadline_ms,
+            tool_executor,
+            fail_closed_approval_requests
+          )
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, fail_closed_approval_requests) do
-    payload_string = to_string(data)
+  defp handle_incoming(
+         connection,
+         on_message,
+         payload,
+         payload_string,
+         deadline_ms,
+         tool_executor,
+         fail_closed_approval_requests
+       ) do
+    case payload do
+      %{"method" => "turn/completed"} ->
+        emit_turn_event(on_message, :turn_completed, payload, payload_string, connection, payload)
 
-    case Jason.decode(payload_string) do
-      {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
+        case Connection.ack_terminal(connection, "turn/completed") do
+          :ok -> {:ok, :turn_completed}
+          {:error, reason} -> {:error, reason}
+        end
 
-      {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
+      %{"method" => "turn/failed", "params" => _} ->
         emit_turn_event(
           on_message,
           :turn_failed,
           payload,
           payload_string,
-          port,
+          connection,
           Map.get(payload, "params")
         )
 
-        {:error, {:turn_failed, Map.get(payload, "params")}}
+        terminal_error(connection, "turn/failed", :turn_failed)
 
-      {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
+      %{"method" => "turn/cancelled", "params" => _} ->
         emit_turn_event(
           on_message,
           :turn_cancelled,
           payload,
           payload_string,
-          port,
+          connection,
           Map.get(payload, "params")
         )
 
-        {:error, {:turn_cancelled, Map.get(payload, "params")}}
+        terminal_error(connection, "turn/cancelled", :turn_cancelled)
 
-      {:ok, %{"method" => method} = payload}
+      %{"method" => method}
       when is_binary(method) ->
         handle_turn_method(
-          port,
+          connection,
           on_message,
           payload,
           payload_string,
           method,
-          timeout_ms,
+          deadline_ms,
           tool_executor,
           fail_closed_approval_requests
         )
 
-      {:ok, payload} ->
+      payload ->
         emit_message(
           on_message,
           :other_message,
-          %{
-            payload: payload,
-            raw: payload_string
-          },
-          metadata_from_message(port, payload)
+          %{message_category: :unknown_envelope},
+          metadata_from_message(connection, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, fail_closed_approval_requests)
-
-      {:error, _reason} ->
-        log_non_json_stream_line(payload_string, "turn stream")
-
-        if protocol_message_candidate?(payload_string) do
-          emit_message(
-            on_message,
-            :malformed,
-            %{
-              payload: payload_string,
-              raw: payload_string
-            },
-            metadata_from_message(port, %{raw: payload_string})
-          )
-        end
-
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, fail_closed_approval_requests)
+        receive_loop(
+          connection,
+          on_message,
+          deadline_ms,
+          tool_executor,
+          fail_closed_approval_requests
+        )
     end
   end
 
-  defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
+  defp emit_turn_event(
+         on_message,
+         event,
+         payload,
+         _payload_string,
+         connection,
+         _payload_details
+       ) do
     emit_message(
       on_message,
       event,
-      %{
-        payload: payload,
-        raw: payload_string,
-        details: payload_details
-      },
-      metadata_from_message(port, payload)
+      %{terminal: event},
+      metadata_from_message(connection, payload)
     )
   end
 
   defp handle_turn_method(
-         port,
+         connection,
          on_message,
          payload,
-         payload_string,
+         _payload_string,
          method,
-         timeout_ms,
+         deadline_ms,
          tool_executor,
          fail_closed_approval_requests
        ) do
-    metadata = metadata_from_message(port, payload)
+    metadata = metadata_from_message(connection, payload)
+
+    bounded_tool_executor = fn tool_name, arguments ->
+      run_tool_with_deadline(
+        connection,
+        tool_executor,
+        tool_name,
+        arguments,
+        deadline_ms
+      )
+    end
+
+    approval_context = %{
+      connection: connection,
+      deadline_ms: deadline_ms,
+      fail_closed_approval_requests: fail_closed_approval_requests,
+      metadata: metadata,
+      on_message: on_message,
+      tool_executor: bounded_tool_executor
+    }
 
     case maybe_handle_approval_request(
-           port,
            method,
            payload,
-           payload_string,
-           on_message,
-           metadata,
-           tool_executor,
-           fail_closed_approval_requests
+           approval_context
          ) do
       :input_required ->
         emit_message(
           on_message,
           :turn_input_required,
-          %{payload: payload, raw: payload_string},
+          public_request_metadata(payload),
           metadata
         )
 
-        {:error, {:turn_input_required, payload}}
+        blocked_turn_error(connection, :turn_input_required, payload)
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, fail_closed_approval_requests)
+        receive_loop(
+          connection,
+          on_message,
+          deadline_ms,
+          tool_executor,
+          fail_closed_approval_requests
+        )
+
+      {:error, reason} ->
+        {:error, reason}
 
       :approval_required ->
         emit_message(
           on_message,
           :approval_required,
-          %{payload: payload, raw: payload_string},
+          public_request_metadata(payload),
           metadata
         )
 
-        {:error, {:approval_required, payload}}
+        blocked_turn_error(connection, :approval_required, payload)
 
       :unhandled ->
         if needs_input?(method, payload) do
           emit_message(
             on_message,
             :turn_input_required,
-            %{payload: payload, raw: payload_string},
+            public_request_metadata(payload),
             metadata
           )
 
-          {:error, {:turn_input_required, payload}}
+          blocked_turn_error(connection, :turn_input_required, payload)
         else
           emit_message(
             on_message,
             :notification,
-            %{
-              payload: payload,
-              raw: payload_string
-            },
+            %{method_category: notification_method_category(method)},
             metadata
           )
 
-          Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, fail_closed_approval_requests)
+          Logger.debug("Codex notification received category=#{notification_method_category(method)}")
+
+          receive_loop(
+            connection,
+            on_message,
+            deadline_ms,
+            tool_executor,
+            fail_closed_approval_requests
+          )
         end
     end
   end
 
   defp maybe_handle_approval_request(
-         port,
          "item/commandExecution/requestApproval",
          %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         fail_closed_approval_requests
+         context
        ) do
-    deny_or_require(
-      port,
-      id,
-      "decline",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      fail_closed_approval_requests
-    )
+    deny_or_require(id, "decline", payload, context)
   end
 
   defp maybe_handle_approval_request(
-         port,
          "item/tool/call",
          %{"id" => id, "params" => params} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         tool_executor,
-         _fail_closed_approval_requests
+         %{
+           connection: connection,
+           tool_executor: tool_executor
+         } = context
        ) do
     tool_name = tool_call_name(params)
     arguments = tool_call_arguments(params)
 
-    result =
-      tool_name
-      |> tool_executor.(arguments)
-      |> normalize_dynamic_tool_result()
+    case tool_executor.(tool_name, arguments) do
+      {:ok, result, deadline_ms, operation} ->
+        handle_tool_result(
+          connection,
+          id,
+          payload,
+          tool_name,
+          result,
+          deadline_ms,
+          operation,
+          context
+        )
 
-    send_message(port, %{
-      "id" => id,
-      "result" => Map.take(result, ["success", "contentItems"])
-    })
-
-    event =
-      case {result, supported_dynamic_tool?(tool_name)} do
-        {%{"success" => true}, _supported?} -> :tool_call_completed
-        {_result, false} -> :unsupported_tool_call
-        {_result, true} -> :tool_call_failed
-      end
-
-    emit_message(on_message, event, %{payload: payload, raw: payload_string}, metadata)
-
-    :approved
+      {:error, %TransportError{} = error} ->
+        {:error, error}
+    end
   end
 
   defp maybe_handle_approval_request(
-         port,
          "execCommandApproval",
          %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         fail_closed_approval_requests
+         context
        ) do
-    deny_or_require(
-      port,
-      id,
-      "denied",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      fail_closed_approval_requests
-    )
+    deny_or_require(id, "denied", payload, context)
   end
 
   defp maybe_handle_approval_request(
-         port,
          "applyPatchApproval",
          %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         fail_closed_approval_requests
+         context
        ) do
-    deny_or_require(
-      port,
-      id,
-      "denied",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      fail_closed_approval_requests
-    )
+    deny_or_require(id, "denied", payload, context)
   end
 
   defp maybe_handle_approval_request(
-         port,
          "item/fileChange/requestApproval",
          %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         fail_closed_approval_requests
+         context
        ) do
-    deny_or_require(
-      port,
-      id,
-      "decline",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      fail_closed_approval_requests
-    )
+    deny_or_require(id, "decline", payload, context)
   end
 
   defp maybe_handle_approval_request(
-         _port,
          "item/tool/requestUserInput",
          %{"id" => _id, "params" => _params},
-         _payload_string,
-         _on_message,
-         _metadata,
-         _tool_executor,
-         _fail_closed_approval_requests
+         _context
        ) do
     :input_required
   end
 
   defp maybe_handle_approval_request(
-         port,
          "item/permissions/requestApproval",
          %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         true
+         %{
+           connection: connection,
+           deadline_ms: deadline_ms,
+           fail_closed_approval_requests: true,
+           metadata: metadata,
+           on_message: on_message
+         }
        ) do
     result = %{"permissions" => %{}, "scope" => "turn"}
-    send_message(port, %{"id" => id, "result" => result})
 
-    emit_message(
-      on_message,
-      :approval_auto_declined,
-      %{payload: payload, raw: payload_string, decision: "no permissions granted"},
-      metadata
-    )
+    case Connection.respond_until(connection, id, result, deadline_ms) do
+      :ok ->
+        emit_message(
+          on_message,
+          :approval_auto_declined,
+          payload
+          |> public_request_metadata()
+          |> Map.put(:decision, :no_permissions_granted),
+          metadata
+        )
 
-    :approved
+        :approved
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp maybe_handle_approval_request(
-         _port,
          "item/permissions/requestApproval",
          %{"id" => _id},
-         _payload_string,
-         _on_message,
-         _metadata,
-         _tool_executor,
-         false
+         %{fail_closed_approval_requests: false}
        ) do
     :approval_required
   end
 
   defp maybe_handle_approval_request(
-         port,
          "mcpServer/elicitation/request",
          %{"id" => id} = payload,
-         payload_string,
-         on_message,
-         metadata,
-         _tool_executor,
-         true
+         %{
+           connection: connection,
+           deadline_ms: deadline_ms,
+           fail_closed_approval_requests: true,
+           metadata: metadata,
+           on_message: on_message
+         }
        ) do
-    send_message(port, %{"id" => id, "result" => %{"action" => "decline"}})
+    case Connection.respond_until(connection, id, %{"action" => "decline"}, deadline_ms) do
+      :ok ->
+        emit_message(
+          on_message,
+          :approval_auto_declined,
+          payload
+          |> public_request_metadata()
+          |> Map.put(:decision, :decline),
+          metadata
+        )
 
-    emit_message(
-      on_message,
-      :approval_auto_declined,
-      %{payload: payload, raw: payload_string, decision: "decline"},
-      metadata
-    )
+        :approved
 
-    :approved
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
-  defp maybe_handle_approval_request(
-         _port,
-         _method,
-         _payload,
-         _payload_string,
-         _on_message,
-         _metadata,
-         _tool_executor,
-         _fail_closed_approval_requests
-       ) do
+  defp maybe_handle_approval_request(_method, _payload, _context) do
     :unhandled
   end
+
+  defp handle_tool_result(
+         connection,
+         id,
+         payload,
+         tool_name,
+         result,
+         deadline_ms,
+         operation,
+         context
+       ) do
+    if monotonic_ms() >= deadline_ms do
+      {:error, uncertain_tool_response_deadline(Connection.diagnostics(connection), operation)}
+    else
+      respond_with_tool_result(
+        connection,
+        id,
+        payload,
+        tool_name,
+        result,
+        deadline_ms,
+        operation,
+        context
+      )
+    end
+  end
+
+  defp respond_with_tool_result(
+         connection,
+         id,
+         payload,
+         tool_name,
+         result,
+         deadline_ms,
+         operation,
+         %{metadata: metadata, on_message: on_message}
+       ) do
+    response = Map.take(result, ["success", "contentItems"])
+
+    case Connection.respond_until(connection, id, response, deadline_ms) do
+      :ok ->
+        emit_tool_result(on_message, metadata, payload, tool_name, result)
+        :approved
+
+      {:error, reason} ->
+        {:error,
+         uncertain_tool_response_failure(
+           Connection.diagnostics(connection),
+           operation,
+           reason
+         )}
+    end
+  end
+
+  defp emit_tool_result(on_message, metadata, payload, tool_name, result) do
+    event = tool_result_event(result, supported_dynamic_tool?(tool_name))
+
+    event_details =
+      payload
+      |> public_request_metadata()
+      |> Map.put(:tool_kind, public_tool_kind(tool_name))
+
+    emit_message(on_message, event, event_details, metadata)
+  end
+
+  defp tool_result_event(%{"success" => true}, _supported?), do: :tool_call_completed
+  defp tool_result_event(_result, false), do: :unsupported_tool_call
+  defp tool_result_event(_result, true), do: :tool_call_failed
 
   defp normalize_dynamic_tool_result(%{} = original_result) do
     result = normalize_dynamic_tool_result_keys(original_result)
@@ -836,136 +973,441 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp deny_or_require(
-         port,
          id,
          decision,
          payload,
-         payload_string,
-         on_message,
-         metadata,
-         true
+         %{
+           connection: connection,
+           deadline_ms: deadline_ms,
+           fail_closed_approval_requests: true,
+           metadata: metadata,
+           on_message: on_message
+         }
        ) do
-    send_message(port, %{"id" => id, "result" => %{"decision" => decision}})
+    case Connection.respond_until(connection, id, %{"decision" => decision}, deadline_ms) do
+      :ok ->
+        emit_message(
+          on_message,
+          :approval_auto_declined,
+          payload
+          |> public_request_metadata()
+          |> Map.put(:decision, public_decision(decision)),
+          metadata
+        )
 
-    emit_message(
-      on_message,
-      :approval_auto_declined,
-      %{payload: payload, raw: payload_string, decision: decision},
-      metadata
-    )
+        :approved
 
-    :approved
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
-  defp deny_or_require(
-         _port,
-         _id,
-         _decision,
-         _payload,
-         _payload_string,
-         _on_message,
-         _metadata,
-         false
-       ) do
+  defp deny_or_require(_id, _decision, _payload, %{fail_closed_approval_requests: false}) do
     :approval_required
-  end
-
-  defp await_response(port, request_id) do
-    with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
-  end
-
-  defp with_timeout_response(port, request_id, timeout_ms, pending_line) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-        handle_response(port, request_id, complete_line, timeout_ms)
-
-      {^port, {:data, {:noeol, chunk}}} ->
-        with_timeout_response(port, request_id, timeout_ms, pending_line <> to_string(chunk))
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
-    after
-      timeout_ms ->
-        {:error, :response_timeout}
-    end
-  end
-
-  defp handle_response(port, request_id, data, timeout_ms) do
-    payload = to_string(data)
-
-    case Jason.decode(payload) do
-      {:ok, %{"id" => ^request_id, "error" => error}} ->
-        {:error, {:response_error, error}}
-
-      {:ok, %{"id" => ^request_id, "result" => result}} ->
-        {:ok, result}
-
-      {:ok, %{"id" => ^request_id} = response_payload} ->
-        {:error, {:response_error, response_payload}}
-
-      {:ok, %{} = other} ->
-        Logger.debug("Ignoring message while waiting for response: #{inspect(other)}")
-        with_timeout_response(port, request_id, timeout_ms, "")
-
-      {:error, _} ->
-        log_non_json_stream_line(payload, "response stream")
-        with_timeout_response(port, request_id, timeout_ms, "")
-    end
-  end
-
-  defp log_non_json_stream_line(data, stream_label) do
-    text =
-      data
-      |> to_string()
-      |> String.trim()
-      |> String.slice(0, @max_stream_log_bytes)
-
-    if text != "" do
-      if String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) do
-        Logger.warning("Codex #{stream_label} output: #{text}")
-      else
-        Logger.debug("Codex #{stream_label} output: #{text}")
-      end
-    end
-  end
-
-  defp protocol_message_candidate?(data) do
-    data
-    |> to_string()
-    |> String.trim_leading()
-    |> String.starts_with?("{")
   end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
-  defp stop_port(port) when is_port(port) do
-    case :erlang.port_info(port) do
-      :undefined ->
-        :ok
-
-      _ ->
-        try do
-          Port.close(port)
-          :ok
-        rescue
-          ArgumentError ->
-            :ok
-        end
-    end
-  end
-
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
-    message = metadata |> Map.merge(details) |> Map.put(:event, event) |> Map.put(:timestamp, DateTime.utc_now())
+    message =
+      metadata
+      |> public_event_metadata()
+      |> Map.merge(public_event_details(event, details))
+      |> Map.put(:event, event)
+      |> Map.put(:timestamp, DateTime.utc_now())
+
     on_message.(message)
   end
 
-  defp metadata_from_message(port, payload) do
-    port |> port_metadata(nil) |> maybe_set_usage(payload)
+  defp maybe_emit_uncertain_outcome(
+         on_message,
+         %TransportError{kind: :uncertain_external_outcome} = reason,
+         metadata
+       ) do
+    emit_message(
+      on_message,
+      :uncertain_external_outcome,
+      %{reason: public_error(reason), operation: reason.details[:operation]},
+      metadata
+    )
   end
 
+  defp maybe_emit_uncertain_outcome(_on_message, _reason, _metadata), do: :ok
+
+  defp terminal_error(connection, method, kind) do
+    case Connection.ack_terminal(connection, method) do
+      :ok -> {:error, {kind, %{terminal: true}}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp blocked_turn_error(connection, kind, payload) do
+    case Connection.mark_turn_blocked(connection, kind) do
+      :ok -> {:error, {kind, public_request_metadata(payload)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec public_request_metadata(map()) :: map()
+  defp public_request_metadata(payload) when is_map(payload) do
+    %{
+      request_id_type: public_request_id_type(Map.get(payload, "id")),
+      request_kind: public_request_kind(Map.get(payload, "method"))
+    }
+  end
+
+  defp public_request_id_type(value) when is_integer(value), do: :integer
+  defp public_request_id_type(value) when is_binary(value), do: :string
+  defp public_request_id_type(nil), do: :absent
+  defp public_request_id_type(_value), do: :invalid
+
+  defp public_request_kind("mcpServer/elicitation/request"), do: :mcp_elicitation
+  defp public_request_kind("item/tool/requestUserInput"), do: :tool_user_input
+
+  defp public_request_kind(method) when is_binary(method) do
+    if String.starts_with?(method, "turn/"), do: :turn_request, else: :other_request
+  end
+
+  defp public_request_kind(_method), do: :unknown
+
+  @spec public_event_details(atom(), map()) :: map()
+  defp public_event_details(event, details) when is_map(details) do
+    Map.take(details, Map.get(@public_event_detail_keys, event, []))
+  end
+
+  defp public_event_metadata(metadata) when is_map(metadata) do
+    public_metadata =
+      metadata
+      |> Map.take(@public_event_metadata_keys)
+      |> Map.delete(:usage)
+
+    case public_usage(Map.get(metadata, :usage)) do
+      nil -> public_metadata
+      usage -> Map.put(public_metadata, :usage, usage)
+    end
+  end
+
+  defp public_event_metadata(_metadata), do: %{}
+
+  defp public_usage(usage) when is_map(usage) do
+    %{}
+    |> maybe_put_usage_count(
+      :input_tokens,
+      usage_count(usage, [
+        :input_tokens,
+        :prompt_tokens,
+        :inputTokens,
+        :promptTokens,
+        "input_tokens",
+        "prompt_tokens",
+        "inputTokens",
+        "promptTokens"
+      ])
+    )
+    |> maybe_put_usage_count(
+      :output_tokens,
+      usage_count(usage, [
+        :output_tokens,
+        :completion_tokens,
+        :outputTokens,
+        :completionTokens,
+        "output_tokens",
+        "completion_tokens",
+        "outputTokens",
+        "completionTokens"
+      ])
+    )
+    |> maybe_put_usage_count(
+      :total_tokens,
+      usage_count(usage, [
+        :total_tokens,
+        :totalTokens,
+        "total_tokens",
+        "totalTokens"
+      ])
+    )
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      counts -> counts
+    end
+  end
+
+  defp public_usage(_usage), do: nil
+
+  defp usage_count(usage, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(usage, key) do
+        value when is_integer(value) and value >= 0 -> value
+        _value -> nil
+      end
+    end)
+  end
+
+  defp maybe_put_usage_count(counts, _key, nil), do: counts
+  defp maybe_put_usage_count(counts, key, value), do: Map.put(counts, key, value)
+
+  defp public_tool_kind(tool_name) do
+    cond do
+      not is_binary(tool_name) -> :invalid
+      supported_dynamic_tool?(tool_name) -> :supported
+      true -> :unsupported
+    end
+  end
+
+  defp public_decision("decline"), do: :decline
+  defp public_decision("denied"), do: :denied
+  defp public_decision(_decision), do: :deny
+
+  defp public_session_id(thread_id, turn_id) do
+    digest =
+      :sha256
+      |> :crypto.hash([thread_id, <<0>>, turn_id])
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 24)
+
+    "session-#{digest}"
+  end
+
+  @spec notification_method_category(String.t()) :: :turn | :mcp | :other
+  defp notification_method_category(method)
+       when method in [
+              "turn/started",
+              "turn/completed",
+              "turn/failed",
+              "turn/cancelled",
+              "turn/input_required",
+              "turn/needs_input"
+            ],
+       do: :turn
+
+  defp notification_method_category("mcpServer/elicitation/request"), do: :mcp
+  defp notification_method_category(method) when is_binary(method), do: :other
+
+  @spec public_error(turn_error()) :: map()
+  defp public_error(%TransportError{} = error) do
+    %{kind: error.kind, message: error.message, details: error.details}
+  end
+
+  defp public_error({kind, _details}) when is_atom(kind), do: %{kind: kind}
+
+  defp run_tool_with_deadline(
+         connection,
+         tool_executor,
+         tool_name,
+         arguments,
+         deadline_ms
+       ) do
+    diagnostics = Connection.diagnostics(connection)
+
+    with {:ok, operation} <-
+           prepare_tool_operation(tool_name, arguments, deadline_ms, diagnostics) do
+      run_prepared_tool(
+        tool_executor,
+        tool_name,
+        arguments,
+        deadline_ms,
+        diagnostics,
+        operation
+      )
+    end
+  end
+
+  defp safe_tool_execution(tool_executor, tool_name, arguments) do
+    result =
+      tool_name
+      |> tool_executor.(arguments)
+      |> normalize_dynamic_tool_result()
+
+    {:ok, result}
+  rescue
+    _error -> {:error, :tool_execution_failed}
+  catch
+    _kind, _reason -> {:error, :tool_execution_failed}
+  end
+
+  defp prepare_tool_operation(tool_name, arguments, deadline_ms, diagnostics) do
+    remaining_ms = deadline_ms - monotonic_ms()
+
+    if remaining_ms <= 0 do
+      {:error, turn_deadline_error(diagnostics, :tool_preparation)}
+    else
+      parent = self()
+      token = make_ref()
+
+      {worker, monitor_ref} =
+        spawn_monitor(fn ->
+          operation = %{
+            classification: :conservative,
+            method: "item/tool/call",
+            request_hash:
+              RequestPolicy.canonical_hash("item/tool/call", %{
+                "arguments" => arguments,
+                "tool" => tool_name
+              }),
+            send_state: :prepared
+          }
+
+          send(parent, {token, operation})
+        end)
+
+      receive do
+        {^token, operation} when is_map(operation) ->
+          Process.demonitor(monitor_ref, [:flush])
+          {:ok, operation}
+
+        {:DOWN, ^monitor_ref, :process, ^worker, _reason} ->
+          {:error, tool_execution_error(diagnostics)}
+      after
+        remaining_ms ->
+          Process.exit(worker, :kill)
+          Process.demonitor(monitor_ref, [:flush])
+          {:error, turn_deadline_error(diagnostics, :tool_preparation)}
+      end
+    end
+  end
+
+  defp run_prepared_tool(
+         tool_executor,
+         tool_name,
+         arguments,
+         deadline_ms,
+         diagnostics,
+         operation
+       ) do
+    remaining_ms = deadline_ms - monotonic_ms()
+    parent = self()
+    token = make_ref()
+
+    if remaining_ms <= 0 do
+      {:error, turn_deadline_error(diagnostics, :tool_execution)}
+    else
+      sent_operation = Map.put(operation, :send_state, :sent)
+
+      {worker, monitor_ref} =
+        spawn_monitor(fn ->
+          result = safe_tool_execution(tool_executor, tool_name, arguments)
+          send(parent, {token, result})
+        end)
+
+      receive do
+        {^token, {:ok, result}} ->
+          Process.demonitor(monitor_ref, [:flush])
+
+          if monotonic_ms() < deadline_ms do
+            {:ok, result, deadline_ms, sent_operation}
+          else
+            {:error, uncertain_tool_timeout(diagnostics, sent_operation)}
+          end
+
+        {^token, {:error, :tool_execution_failed}} ->
+          Process.demonitor(monitor_ref, [:flush])
+          {:error, uncertain_tool_execution_failure(diagnostics, sent_operation)}
+
+        {:DOWN, ^monitor_ref, :process, ^worker, _reason} ->
+          {:error, uncertain_tool_execution_failure(diagnostics, sent_operation)}
+      after
+        remaining_ms ->
+          Process.exit(worker, :kill)
+          Process.demonitor(monitor_ref, [:flush])
+          {:error, uncertain_tool_timeout(diagnostics, sent_operation)}
+      end
+    end
+  end
+
+  defp uncertain_tool_timeout(diagnostics, operation) do
+    TransportError.new(
+      :uncertain_external_outcome,
+      Map.merge(diagnostics, %{
+        cause: %{
+          kind: :request_timeout,
+          message: "Codex dynamic tool execution exceeded the turn deadline"
+        },
+        operation: operation,
+        reconciliation_required: true
+      })
+    )
+  end
+
+  defp uncertain_tool_execution_failure(diagnostics, operation) do
+    TransportError.new(
+      :uncertain_external_outcome,
+      Map.merge(diagnostics, %{
+        cause: %{
+          kind: :response_error,
+          message: "Codex dynamic tool execution failed after dispatch"
+        },
+        operation: operation,
+        reconciliation_required: true
+      })
+    )
+  end
+
+  defp uncertain_tool_response_deadline(diagnostics, operation) do
+    TransportError.new(
+      :uncertain_external_outcome,
+      Map.merge(diagnostics, %{
+        cause: %{
+          kind: :request_timeout,
+          message: "Codex dynamic tool response exceeded the turn deadline"
+        },
+        operation: operation,
+        reconciliation_required: true
+      })
+    )
+  end
+
+  defp uncertain_tool_response_failure(diagnostics, operation, reason) do
+    TransportError.new(
+      :uncertain_external_outcome,
+      Map.merge(diagnostics, %{
+        cause: bounded_transport_cause(reason),
+        operation: operation,
+        reconciliation_required: true
+      })
+    )
+  end
+
+  @spec bounded_transport_cause(TransportError.t()) :: %{kind: atom(), message: String.t()}
+  defp bounded_transport_cause(%TransportError{details: %{cause: cause}} = error)
+       when is_map(cause) do
+    case Map.take(cause, [:kind, :message]) do
+      %{kind: kind, message: message} when is_atom(kind) and is_binary(message) ->
+        %{kind: kind, message: message}
+
+      _other ->
+        %{kind: error.kind, message: error.message}
+    end
+  end
+
+  defp bounded_transport_cause(%TransportError{} = error),
+    do: %{kind: error.kind, message: error.message}
+
+  defp tool_execution_error(diagnostics) do
+    TransportError.new(
+      :response_error,
+      Map.merge(diagnostics, %{
+        message_present: false,
+        phase: :tool_execution,
+        reason: :tool_execution_failed
+      })
+    )
+  end
+
+  @spec turn_deadline_error(map(), atom()) :: TransportError.t()
+  defp turn_deadline_error(diagnostics, phase) when is_map(diagnostics) do
+    TransportError.new(
+      :request_timeout,
+      Map.merge(diagnostics, %{phase: phase})
+    )
+  end
+
+  defp metadata_from_message(connection, payload) do
+    connection |> connection_metadata(nil) |> maybe_set_usage(payload)
+  end
+
+  @spec maybe_set_usage(map(), map()) :: map()
   defp maybe_set_usage(metadata, payload) when is_map(payload) do
     usage = Map.get(payload, "usage") || Map.get(payload, :usage)
 
@@ -974,12 +1416,6 @@ defmodule SymphonyElixir.Codex.AppServer do
     else
       metadata
     end
-  end
-
-  defp maybe_set_usage(metadata, _payload), do: metadata
-
-  defp shell_escape(value) when is_binary(value) do
-    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
   end
 
   defp default_on_message(_message), do: :ok
@@ -1011,11 +1447,6 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp tool_call_arguments(_params), do: %{}
-
-  defp send_message(port, message) do
-    line = Jason.encode!(message) <> "\n"
-    Port.command(port, line)
-  end
 
   defp needs_input?("mcpServer/elicitation/request", payload) when is_map(payload), do: true
 
@@ -1053,4 +1484,6 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp needs_input_field?(_payload), do: false
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

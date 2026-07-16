@@ -166,6 +166,8 @@ defmodule SymphonyElixir.Config.Schema do
     alias SymphonyElixir.Config.Schema
 
     @primary_key false
+    @max_process_kill_timeout_ms 30_000
+    @max_stderr_tail_bytes 1_048_576
     embedded_schema do
       field(:command, :string, default: "codex app-server")
 
@@ -185,7 +187,16 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_sandbox_policy, :map)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
+      field(:initialize_timeout_ms, :integer, default: 15_000)
+      field(:thread_start_timeout_ms, :integer, default: 30_000)
+      field(:turn_start_timeout_ms, :integer, default: 30_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:max_frame_bytes, :integer, default: 16_777_216)
+      field(:stderr_tail_bytes, :integer, default: 65_536)
+      field(:process_kill_timeout_ms, :integer, default: 2_000)
+      field(:overload_max_attempts, :integer, default: 3)
+      field(:overload_backoff_base_ms, :integer, default: 100)
+      field(:overload_backoff_max_ms, :integer, default: 2_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -200,7 +211,16 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_sandbox_policy,
           :turn_timeout_ms,
           :read_timeout_ms,
-          :stall_timeout_ms
+          :initialize_timeout_ms,
+          :thread_start_timeout_ms,
+          :turn_start_timeout_ms,
+          :stall_timeout_ms,
+          :max_frame_bytes,
+          :stderr_tail_bytes,
+          :process_kill_timeout_ms,
+          :overload_max_attempts,
+          :overload_backoff_base_ms,
+          :overload_backoff_max_ms
         ],
         empty_values: []
       )
@@ -210,7 +230,38 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_change(:turn_sandbox_policy, &Schema.validate_turn_sandbox_policy/2)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_number(:initialize_timeout_ms, greater_than: 0)
+      |> validate_number(:thread_start_timeout_ms, greater_than: 0)
+      |> validate_number(:turn_start_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_frame_bytes, greater_than: 0)
+      |> validate_number(:stderr_tail_bytes,
+        greater_than: 0,
+        less_than_or_equal_to: @max_stderr_tail_bytes
+      )
+      |> validate_number(:process_kill_timeout_ms,
+        greater_than: 0,
+        less_than_or_equal_to: @max_process_kill_timeout_ms
+      )
+      |> validate_number(:overload_max_attempts, greater_than: 0)
+      |> validate_number(:overload_backoff_base_ms, greater_than: 0)
+      |> validate_number(:overload_backoff_max_ms, greater_than: 0)
+      |> validate_overload_backoff()
+    end
+
+    defp validate_overload_backoff(changeset) do
+      base_ms = get_field(changeset, :overload_backoff_base_ms)
+      max_ms = get_field(changeset, :overload_backoff_max_ms)
+
+      if is_integer(base_ms) and is_integer(max_ms) and max_ms < base_ms do
+        add_error(
+          changeset,
+          :overload_backoff_max_ms,
+          "must be greater than or equal to overload_backoff_base_ms"
+        )
+      else
+        changeset
+      end
     end
   end
 

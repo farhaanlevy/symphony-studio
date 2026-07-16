@@ -162,13 +162,14 @@
   and ordinary verification again requires the exact current source hash.
 - The first full gate reported 99.58% coverage because two granular approval-
   policy validation branches were untested. A pinned-contract test now covers
-  valid granular flags and non-map rejection; total coverage is again 100%.
+  valid granular flags and non-map rejection; reported measured-module
+  coverage is again 100%.
 - A later full gate correctly stopped at 98.69% after sandbox-policy helpers
   were refactored. Six meaningful deny/optional branches gained behavioral
   assertions; one duplicate remote-path error arm was removed only after two
   independent reviews proved it unreachable behind the identical immutable
-  pre-validation. Fresh full coverage is 100.00% without lowering or excluding
-  the measured module.
+  pre-validation. Fresh reported measured-module coverage is 100.00% without
+  lowering the threshold or excluding that module.
 - An attempted lexical remote-root containment patch was rejected before seal:
   it broke preserved `~/.…` SSH roots and still could not prove remote canonical
   or symlink containment. Only the pinned-contract absolute/normalized returned
@@ -189,3 +190,138 @@
   enforce limits/timeouts/ID rules, and prove process-group cleanup.
 - Live account/model/quota/tier/identity/multi-agent behavior remains
   `pending_r0_06`; generated schema presence is not live capability evidence.
+
+## 2026-07-15–16 — R0-03 implementation and acceptance
+
+### Decisions
+
+- Preserve Symphony's App Server runner while replacing the mixed line-buffered
+  boundary with strict bounded JSONL framing, a separate bounded content-free
+  stderr channel, exact response correlation, absolute monotonic deadlines,
+  and typed transport failures.
+- Retry JSON-RPC overload `-32001` only for an explicit idempotent-read
+  allowlist. Prepared in-memory operation envelopes and canonical request
+  hashes prevent blind replay once transmission may have occurred; durable
+  operation persistence and crash reconciliation remain owned by R1-07.
+- Persist a small source-identity-bound `0600` compatibility-circuit marker
+  after protocol corruption, and reject stale/unsupported remote-worker
+  configuration before SSH or process side effects.
+- Vendor erlexec 2.3.4 as an offline path dependency. Its downstream patch is
+  build-only: safe native-output paths for this checkout and removal of
+  publisher/documentation plugins. Runtime source and the complete shipped
+  license remain intact.
+- Use util-linux user/PID/mount namespaces plus a two-stage target barrier.
+  Capture the outer group and exact blocked namespace root/target before
+  releasing target code; send only the bounded target environment; keep
+  pidfd-bound cleanup authority; and accept cleanup only when the linked
+  manager is absent, anchored group membership is empty, and the exact root is
+  retired.
+- Bind fixture and transport-conformance states to one atomic source seal while
+  leaving runtime capability evidence `not_run` and overall readiness
+  `pending_r0_06`.
+- Keep the coverage threshold at 100% for measured modules. R0-03 adds explicit
+  line-instrumentation exclusions for five structural process/transport
+  modules that depend on opaque OS ports, PIDs, namespaces, or GenServer
+  scheduling; they are covered by direct deterministic and adversarial suites.
+  Pre-existing exclusions remain separately visible in `mix.exs`.
+
+### Validation result
+
+- Final fixture seal: 113 source files, 276 tests at seed 0, zero failures;
+  source SHA-256
+  `fc44e9692d6f443256ee304ae7ccd9df8e7267eaa1e5d453648956143eb47f91`;
+  manifest SHA-256
+  `8779fd265fcf16c73535e4638110637aceec4afb2934dbaf487236f58efc164e`.
+  The same 276-test fixture suite passes at seed 42 with zero failures in 158.4
+  seconds.
+- Compatibility evidence is exactly `fixtures=pass`,
+  `transportConformance=pass`, `runtimeCapabilities=not_run`, and
+  `overall=pending_r0_06` for Codex 0.144.3.
+- The schema verifier confirms 1,873 artifacts, artifact bundle SHA-256
+  `d96f8d427cf68655b5658ebea0e9e2332986e8b4b9c1f0ff078957e2ceb70d69`,
+  and schema bundle SHA-256
+  `5044e15b8aa187e7deec44ee16b0848a4f9a20aa25e6ec66f10c1d5bcc40141a`.
+  Installed-pin verification and a clean raw/semantic regeneration pass.
+- The exact 24-file erlexec inventory is independently bound as repository-
+  path-prefixed SHA-256
+  `df41fcbc2eb8b06bb1bae60386a8b9273cc6bc25b4e16a45a30c7a9b8dc7b4b2`
+  and as the schema tool's vendor-root-relative 317,091-byte proof SHA-256
+  `604b313f10bd73f5da0a509e0ea8c5517a29a343bc6e821c38d39c7a9e74c539`.
+- The Python schema-tool runner passes all 73 tests in 335.035 seconds,
+  including the real private-snapshot Mix gate.
+- `cd elixir && mise exec -- make all` passes end to end: build, format,
+  public-spec enforcement, strict Credo on 79 source files, 398 ExUnit tests in
+  170.9 seconds with zero failures and two intentional skips (the credentialed
+  live E2E opt-in and the Release 5 remote-worker live path), 100.00% of
+  measured modules at coverage seed `992638`, and Dialyzer with zero errors,
+  zero skips, and no warning suppression.
+- A real Codex 0.144.3 production-adapter smoke completes only initialize,
+  metadata inspection, and close, then proves target/root/wrapper retirement.
+  It starts no thread or turn and consumes no model quota.
+- Cleanup stress includes ProcessAdapter seeds 0 and 42, 100 TERM-resistant
+  hostile-descendant iterations, and 100 exact teardown-race replays.
+- Independent reviews of transport, process containment, cleanup evidence,
+  compatibility-circuit behavior, coverage policy, Dialyzer repairs, and the
+  final teardown change all return GO with no remaining P0/P1/P2 finding.
+
+### Failed approaches and adaptations
+
+- Broad strict Credo exposed pre-existing style debt touched by the package;
+  the affected code was repaired without suppressions before acceptance.
+- The first coverage gate exposed both unmeasured new boundary modules and a
+  real unreachable `Exception` branch. Behavioral coverage was added where a
+  deterministic oracle exists, dead logic was removed, and the structural
+  OS/process modules were separately declared and adversarially exercised.
+- Dialyxir 1.4.7's `short` formatter crashes on OTP 28 while rendering the new
+  `:opaque_compare` warning form. Switching to Dialyzer's native formatter
+  exposed 32 actual findings. Adding vendored `:erlexec` to the PLT removed six
+  false unknown-function warnings; one precise namespace-identity input spec,
+  removal of statically unreachable AppServer clauses, and behavior-preserving
+  opaque-type comparisons resolved the remainder. The final analysis has no
+  ignored warnings.
+- A complete gate reached the real private snapshot and then failed in test
+  teardown: the named Orchestrator retired between `Process.whereis/1` and
+  `GenServer.stop/1`. The helper now accepts only the exact pinned-PID
+  `:noproc` stop tuple. All other exits still fail; 100 repetitions and an
+  independent review confirm the repair does not mask abnormal termination or
+  leave a restart path alive.
+- Final runtime review found that a pending sent idempotent read could eclipse
+  an already acknowledged active turn when classifying a later timeout. The
+  connection now uses one unresolved-operation selector everywhere; a
+  regression proves uncertainty remains attributed to the active `turn/start`
+  operation and that its private parameters are not exposed.
+- The same review found that the direct AppServer entry point validated only
+  its explicit `worker_host` option before launch and reread configuration for
+  session policy. Startup now uses one settings snapshot and rejects a
+  configured SSH worker before workspace or process side effects; a marker
+  regression proves no launch occurs.
+- Evidence review separated the repository-prefixed erlexec inventory hash
+  from the vendor-root-relative schema proof and narrowed shell/environment
+  claims to the candidate-controlled per-attempt boundary. The first final
+  reseal then failed closed because its independent fixture-count oracle still
+  expected 274 tests; synchronizing that second oracle to 276 allowed the exact
+  final seal and full gate to pass.
+- Final evidence audit found that the vendored patch note still denied custom
+  helper-path options even though runtime preparation deliberately accepts a
+  validated trusted operator `:erlexec, :portexe`. The note now distinguishes
+  unavailable WORKFLOW/user-job controls from trusted operator/runtime
+  configuration. Because that note is source-bound, the prior seal was
+  invalidated; the 113-file/276-test seal, both erlexec proofs, seed-42 replay,
+  complete gate, dependent documentation, and candidate archive were all
+  regenerated. The same audit also made the NOTICE reproduction and historical
+  measured-coverage wording precise.
+- Staging the previously untracked vendor tree exposed legacy CRLF/trailing
+  whitespace in ten unchanged upstream files that an unstaged diff cannot see.
+  Normalizing those files would invalidate the verified package and unchanged-
+  runtime-source proof. Root `.gitattributes` therefore exempts only those ten
+  exact upstream paths; downstream-authored and patched vendor files still pass
+  the ordinary cached whitespace gate.
+
+### Remaining package boundary
+
+- R0-03 is accepted, but Release 0 is not yet releasable. Structured event IDs
+  and replay begin in R0-04; workspace/tracker hardening, live capability and
+  quota discovery, readiness, protected publication, SBOM, and install testing
+  remain R0-05 through R0-07.
+- The durable App Server operation ledger and post-crash reconciliation reducer
+  remain R1-07 work, exactly as assigned by the package DAG.

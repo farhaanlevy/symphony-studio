@@ -3,3 +3,16 @@
 
 # This authored matrix is hashed byte-for-byte into release evidence.
 scripts/codex_schema_matrix.json text eol=lf
+
+# Accept known legacy whitespace in byte-exact upstream erlexec files.
+# Downstream-authored and patched vendor files remain under normal checks.
+elixir/vendor/erlexec/LICENSE -whitespace
+elixir/vendor/erlexec/c_src/ei++.cpp -whitespace
+elixir/vendor/erlexec/c_src/ei++.hpp -whitespace
+elixir/vendor/erlexec/c_src/exec.cpp -whitespace
+elixir/vendor/erlexec/c_src/exec.hpp -whitespace
+elixir/vendor/erlexec/c_src/exec_impl.cpp -whitespace
+elixir/vendor/erlexec/c_src/poll_handler.hpp -whitespace
+elixir/vendor/erlexec/c_src/select_handler.hpp -whitespace
+elixir/vendor/erlexec/rebar.config.script -whitespace
+elixir/vendor/erlexec/src/exec.erl -whitespace

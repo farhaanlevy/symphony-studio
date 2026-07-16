@@ -3,6 +3,9 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Codex.{CompatibilityCircuit, TransportError}
+  alias SymphonyElixirWeb.Presenter
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -84,7 +87,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {:codex_worker_update, issue_id,
        %{
          event: :notification,
-         payload: %{method: "some-event"},
+         method_category: :other,
+         payload: %{method: "PRIVATE-ORCHESTRATOR-PAYLOAD-CANARY"},
+         raw: "PRIVATE-ORCHESTRATOR-RAW-CANARY",
          timestamp: now
        }}
     )
@@ -99,9 +104,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert snapshot_entry.last_codex_message == %{
              event: :notification,
-             message: %{method: "some-event"},
+             message: %{method_category: :other},
              timestamp: now
            }
+
+    refute inspect(snapshot_entry) =~ "PRIVATE-ORCHESTRATOR"
   end
 
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
@@ -974,12 +981,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "linear",
       tracker_api_token: nil,
       codex_stall_timeout_ms: 1_000
     )
 
     issue_id = "issue-mcp-elicitation-stall"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-MCP",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-MCP"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     orchestrator_name = Module.concat(__MODULE__, :McpElicitationBlockOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1003,12 +1018,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid: worker_pid,
       ref: make_ref(),
       identifier: "MT-MCP",
-      issue: %Issue{
-        id: issue_id,
-        identifier: "MT-MCP",
-        state: "In Progress",
-        url: "https://example.org/issues/MT-MCP"
-      },
+      issue: issue,
       worker_host: "dm-dev2",
       workspace_path: "/workspaces/MT-MCP",
       session_id: "thread-mcp-turn-mcp",
@@ -1157,6 +1167,452 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              identifier: "MT-INPUT-NORMAL",
              error: "codex turn requires operator input"
            } = state.blocked[issue_id]
+  end
+
+  test "orchestrator blocks uncertain worker outcomes for reconciliation without retrying" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: nil)
+
+    issue_id = "issue-uncertain-outcome"
+    orchestrator_name = Module.concat(__MODULE__, :UncertainOutcomeBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    timestamp = DateTime.utc_now()
+    reconciliation_error = "codex operation has an uncertain external outcome and requires reconciliation"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-UNCERTAIN",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-UNCERTAIN"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: "worker-reconcile",
+      workspace_path: "/workspaces/MT-UNCERTAIN",
+      session_id: "thread-uncertain-turn-uncertain",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: timestamp
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :uncertain_external_outcome,
+         operation: %{method: "turn/start", request_id: 3},
+         timestamp: timestamp
+       }}
+    )
+
+    assert %{
+             running: [
+               %{
+                 issue_id: ^issue_id,
+                 last_codex_event: :uncertain_external_outcome,
+                 last_codex_timestamp: ^timestamp
+               }
+             ]
+           } = Orchestrator.snapshot(orchestrator_name, 1_000)
+
+    send(pid, {:DOWN, ref, :process, self(), {:shutdown, :uncertain_external_outcome}})
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-UNCERTAIN",
+             error: ^reconciliation_error,
+             worker_host: "worker-reconcile",
+             workspace_path: "/workspaces/MT-UNCERTAIN",
+             last_codex_event: :uncertain_external_outcome,
+             last_codex_timestamp: ^timestamp
+           } = state.blocked[issue_id]
+
+    assert %{
+             running: [],
+             retrying: [],
+             blocked: [
+               %{
+                 issue_id: ^issue_id,
+                 identifier: "MT-UNCERTAIN",
+                 error: ^reconciliation_error,
+                 last_codex_event: :uncertain_external_outcome
+               }
+             ]
+           } = Orchestrator.snapshot(orchestrator_name, 1_000)
+
+    assert %{
+             counts: %{running: 0, retrying: 0, blocked: 1},
+             blocked: [
+               %{
+                 issue_id: ^issue_id,
+                 issue_identifier: "MT-UNCERTAIN",
+                 error: ^reconciliation_error,
+                 last_event: :uncertain_external_outcome,
+                 last_message: "operation blocked: outcome requires reconciliation"
+               }
+             ]
+           } = Presenter.state_payload(orchestrator_name, 1_000)
+  end
+
+  test "status dashboard humanizes uncertain outcomes as reconciliation blockers" do
+    assert StatusDashboard.humanize_codex_message(%{
+             event: :uncertain_external_outcome,
+             message: nil
+           }) == "operation blocked: outcome requires reconciliation"
+  end
+
+  test "orchestrator keeps a promoted process cleanup failure blocked after worker DOWN" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: nil)
+
+    issue_id = "issue-process-cleanup-failed"
+    orchestrator_name = Module.concat(__MODULE__, :ProcessCleanupBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    timestamp = DateTime.utc_now()
+    cleanup_error = "codex process cleanup failed and requires operator reconciliation"
+
+    transport_error =
+      TransportError.new(:process_cleanup_failed, %{
+        cause: %{kind: :stdout_contamination},
+        cleanup: %{reason: :process_group_still_alive}
+      })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-CLEANUP",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-CLEANUP"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: nil,
+      workspace_path: "/workspaces/MT-CLEANUP",
+      session_id: "thread-cleanup-turn-cleanup",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: timestamp
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :process_cleanup_failed,
+         reason: transport_error,
+         timestamp: timestamp
+       }}
+    )
+
+    assert %{
+             running: [
+               %{
+                 issue_id: ^issue_id,
+                 last_codex_event: :process_cleanup_failed,
+                 last_codex_timestamp: ^timestamp
+               }
+             ]
+           } = Orchestrator.snapshot(orchestrator_name, 1_000)
+
+    send(pid, {:DOWN, ref, :process, self(), {:shutdown, :process_cleanup_failed}})
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-CLEANUP",
+             error: ^cleanup_error,
+             workspace_path: "/workspaces/MT-CLEANUP",
+             last_codex_event: :process_cleanup_failed,
+             last_codex_timestamp: ^timestamp
+           } = state.blocked[issue_id]
+
+    assert %{
+             running: [],
+             retrying: [],
+             blocked: [
+               %{
+                 issue_id: ^issue_id,
+                 identifier: "MT-CLEANUP",
+                 error: ^cleanup_error,
+                 last_codex_event: :process_cleanup_failed
+               }
+             ]
+           } = Orchestrator.snapshot(orchestrator_name, 1_000)
+  end
+
+  test "status dashboard humanizes cleanup failures as reconciliation blockers" do
+    assert StatusDashboard.humanize_codex_message(%{
+             event: :process_cleanup_failed,
+             message: nil
+           }) == "process cleanup failed: operator reconciliation required"
+  end
+
+  test "protocol update before DOWN opens a persistent identity circuit and regenerated green identity clears it" do
+    root = circuit_test_root("update-before-down")
+    workspace_root = Path.join(root, "workspaces")
+    manifest_path = Path.join(root, "manifest.json")
+    write_circuit_manifest!(manifest_path, "pass", 1)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: nil,
+      workspace_root: workspace_root
+    )
+
+    first_name = Module.concat(__MODULE__, :ProtocolCircuitFirstOrchestrator)
+    circuit_opts = [compatibility_manifest_path: manifest_path, compatibility_schema_version: "0.144.3"]
+    {:ok, first_pid} = Orchestrator.start_link(Keyword.put(circuit_opts, :name, first_name))
+
+    on_exit(fn ->
+      stop_named_process(first_name)
+      File.rm_rf(root)
+    end)
+
+    issue = circuit_issue("issue-protocol-first", "MT-PROTOCOL-FIRST")
+    ref = make_ref()
+    timestamp = DateTime.utc_now()
+
+    put_running_issue(first_pid, issue, ref, timestamp, %{codex_app_server_pid: "4321"})
+
+    send(
+      first_pid,
+      {:codex_worker_update, issue.id,
+       %{
+         event: :app_server_protocol_failure,
+         reason: TransportError.new(:stdout_contamination),
+         timestamp: timestamp
+       }}
+    )
+
+    assert %{
+             compatibility_circuit: %{open?: true, kind: :app_server_protocol_failure},
+             running: [%{issue_id: "issue-protocol-first", last_codex_event: :app_server_protocol_failure}]
+           } =
+             wait_for_snapshot(first_pid, fn snapshot ->
+               snapshot.compatibility_circuit.open? and
+                 Enum.any?(snapshot.running, &(&1.last_codex_event == :app_server_protocol_failure))
+             end)
+
+    canary = "RAW-DOWN-REASON-MUST-NOT-PERSIST"
+
+    log =
+      capture_log(fn ->
+        send(first_pid, {:DOWN, ref, :process, self(), {:shutdown, {:raw, canary}}})
+
+        wait_for_snapshot(first_pid, fn snapshot ->
+          Enum.any?(snapshot.blocked, &(&1.issue_id == issue.id))
+        end)
+      end)
+
+    refute log =~ canary
+
+    first_state = :sys.get_state(first_pid)
+    refute inspect(first_state) =~ canary
+    refute Map.has_key?(first_state.retry_attempts, issue.id)
+    assert first_state.blocked[issue.id].last_codex_event == :app_server_protocol_failure
+
+    second_issue = circuit_issue("issue-protocol-second", "MT-PROTOCOL-SECOND")
+    refute Orchestrator.should_dispatch_issue_for_test(second_issue, first_state)
+
+    GenServer.stop(first_pid)
+
+    second_name = Module.concat(__MODULE__, :ProtocolCircuitRestartedOrchestrator)
+    {:ok, second_pid} = Orchestrator.start_link(Keyword.put(circuit_opts, :name, second_name))
+
+    on_exit(fn -> stop_named_process(second_name) end)
+
+    persisted_state = :sys.get_state(second_pid)
+    assert persisted_state.compatibility_circuit.kind == :app_server_protocol_failure
+    refute Orchestrator.should_dispatch_issue_for_test(second_issue, persisted_state)
+    GenServer.stop(second_pid)
+
+    write_circuit_manifest!(manifest_path, "pass", 2)
+
+    third_name = Module.concat(__MODULE__, :ProtocolCircuitGreenIdentityOrchestrator)
+    {:ok, third_pid} = Orchestrator.start_link(Keyword.put(circuit_opts, :name, third_name))
+
+    on_exit(fn -> stop_named_process(third_name) end)
+
+    cleared_state = :sys.get_state(third_pid)
+    assert is_nil(cleared_state.compatibility_circuit)
+    assert Orchestrator.should_dispatch_issue_for_test(second_issue, cleared_state)
+    refute File.exists?(CompatibilityCircuit.marker_path(workspace_root))
+  end
+
+  test "late protocol-caused uncertainty cancels DOWN retries and blocks every pending retry" do
+    root = circuit_test_root("down-before-update")
+    workspace_root = Path.join(root, "workspaces")
+    manifest_path = Path.join(root, "manifest.json")
+    write_circuit_manifest!(manifest_path, "pass", 1)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: nil,
+      workspace_root: workspace_root
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :LateProtocolCircuitOrchestrator)
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: orchestrator_name,
+        compatibility_manifest_path: manifest_path,
+        compatibility_schema_version: "0.144.3"
+      )
+
+    on_exit(fn ->
+      stop_named_process(orchestrator_name)
+      File.rm_rf(root)
+    end)
+
+    issue = circuit_issue("issue-late-protocol", "MT-LATE-PROTOCOL")
+    pending_issue = circuit_issue("issue-pending-retry", "MT-PENDING-RETRY")
+    ref = make_ref()
+    timestamp = DateTime.utc_now()
+    pending_retry_timer = Process.send_after(pid, {:stale_retry_probe, pending_issue.id}, 60_000)
+
+    put_running_issue(pid, issue, ref, timestamp)
+
+    :sys.replace_state(pid, fn state ->
+      pending_retry = %{
+        attempt: 2,
+        timer_ref: pending_retry_timer,
+        retry_token: make_ref(),
+        due_at_ms: System.monotonic_time(:millisecond) + 60_000,
+        identifier: pending_issue.identifier,
+        issue_url: pending_issue.url,
+        error: "bounded retry pending",
+        worker_host: nil,
+        workspace_path: nil
+      }
+
+      %{
+        state
+        | retry_attempts: Map.put(state.retry_attempts, pending_issue.id, pending_retry),
+          claimed: MapSet.put(state.claimed, pending_issue.id)
+      }
+    end)
+
+    canary = "RAW-RETRY-DOWN-CANARY"
+
+    down_log =
+      capture_log(fn ->
+        send(pid, {:DOWN, ref, :process, self(), {:raw_exception, canary}})
+
+        wait_for_snapshot(pid, fn snapshot ->
+          Enum.any?(snapshot.retrying, &(&1.issue_id == issue.id))
+        end)
+      end)
+
+    refute down_log =~ canary
+    retry_state = :sys.get_state(pid)
+    first_retry_timer = retry_state.retry_attempts[issue.id].timer_ref
+
+    uncertainty =
+      TransportError.new(:uncertain_external_outcome, %{
+        cause: %{kind: :stdout_contamination},
+        operation: %{method: "turn/start", request_id: 91}
+      })
+
+    send(
+      pid,
+      {:codex_worker_update, issue.id,
+       %{
+         event: :uncertain_external_outcome,
+         reason: uncertainty,
+         operation: uncertainty.details.operation,
+         timestamp: timestamp
+       }}
+    )
+
+    assert %{
+             compatibility_circuit: %{open?: true, kind: :app_server_protocol_failure},
+             retrying: [],
+             blocked: blocked
+           } =
+             wait_for_snapshot(pid, fn snapshot ->
+               snapshot.compatibility_circuit.open? and map_size(:sys.get_state(pid).retry_attempts) == 0 and
+                 length(snapshot.blocked) == 2
+             end)
+
+    assert Enum.any?(blocked, fn entry ->
+             entry.issue_id == issue.id and entry.last_codex_event == :uncertain_external_outcome and
+               entry.error == "codex operation has an uncertain external outcome and requires reconciliation"
+           end)
+
+    assert Enum.any?(blocked, fn entry ->
+             entry.issue_id == pending_issue.id and entry.last_codex_event == :app_server_protocol_failure and
+               entry.error == "codex App Server protocol failed and requires compatibility reconciliation"
+           end)
+
+    assert Process.read_timer(first_retry_timer) == false
+    assert Process.read_timer(pending_retry_timer) == false
+
+    final_state = :sys.get_state(pid)
+    refute inspect(final_state) =~ canary
+    refute Map.has_key?(final_state.retry_attempts, issue.id)
+    refute Map.has_key?(final_state.retry_attempts, pending_issue.id)
+
+    write_circuit_manifest!(manifest_path, "pass", 2)
+    send(pid, :run_poll_cycle)
+
+    assert %{
+             compatibility_circuit: %{open?: false},
+             blocked: [%{issue_id: "issue-late-protocol", last_codex_event: :uncertain_external_outcome}]
+           } =
+             wait_for_snapshot(pid, fn snapshot ->
+               not snapshot.compatibility_circuit.open? and length(snapshot.blocked) == 1
+             end)
   end
 
   test "status dashboard renders offline marker to terminal" do
@@ -1771,6 +2227,91 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  defp circuit_test_root(label) do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-orchestrator-circuit-#{label}-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(root)
+    root
+  end
+
+  defp write_circuit_manifest!(path, transport_conformance, revision) do
+    File.write!(
+      path,
+      Jason.encode!(%{
+        "codex" => %{"version" => "0.144.3"},
+        "compatibility" => %{"transportConformance" => transport_conformance},
+        "testRevision" => revision
+      })
+    )
+  end
+
+  defp circuit_issue(id, identifier) do
+    %Issue{
+      id: id,
+      identifier: identifier,
+      title: "Compatibility circuit test",
+      state: "In Progress",
+      url: "https://example.org/issues/#{identifier}"
+    }
+  end
+
+  defp put_running_issue(pid, issue, ref, timestamp, overrides \\ %{}) do
+    worker_pid = self()
+
+    :sys.replace_state(pid, fn state ->
+      running_entry =
+        Map.merge(
+          %{
+            pid: worker_pid,
+            ref: ref,
+            identifier: issue.identifier,
+            issue: issue,
+            worker_host: nil,
+            workspace_path: nil,
+            session_id: nil,
+            last_codex_message: nil,
+            last_codex_timestamp: nil,
+            last_codex_event: nil,
+            codex_app_server_pid: nil,
+            codex_input_tokens: 0,
+            codex_output_tokens: 0,
+            codex_total_tokens: 0,
+            codex_last_reported_input_tokens: 0,
+            codex_last_reported_output_tokens: 0,
+            codex_last_reported_total_tokens: 0,
+            turn_count: 0,
+            retry_attempt: 0,
+            started_at: timestamp
+          },
+          overrides
+        )
+
+      %{
+        state
+        | running: Map.put(state.running, issue.id, running_entry),
+          claimed: MapSet.put(state.claimed, issue.id)
+      }
+    end)
+  end
+
+  defp stop_named_process(name) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, {:noproc, {GenServer, :stop, [^pid, :normal, :infinity]}} -> :ok
+        end
+
+      nil ->
+        :ok
+    end
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do

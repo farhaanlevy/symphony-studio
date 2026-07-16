@@ -33,6 +33,16 @@ codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
   thread_sandbox: workspace-write
+  read_timeout_ms: 5000
+  initialize_timeout_ms: 15000
+  thread_start_timeout_ms: 30000
+  turn_start_timeout_ms: 30000
+  max_frame_bytes: 16777216
+  stderr_tail_bytes: 65536
+  process_kill_timeout_ms: 2000
+  overload_max_attempts: 3
+  overload_backoff_base_ms: 100
+  overload_backoff_max_ms: 2000
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true

@@ -776,6 +776,403 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "codex transport settings use bounded defaults" do
+    assert {:ok, settings} = Schema.parse(%{})
+
+    assert %Codex{
+             initialize_timeout_ms: 15_000,
+             thread_start_timeout_ms: 30_000,
+             turn_start_timeout_ms: 30_000,
+             max_frame_bytes: 16_777_216,
+             stderr_tail_bytes: 65_536,
+             process_kill_timeout_ms: 2_000,
+             overload_max_attempts: 3,
+             overload_backoff_base_ms: 100,
+             overload_backoff_max_ms: 2_000
+           } = settings.codex
+  end
+
+  test "codex transport settings accept positive overrides" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               codex: %{
+                 max_frame_bytes: 33_554_432,
+                 stderr_tail_bytes: 131_072,
+                 process_kill_timeout_ms: 4_000,
+                 initialize_timeout_ms: 20_000,
+                 thread_start_timeout_ms: 40_000,
+                 turn_start_timeout_ms: 45_000,
+                 overload_max_attempts: 5,
+                 overload_backoff_base_ms: 250,
+                 overload_backoff_max_ms: 8_000
+               }
+             })
+
+    assert %Codex{
+             initialize_timeout_ms: 20_000,
+             thread_start_timeout_ms: 40_000,
+             turn_start_timeout_ms: 45_000,
+             max_frame_bytes: 33_554_432,
+             stderr_tail_bytes: 131_072,
+             process_kill_timeout_ms: 4_000,
+             overload_max_attempts: 5,
+             overload_backoff_base_ms: 250,
+             overload_backoff_max_ms: 8_000
+           } = settings.codex
+  end
+
+  test "codex transport settings reject values above adapter bounds" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{codex: %{stderr_tail_bytes: 1_048_577}})
+
+    assert message == "codex.stderr_tail_bytes must be less than or equal to 1048576"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{codex: %{process_kill_timeout_ms: 30_001}})
+
+    assert message == "codex.process_kill_timeout_ms must be less than or equal to 30000"
+  end
+
+  test "codex transport settings reject every nonpositive value" do
+    positive_fields = [
+      :max_frame_bytes,
+      :stderr_tail_bytes,
+      :process_kill_timeout_ms,
+      :initialize_timeout_ms,
+      :thread_start_timeout_ms,
+      :turn_start_timeout_ms,
+      :overload_max_attempts,
+      :overload_backoff_base_ms
+    ]
+
+    for field <- positive_fields, value <- [0, -1] do
+      expected_error = "codex.#{field} must be greater than 0"
+
+      assert {:error, {:invalid_workflow_config, ^expected_error}} =
+               Schema.parse(%{codex: %{field => value}})
+    end
+
+    for value <- [0, -1] do
+      assert {:error,
+              {:invalid_workflow_config,
+               "codex.overload_backoff_max_ms must be greater than or equal to " <>
+                 "overload_backoff_base_ms, codex.overload_backoff_max_ms must be greater than 0"}} =
+               Schema.parse(%{codex: %{overload_backoff_max_ms: value}})
+    end
+  end
+
+  test "codex overload backoff base cannot exceed its maximum" do
+    assert {:error,
+            {:invalid_workflow_config,
+             "codex.overload_backoff_max_ms must be greater than or equal to " <>
+               "overload_backoff_base_ms"}} =
+             Schema.parse(%{
+               codex: %{
+                 overload_backoff_base_ms: 501,
+                 overload_backoff_max_ms: 500
+               }
+             })
+  end
+
+  test "codex command parsing preserves literal argv and rejects shell command forms" do
+    previous_codex_bin = System.get_env("CODEX_BIN")
+    on_exit(fn -> restore_env("CODEX_BIN", previous_codex_bin) end)
+
+    executable = System.find_executable("codex")
+    System.put_env("CODEX_BIN", executable)
+
+    assert {:ok, [^executable, "--config", "model=gpt fixture", "$(touch /tmp/not-run)", "*.beam", "app-server"]} =
+             Config.codex_command_argv("$CODEX_BIN --config 'model=gpt fixture' '$(touch /tmp/not-run)' '*.beam' app-server")
+
+    for {command, reason} <- [
+          {"   ", :blank},
+          {"codex 'unterminated", :malformed},
+          {"codex\napp-server", :forbidden_character},
+          {"CODEX_HOME=/tmp codex app-server", :environment_assignment}
+        ] do
+      assert {:error, {:invalid_codex_command, ^reason}} = Config.codex_command_argv(command)
+    end
+
+    for operator <- [";", "&&", "||", "|", "&", ">", "2>/tmp/log", "<"] do
+      assert {:error, {:invalid_codex_command, {:control_operator, 2}}} =
+               Config.codex_command_argv("codex app-server #{operator}")
+    end
+
+    System.delete_env("CODEX_BIN")
+
+    assert {:error, {:invalid_codex_command, :missing_codex_bin}} =
+             Config.codex_command_argv("$CODEX_BIN app-server")
+
+    assert {:error, {:invalid_codex_command, :executable_not_found}} =
+             Config.codex_command_argv("missing-codex-executable app-server")
+  end
+
+  test "codex command limits fail closed without reflecting command content" do
+    canary = "PRIVATE-CODEX-COMMAND-CANARY"
+
+    exact_command =
+      Enum.join(
+        ["/bin/true", :binary.copy("a", 16_381), :binary.copy("b", 16_381), :binary.copy("c", 16_381), :binary.copy("d", 16_380)],
+        " "
+      )
+
+    assert byte_size(exact_command) == 65_536
+    assert {:ok, exact_argv} = Config.codex_command_argv(exact_command)
+    assert length(exact_argv) == 5
+
+    command_too_long = exact_command <> canary
+
+    assert {:error, {:invalid_codex_command, :command_too_long} = long_error} =
+             Config.codex_command_argv(command_too_long)
+
+    refute inspect(long_error) =~ canary
+
+    exact_argument_count = Enum.join(["/bin/true" | List.duplicate("x", 255)], " ")
+    assert {:ok, exact_argv} = Config.codex_command_argv(exact_argument_count)
+    assert length(exact_argv) == 256
+
+    too_many_arguments = Enum.join(["/bin/true" | List.duplicate("x", 256)], " ")
+
+    assert {:error, {:invalid_codex_command, :too_many_arguments}} =
+             Config.codex_command_argv(too_many_arguments)
+
+    maximum_argument = :binary.copy("x", 16_384)
+
+    assert {:ok, [_executable, ^maximum_argument]} =
+             Config.codex_command_argv("/bin/true #{maximum_argument}")
+
+    oversized_argument = maximum_argument <> "x"
+
+    assert {:error, {:invalid_codex_command, {:argument_too_long, 1}}} =
+             Config.codex_command_argv("/bin/true #{oversized_argument}")
+  end
+
+  test "App Server request timeouts are method-specific with read timeout as the default" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_read_timeout_ms: 101,
+      codex_initialize_timeout_ms: 202,
+      codex_thread_start_timeout_ms: 303,
+      codex_turn_start_timeout_ms: 404
+    )
+
+    assert Config.codex_request_timeout("initialize") == 202
+    assert Config.codex_request_timeout("thread/start") == 303
+    assert Config.codex_request_timeout("turn/start") == 404
+    assert Config.codex_request_timeout("account/read") == 101
+    assert Config.codex_request_timeout("future/idempotent/read") == 101
+  end
+
+  test "Release 0 validation rejects configured remote workers until Release 5" do
+    write_workflow_file!(Workflow.workflow_file_path(), worker_ssh_hosts: ["worker-01:2200"])
+
+    assert {:error, {:unsupported_release_feature, :remote_workers, :release_5}} = Config.validate!()
+  end
+
+  test "orchestrator startup cleanup cannot cross the Release 5 remote worker gate" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-startup-remote-gate-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf 'SSH_INVOKED\n' >> "$SYMP_TEST_SSH_TRACE"
+      exit 99
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+        %SymphonyElixir.Linear.Issue{
+          id: "terminal-remote-gate",
+          identifier: "MT-REMOTE-GATE",
+          state: "Done"
+        }
+      ])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "~/.symphony-remote-workspaces",
+        worker_ssh_hosts: ["worker-01:2200"]
+      )
+
+      assert {:error, {:unsupported_release_feature, :remote_workers, :release_5}} =
+               Config.validate!()
+
+      orchestrator_name = Module.concat(__MODULE__, :RemoteGateOrchestrator)
+      assert {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+      end)
+
+      refute File.exists?(trace_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestrator startup cleanup still removes terminal local workspaces after validation" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-startup-local-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-VALID-CLEANUP")
+      assert File.dir?(workspace)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+        %SymphonyElixir.Linear.Issue{
+          id: "terminal-valid-cleanup",
+          identifier: "MT-VALID-CLEANUP",
+          state: "Done"
+        }
+      ])
+
+      orchestrator_name = Module.concat(__MODULE__, :ValidStartupCleanupOrchestrator)
+      assert {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+      end)
+
+      refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "orchestrator hot reload validates the remote gate before cleanup and retry side effects" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hot-reload-remote-gate-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      local_workspace_root = Path.join(test_root, "local-workspaces")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf 'SSH_INVOKED\n' >> "$SYMP_TEST_SSH_TRACE"
+      exit 99
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: local_workspace_root)
+
+      orchestrator_name = Module.concat(__MODULE__, :HotReloadRemoteGateOrchestrator)
+      assert {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+      end)
+
+      blocked_issue = %SymphonyElixir.Linear.Issue{
+        id: "blocked-remote-gate",
+        identifier: "MT-BLOCKED-REMOTE-GATE",
+        state: "In Progress"
+      }
+
+      retry_issue = %SymphonyElixir.Linear.Issue{
+        id: "retry-remote-gate",
+        identifier: "MT-RETRY-REMOTE-GATE",
+        state: "In Progress"
+      }
+
+      retry_token = make_ref()
+      initial_state = :sys.get_state(pid)
+
+      :sys.replace_state(pid, fn _state ->
+        %{
+          initial_state
+          | blocked: %{
+              blocked_issue.id => %{
+                identifier: blocked_issue.identifier,
+                issue: blocked_issue,
+                worker_host: nil
+              }
+            },
+            claimed: MapSet.new([blocked_issue.id, retry_issue.id]),
+            retry_attempts: %{
+              retry_issue.id => %{
+                attempt: 1,
+                due_at_ms: System.monotonic_time(:millisecond),
+                error: "pending retry",
+                identifier: retry_issue.identifier,
+                issue_url: nil,
+                retry_token: retry_token,
+                timer_ref: nil,
+                worker_host: nil,
+                workspace_path: nil
+              }
+            }
+        }
+      end)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+        %{blocked_issue | state: "Done"},
+        %{retry_issue | state: "Done"}
+      ])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "~/.symphony-remote-workspaces",
+        worker_ssh_hosts: ["worker-01:2200"]
+      )
+
+      send(pid, :run_poll_cycle)
+      state_after_poll = :sys.get_state(pid)
+
+      assert Map.has_key?(state_after_poll.blocked, blocked_issue.id)
+      refute File.exists?(trace_file)
+
+      send(pid, {:retry_issue, retry_issue.id, retry_token})
+      state_after_retry = :sys.get_state(pid)
+
+      assert Map.has_key?(state_after_retry.retry_attempts, retry_issue.id)
+      refute File.exists?(trace_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "config reads defaults for optional settings" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
@@ -790,6 +1187,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_turn_sandbox_policy: nil,
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
+      codex_initialize_timeout_ms: nil,
+      codex_thread_start_timeout_ms: nil,
+      codex_turn_start_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
       tracker_api_token: nil,
       tracker_project_slug: nil
@@ -830,6 +1230,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
+    assert config.codex.initialize_timeout_ms == 15_000
+    assert config.codex.thread_start_timeout_ms == 30_000
+    assert config.codex.turn_start_timeout_ms == 30_000
     assert config.codex.stall_timeout_ms == 300_000
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -898,6 +1301,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_read_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.read_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_initialize_timeout_ms: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.initialize_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_start_timeout_ms: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.thread_start_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_turn_start_timeout_ms: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.turn_start_timeout_ms"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1057,10 +1472,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       |> Changeset.cast(%{limits: %{"" => 1, "todo" => 0}}, [:limits])
       |> Schema.validate_state_limits(:limits)
 
-    assert changeset.errors == [
-             limits: {"state names must not be blank", []},
-             limits: {"limits must be positive integers", []}
-           ]
+    assert MapSet.new(changeset.errors) ==
+             MapSet.new(
+               limits: {"state names must not be blank", []},
+               limits: {"limits must be positive integers", []}
+             )
   end
 
   test "schema parse normalizes policy keys and env-backed fallbacks" do
@@ -1287,6 +1703,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                Schema.resolve_runtime_turn_sandbox_policy(
                  read_only_settings,
                  "/tmp/work/../escape",
+                 remote: true
+               )
+
+      assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
+               Schema.resolve_runtime_turn_sandbox_policy(
+                 read_only_settings,
+                 "/tmp/remote-workspace",
                  remote: true
                )
 

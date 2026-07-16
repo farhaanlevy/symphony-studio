@@ -24,8 +24,13 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.AgentRunner,
           SymphonyElixir.CLI,
           SymphonyElixir.Codex.AppServer,
+          SymphonyElixir.Codex.CompatibilityCircuit,
+          SymphonyElixir.Codex.Connection,
           SymphonyElixir.Codex.DynamicTool,
+          SymphonyElixir.Codex.ProcessAdapter,
+          SymphonyElixir.Codex.ProcessAdapter.IdentityTracker,
           SymphonyElixir.Codex.SchemaBundle,
+          SymphonyElixir.ErlexecRuntime,
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
@@ -51,7 +56,7 @@ defmodule SymphonyElixir.MixProject do
         "test/support/test_support.exs"
       ],
       dialyzer: [
-        plt_add_apps: [:mix]
+        plt_add_apps: [:erlexec, :mix]
       ],
       escript: escript(),
       aliases: aliases(),
@@ -63,7 +68,10 @@ defmodule SymphonyElixir.MixProject do
   def application do
     [
       mod: {SymphonyElixir.Application, []},
-      extra_applications: [:logger]
+      # erlexec is started explicitly by SymphonyElixir.Application after the
+      # OS environment has been made safe for non-interactive launches.
+      extra_applications: [:logger],
+      included_applications: [:erlexec]
     ]
   end
 
@@ -82,6 +90,7 @@ defmodule SymphonyElixir.MixProject do
       {:yaml_elixir, "~> 2.12"},
       {:solid, "~> 1.2"},
       {:ecto, "~> 3.13"},
+      {:erlexec, path: erlexec_path()},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
@@ -95,9 +104,14 @@ defmodule SymphonyElixir.MixProject do
     ]
   end
 
+  defp erlexec_path do
+    System.get_env("SYMPHONY_ERLEXEC_PATH", "vendor/erlexec")
+  end
+
   defp escript do
     [
       app: nil,
+      include_priv_for: [:erlexec],
       main_module: SymphonyElixir.CLI,
       name: "symphony",
       path: "bin/symphony"

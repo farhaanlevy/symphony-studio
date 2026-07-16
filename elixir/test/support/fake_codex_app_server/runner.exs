@@ -4,9 +4,29 @@
 defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
   @moduledoc false
 
+  alias SymphonyElixir.Codex.SchemaBundle
+
   @request_mismatch_exit 64
   @malformed_client_json_exit 65
   @unexpected_eof_exit 66
+  @barrier_timeout_exit 67
+  @wait_poll_interval_ms 5
+  @max_generated_bytes 64 * 1024 * 1024
+  @client_params_schemas %{
+    "initialize" => "json/v1/InitializeParams.json",
+    "thread/start" => "experimental/json/v2/ThreadStartParams.json",
+    "turn/start" => "experimental/json/v2/TurnStartParams.json"
+  }
+  @step_keys %{
+    "expect" => {~w(type expected absent match), ["validation"]},
+    "send_json" => {~w(type payload fragments delayMs), []},
+    "stdout" => {~w(type base64 fragments delayMs), []},
+    "stderr" => {~w(type base64), ~w(fragments delayMs)},
+    "generated" => {~w(type stream prefixBase64 repeatBase64 repeatCount suffixBase64 fragments delayMs), []},
+    "barrier" => {~w(type name timeoutMs), []},
+    "sleep" => {~w(type milliseconds), []},
+    "exit" => {~w(type status), []}
+  }
 
   def main(argv) do
     {options, [], []} =
@@ -17,16 +37,280 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
     File.rm(trace_path)
 
     scenario = scenario_path |> File.read!() |> :json.decode()
+    validate_scenario!(scenario, trace_path)
 
-    if scenario["schemaVersion"] != 1 do
-      fail!(trace_path, 0, "unsupported_scenario", %{"schemaVersion" => scenario["schemaVersion"]}, 64)
-    end
+    fixture_root = Path.dirname(scenario_path)
+    File.mkdir_p!(Path.join(fixture_root, "barriers"))
 
-    state = %{seq: 0, trace_path: trace_path}
+    state = %{fixture_root: fixture_root, seq: 0, trace_path: trace_path}
     final_state = run_steps(scenario["steps"], state)
     trace(final_state, "complete", %{})
     System.halt(0)
   end
+
+  defp validate_scenario!(scenario, trace_path) do
+    case validate_scenario(scenario) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        fail!(trace_path, 0, "invalid_scenario", reason, @request_mismatch_exit)
+    end
+  end
+
+  defp validate_scenario(%{"schemaVersion" => 1, "steps" => steps} = scenario)
+       when is_list(steps) do
+    with :ok <- exact_scenario_keys(scenario, ["schemaVersion", "steps"], "scenario"),
+         :ok <- validate_scenario_steps(steps),
+         :ok <- validate_unique_names(steps, "barrier") do
+      validate_exit_position(steps)
+    end
+  end
+
+  defp validate_scenario(%{} = scenario) do
+    {:error,
+     %{
+       "kind" => "unsupported_scenario",
+       "schemaVersion" => scenario["schemaVersion"]
+     }}
+  end
+
+  defp validate_scenario(_scenario), do: scenario_error("invalid_root", "scenario must be an object")
+
+  defp validate_scenario_steps(steps) do
+    steps
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {step, index}, :ok ->
+      case validate_scenario_step(step) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, Map.put(reason, "stepIndex", index)}}
+      end
+    end)
+  end
+
+  defp validate_scenario_step(%{"type" => type} = step) when is_map_key(@step_keys, type) do
+    {required, optional} = Map.fetch!(@step_keys, type)
+
+    with :ok <- required_scenario_keys(step, required, "#{type} step"),
+         :ok <- exact_scenario_keys(step, required ++ optional, "#{type} step") do
+      validate_step_values(type, step)
+    end
+  end
+
+  defp validate_scenario_step(%{} = step) do
+    scenario_error("unknown_step", "unknown step type #{inspect(step["type"])}")
+  end
+
+  defp validate_scenario_step(_step), do: scenario_error("invalid_step", "scenario step must be an object")
+
+  defp validate_step_values("expect", step) do
+    validation_valid = not Map.has_key?(step, "validation") or is_map(step["validation"])
+
+    with true <-
+           is_map(step["expected"]) and valid_absent_paths?(step["absent"]) and
+             step["match"] in ["exact", "subset"] and validation_valid,
+         :ok <- validate_expect_contract(step) do
+      :ok
+    else
+      false -> scenario_error("invalid_expect", "expect step fields have invalid types or values")
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_step_values("send_json", step) do
+    if is_map(step["payload"]),
+      do: validate_output_values(step),
+      else: scenario_error("invalid_payload", "send_json payload must be an object")
+  end
+
+  defp validate_step_values(type, step) when type in ["stdout", "stderr"] do
+    with {:ok, _bytes} <- decode_scenario_base64(step["base64"], "#{type}.base64") do
+      validate_output_values(step)
+    end
+  end
+
+  defp validate_step_values("generated", step) do
+    with true <- step["stream"] in ["stdout", "stderr"],
+         {:ok, prefix} <- decode_scenario_base64(step["prefixBase64"], "generated.prefixBase64"),
+         {:ok, repeated} <- decode_scenario_base64(step["repeatBase64"], "generated.repeatBase64"),
+         {:ok, suffix} <- decode_scenario_base64(step["suffixBase64"], "generated.suffixBase64"),
+         count when is_integer(count) and count >= 0 <- step["repeatCount"],
+         true <- repeated != "" or count == 0,
+         true <- byte_size(prefix) + byte_size(repeated) * count + byte_size(suffix) <= @max_generated_bytes,
+         :ok <- validate_output_values(step) do
+      :ok
+    else
+      false -> scenario_error("invalid_generated", "generated step fields are invalid")
+      {:error, _reason} = error -> error
+      _other -> scenario_error("invalid_generated", "generated step fields are invalid")
+    end
+  end
+
+  defp validate_step_values("barrier", step) do
+    if valid_name?(step["name"]) and is_integer(step["timeoutMs"]) and step["timeoutMs"] > 0,
+      do: :ok,
+      else: scenario_error("invalid_barrier", "barrier name or timeout is invalid")
+  end
+
+  defp validate_step_values("sleep", step) do
+    if is_integer(step["milliseconds"]) and step["milliseconds"] >= 0,
+      do: :ok,
+      else: scenario_error("invalid_sleep", "sleep milliseconds must be a non-negative integer")
+  end
+
+  defp validate_step_values("exit", step) do
+    if is_integer(step["status"]) and step["status"] >= 0,
+      do: :ok,
+      else: scenario_error("invalid_exit", "exit status must be a non-negative integer")
+  end
+
+  defp validate_output_values(step) do
+    fragments = Map.get(step, "fragments", [])
+    delay_ms = Map.get(step, "delayMs", 0)
+
+    if valid_fragments?(fragments) and is_integer(delay_ms) and delay_ms >= 0,
+      do: :ok,
+      else: scenario_error("invalid_output_options", "fragments or delayMs are invalid")
+  end
+
+  defp validate_expect_contract(step) do
+    expected_contract = expected_validation_contract(step["expected"])
+
+    case {expected_contract, Map.fetch(step, "validation")} do
+      {nil, :error} ->
+        :ok
+
+      {nil, {:ok, _unexpected}} ->
+        scenario_error("unexpected_validation", "expect.validation is not supported")
+
+      {_expected, :error} ->
+        scenario_error("missing_validation", "expect.validation is required")
+
+      {expected, {:ok, actual}} when expected == actual ->
+        :ok
+
+      {_expected, {:ok, _actual}} ->
+        scenario_error("invalid_validation", "expect.validation does not match the pinned contract")
+    end
+  end
+
+  defp expected_validation_contract(%{"method" => "initialized"}) do
+    schema_contract("client_notification", "experimental/json/ClientNotification.json")
+  end
+
+  defp expected_validation_contract(%{"method" => method})
+       when is_map_key(@client_params_schemas, method) do
+    schema_contract("client_request", Map.fetch!(@client_params_schemas, method))
+    |> Map.put("method", method)
+  end
+
+  defp expected_validation_contract(%{"result" => result}) when is_map(result) do
+    case callback_response_schema(result) do
+      nil -> nil
+      schema_path -> schema_contract("client_response", schema_path)
+    end
+  end
+
+  defp expected_validation_contract(_expected), do: nil
+
+  defp callback_response_schema(%{"success" => _success}),
+    do: "json/DynamicToolCallResponse.json"
+
+  defp callback_response_schema(%{"permissions" => _permissions}),
+    do: "json/PermissionsRequestApprovalResponse.json"
+
+  defp callback_response_schema(%{"action" => _action}),
+    do: "json/McpServerElicitationRequestResponse.json"
+
+  defp callback_response_schema(%{"decision" => "decline"}),
+    do: "json/CommandExecutionRequestApprovalResponse.json"
+
+  defp callback_response_schema(%{"decision" => "denied"}),
+    do: "json/ExecCommandApprovalResponse.json"
+
+  defp callback_response_schema(_result), do: nil
+
+  defp schema_contract(kind, schema_path) do
+    {:ok, schema} = SchemaBundle.schema(schema_path)
+
+    canonical_schema =
+      schema
+      |> Jason.encode!()
+      |> :json.decode()
+
+    %{"kind" => kind, "schema" => canonical_schema, "schemaPath" => schema_path}
+  end
+
+  defp valid_fragments?(fragments) when is_list(fragments) do
+    valid_values = Enum.all?(fragments, &((is_integer(&1) and &1 > 0) or &1 == "rest"))
+    rest_indexes = for {"rest", index} <- Enum.with_index(fragments), do: index
+    valid_rest = rest_indexes == [] or rest_indexes == [length(fragments) - 1]
+    valid_values and valid_rest
+  end
+
+  defp valid_fragments?(_fragments), do: false
+
+  defp valid_absent_paths?(paths) when is_list(paths) do
+    Enum.all?(paths, fn path ->
+      is_list(path) and path != [] and Enum.all?(path, &is_binary/1)
+    end)
+  end
+
+  defp valid_absent_paths?(_paths), do: false
+
+  defp valid_name?(name) when is_binary(name),
+    do: Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/, name)
+
+  defp valid_name?(_name), do: false
+
+  defp decode_scenario_base64(encoded, label) when is_binary(encoded) do
+    case Base.decode64(encoded) do
+      {:ok, bytes} -> {:ok, bytes}
+      :error -> scenario_error("invalid_base64", "#{label} is not valid base64")
+    end
+  end
+
+  defp decode_scenario_base64(_encoded, label),
+    do: scenario_error("invalid_base64", "#{label} must be a string")
+
+  defp exact_scenario_keys(value, allowed, label) do
+    case Map.keys(value) -- allowed do
+      [] -> :ok
+      extra -> scenario_error("unexpected_fields", "#{label} contains #{inspect(extra)}")
+    end
+  end
+
+  defp required_scenario_keys(value, required, label) do
+    case required -- Map.keys(value) do
+      [] -> :ok
+      missing -> scenario_error("missing_fields", "#{label} is missing #{inspect(missing)}")
+    end
+  end
+
+  defp validate_unique_names(steps, type) do
+    names = for %{"type" => ^type, "name" => name} <- steps, do: name
+
+    if Enum.uniq(names) == names,
+      do: :ok,
+      else: scenario_error("duplicate_name", "#{type} names must be unique")
+  end
+
+  defp validate_exit_position(steps) do
+    indexes =
+      steps
+      |> Enum.with_index()
+      |> Enum.filter(fn {step, _index} -> match?(%{"type" => "exit"}, step) end)
+      |> Enum.map(&elem(&1, 1))
+
+    case indexes do
+      [] -> :ok
+      [index] when index == length(steps) - 1 -> :ok
+      [index] -> scenario_error("non_terminal_exit", "exit at index #{index} must be final")
+      _ -> scenario_error("multiple_exits", "scenario may contain at most one exit")
+    end
+  end
+
+  defp scenario_error(kind, message), do: {:error, %{"kind" => kind, "message" => message}}
 
   # The production client intentionally closes its stdio port as soon as it
   # receives turn/completed. Commit a final JSON frame and successful exit to
@@ -43,7 +327,7 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
     bytes = IO.iodata_to_binary(:json.encode(payload)) <> "\n"
 
     state
-    |> trace_bytes("sent_json", bytes)
+    |> trace_stream_bytes("sent_json", bytes, step, planned_fragment_count(bytes, step))
     |> trace("exit", %{"status" => 0})
     |> trace("complete", %{})
 
@@ -69,20 +353,56 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
 
   defp run_step(%{"type" => "send_json", "payload" => payload} = step, state) do
     bytes = IO.iodata_to_binary(:json.encode(payload)) <> "\n"
-    write_stdout(bytes, step)
-    trace_bytes(state, "sent_json", bytes)
+    fragment_count = write_stdout(bytes, step)
+    trace_stream_bytes(state, "sent_json", bytes, step, fragment_count)
   end
 
   defp run_step(%{"type" => "stdout", "base64" => encoded} = step, state) do
     bytes = Base.decode64!(encoded)
-    write_stdout(bytes, step)
-    trace_bytes(state, "sent_stdout", bytes)
+    fragment_count = write_stdout(bytes, step)
+    trace_stream_bytes(state, "sent_stdout", bytes, step, fragment_count)
   end
 
-  defp run_step(%{"type" => "stderr", "base64" => encoded}, state) do
+  defp run_step(%{"type" => "stderr", "base64" => encoded} = step, state) do
     bytes = Base.decode64!(encoded)
-    IO.binwrite(:stderr, bytes)
-    trace_bytes(state, "sent_stderr", bytes)
+    fragment_count = write_stderr(bytes, step)
+    trace_stream_bytes(state, "sent_stderr", bytes, step, fragment_count)
+  end
+
+  defp run_step(%{"type" => "generated"} = step, state) do
+    bytes = generated_bytes(step)
+
+    {kind, fragment_count} =
+      case step["stream"] do
+        "stdout" -> {"sent_stdout", write_stdout(bytes, step)}
+        "stderr" -> {"sent_stderr", write_stderr(bytes, step)}
+      end
+
+    trace_stream_bytes(state, kind, bytes, step, fragment_count)
+  end
+
+  defp run_step(%{"type" => "barrier", "name" => name, "timeoutMs" => timeout_ms}, state) do
+    wait_path = Path.join([state.fixture_root, "barriers", "#{name}.waiting"])
+    release_path = Path.join([state.fixture_root, "barriers", "#{name}.release"])
+    released_path = Path.join([state.fixture_root, "barriers", "#{name}.released"])
+    timed_out_path = Path.join([state.fixture_root, "barriers", "#{name}.timed_out"])
+    waiting_state = trace(state, "barrier_waiting", %{"name" => name})
+    File.write!(wait_path, "waiting\n", [:exclusive])
+
+    if wait_for_file(release_path, timeout_ms) do
+      released_state = trace(waiting_state, "barrier_released", %{"name" => name})
+      File.write!(released_path, "released\n", [:exclusive])
+      released_state
+    else
+      fail_with_marker!(
+        waiting_state.trace_path,
+        waiting_state.seq,
+        "barrier_timeout",
+        %{"name" => name, "timeoutMs" => timeout_ms},
+        @barrier_timeout_exit,
+        timed_out_path
+      )
+    end
   end
 
   defp run_step(%{"type" => "sleep", "milliseconds" => milliseconds}, state) do
@@ -412,20 +732,77 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
 
   defp validation_error(kind, message), do: {:error, %{"kind" => kind, "message" => message}}
 
-  defp write_stdout(bytes, step) do
+  defp write_stdout(bytes, step), do: write_stream(:stdio, bytes, step)
+  defp write_stderr(bytes, step), do: write_stream(:stderr, bytes, step)
+
+  defp write_stream(device, bytes, step) do
     delay_ms = step["delayMs"] || 0
     fragments = step["fragments"] || []
 
-    {remaining, _offset} =
-      Enum.reduce(fragments, {bytes, 0}, fn fragment, {pending, offset} ->
-        size = if fragment == "rest", do: byte_size(pending), else: min(fragment, byte_size(pending))
-        <<part::binary-size(size), rest::binary>> = pending
-        IO.binwrite(:stdio, part)
-        if delay_ms > 0, do: Process.sleep(delay_ms)
-        {rest, offset + size}
+    with_binary_encoding(device, fn ->
+      {remaining, fragment_count} =
+        Enum.reduce(fragments, {bytes, 0}, &write_fragment(device, &1, &2, delay_ms))
+
+      if remaining != "", do: IO.binwrite(device, remaining)
+      fragment_count + if(remaining == "", do: 0, else: 1)
+    end)
+  end
+
+  defp write_fragment(device, fragment, {pending, count}, delay_ms) do
+    size = if fragment == "rest", do: byte_size(pending), else: min(fragment, byte_size(pending))
+    <<part::binary-size(size), rest::binary>> = pending
+    IO.binwrite(device, part)
+    maybe_delay(delay_ms)
+    {rest, count + 1}
+  end
+
+  defp maybe_delay(delay_ms) when delay_ms > 0, do: Process.sleep(delay_ms)
+  defp maybe_delay(_delay_ms), do: :ok
+
+  defp with_binary_encoding(device, write) do
+    io_device = if device == :stdio, do: :standard_io, else: :standard_error
+    :ok = :io.setopts(io_device, encoding: :latin1)
+
+    try do
+      write.()
+    after
+      :ok = :io.setopts(io_device, encoding: :unicode)
+    end
+  end
+
+  defp planned_fragment_count(bytes, step) do
+    remaining_bytes =
+      Enum.reduce(step["fragments"] || [], byte_size(bytes), fn fragment, remaining ->
+        if fragment == "rest", do: 0, else: max(remaining - fragment, 0)
       end)
 
-    IO.binwrite(:stdio, remaining)
+    length(step["fragments"] || []) + if(remaining_bytes == 0, do: 0, else: 1)
+  end
+
+  defp generated_bytes(step) do
+    prefix = Base.decode64!(step["prefixBase64"])
+    repeated = Base.decode64!(step["repeatBase64"])
+    suffix = Base.decode64!(step["suffixBase64"])
+    prefix <> :binary.copy(repeated, step["repeatCount"]) <> suffix
+  end
+
+  defp wait_for_file(path, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_file(path, deadline)
+  end
+
+  defp do_wait_for_file(path, deadline) do
+    cond do
+      File.regular?(path) ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(@wait_poll_interval_ms)
+        do_wait_for_file(path, deadline)
+    end
   end
 
   defp decode_json(line) do
@@ -460,16 +837,24 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
 
   defp get_in_path(_value, _path), do: :missing
 
-  defp trace_bytes(state, kind, bytes) do
+  defp trace_stream_bytes(state, kind, bytes, step, fragment_count) do
     trace(state, kind, %{
       "bytes" => byte_size(bytes),
+      "delayMs" => step["delayMs"] || 0,
+      "fragmentCount" => fragment_count,
+      "fragments" => step["fragments"] || [],
       "preview" => bounded_preview(bytes),
       "sha256" => Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
     })
   end
 
   defp bounded_preview(bytes) do
-    if byte_size(bytes) > 256, do: binary_part(bytes, 0, 256) <> "...<truncated>", else: bytes
+    {preview, suffix} =
+      if byte_size(bytes) > 256,
+        do: {binary_part(bytes, 0, 256), "...<truncated>"},
+        else: {bytes, ""}
+
+    String.replace_invalid(preview) <> suffix
   end
 
   defp trace(state, kind, details) do
@@ -486,8 +871,22 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
   end
 
   defp fail!(trace_path, sequence, kind, details, status) do
+    record_failure(trace_path, sequence, kind, details, status)
+    halt_failure!(kind, status)
+  end
+
+  defp fail_with_marker!(trace_path, sequence, kind, details, status, marker_path) do
+    record_failure(trace_path, sequence, kind, details, status)
+    File.write!(marker_path, "timed_out\n", [:exclusive])
+    halt_failure!(kind, status)
+  end
+
+  defp record_failure(trace_path, sequence, kind, details, status) do
     state = %{seq: sequence, trace_path: trace_path}
     trace(state, "failure", %{"failureKind" => kind, "details" => details, "status" => status})
+  end
+
+  defp halt_failure!(kind, status) do
     IO.puts(:stderr, "fake-codex-app-server: #{kind}")
     System.halt(status)
   end

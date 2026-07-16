@@ -11,7 +11,7 @@ import sys
 import unittest
 
 
-EXPECTED_TEST_COUNT = 67
+EXPECTED_TEST_COUNT = 73
 
 
 def discover_suite(

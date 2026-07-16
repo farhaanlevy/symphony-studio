@@ -65,6 +65,20 @@ descriptor opens, and durable file/directory `fsync`. `make all` reports a
 hard error when one of these containment or publication guarantees is absent;
 it does not silently run a weaker verifier.
 
+R0-03 local process containment additionally requires util-linux `unshare`,
+unprivileged user namespaces, PID and mount namespaces, and a procfs mount
+inside the new PID namespace. Startup probes the exact supported form:
+`unshare --user --map-current-user --pid --fork` with
+`--kill-child=SIGKILL --mount-proc`. Python must provide `os.pidfd_open`,
+`signal.pidfd_send_signal`, and `ctypes` access to libc `prctl`. The validated
+reference host is Debian 12 x86_64 with Linux 6.1, util-linux 2.38.1, and
+Python 3.11.2. Other Linux distributions are supported only when the same
+probe and the pinned live Codex conformance smoke pass. Disabled namespaces,
+missing pidfds, or missing helpers fail closed before target code is released;
+there is no weaker process-group-only fallback. Workloads that manipulate
+supplementary group identities need separate compatibility proof even though
+ordinary host filesystem permission checks remain effective.
+
 ```bash
 mise install
 mise exec -- elixir --version
@@ -83,8 +97,8 @@ third-party-notice packaging is a Release 0 R0-07 gate.
 ## Run
 
 ```bash
-git clone https://github.com/openai/symphony
-cd symphony/elixir
+git clone https://github.com/farhaanlevy/symphony-studio.git
+cd symphony-studio/elixir
 mise trust
 mise install
 mise exec -- mix setup
@@ -173,9 +187,37 @@ Notes:
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - For path values, `~` is expanded to the home directory.
-- For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
-  launched shell.
+- For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling.
+  `codex.command` is parsed as a quoted argument vector and is never run through a shell. Only an
+  exact first token of `$CODEX_BIN` is resolved from the environment; other `$VAR` text, command
+  substitutions, backticks, and globs remain literal arguments. Shell control operators and
+  redirections are rejected. The executable must resolve to an absolute executable path.
+- App Server requests use absolute method deadlines: `initialize_timeout_ms` defaults to `15000`,
+  `thread_start_timeout_ms` and `turn_start_timeout_ms` default to `30000`, and other synchronous
+  reads use `read_timeout_ms` (`5000`). A late response cannot win a mailbox-ordering race.
+- Protocol stdout is strict JSONL with `max_frame_bytes` defaulting to `16777216` (16 MiB). Stderr
+  stays separate and is reduced to content-free diagnostics: whole-stream byte/chunk/line counts
+  and UTF-8 validity plus allowlisted categories whose latest complete match remains inside the
+  configured suffix. No raw stderr excerpt or hash is retained. `stderr_tail_bytes` controls that
+  category window, defaults to `65536`, and cannot exceed `1048576` (1 MiB).
+- Local App Server processes run in a dedicated user/PID/mount namespace behind
+  an anchored outer process group. The candidate-controlled per-attempt
+  containment launcher and target bootstrap start with an empty environment;
+  Symphony captures the exact namespace root and blocked target PID before
+  applying the target-only environment and releasing the executable. The
+  long-lived vendored `exec-port` is a trusted upstream runtime boundary, not a
+  user-job child. The target starts in a separate session, and forced cleanup
+  independently pidfd-signals the exact namespace root before retiring the
+  outer group.
+  `process_kill_timeout_ms` defaults to `2000`; success requires the manager,
+  outer group, and namespace root to be gone. Cleanup failure is a
+  reconciliation blocker, not a retryable worker failure.
+- Overload code `-32001` is retried only for classified idempotent reads, using bounded exponential
+  jitter controlled by `overload_max_attempts`, `overload_backoff_base_ms`, and
+  `overload_backoff_max_ms`. Side-effecting `thread/start` and `turn/start` operations are never
+  blindly retried; a post-send transport failure is surfaced as an uncertain external outcome.
+- Remote App Server workers are outside the supported Release 0/1 profile. A configured SSH worker
+  or `worker_host` is rejected before launch and remains gated until Release 5.
 
 ```yaml
 tracker:
@@ -187,6 +229,12 @@ hooks:
     git clone --depth 1 "$SOURCE_REPO_URL" .
 codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
+  initialize_timeout_ms: 15000
+  thread_start_timeout_ms: 30000
+  turn_start_timeout_ms: 30000
+  max_frame_bytes: 16777216
+  stderr_tail_bytes: 65536
+  process_kill_timeout_ms: 2000
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
@@ -230,23 +278,14 @@ make e2e
 Optional environment variables:
 
 - `SYMPHONY_LIVE_LINEAR_TEAM_KEY` defaults to `SYME2E`
-- `SYMPHONY_LIVE_SSH_WORKER_HOSTS` uses those SSH hosts when set, as a comma-separated list
 
-`make e2e` runs two live scenarios:
-- one with a local worker
-- one with SSH workers
-
-If `SYMPHONY_LIVE_SSH_WORKER_HOSTS` is unset, the SSH scenario uses `docker compose` to start two
-disposable SSH workers on `localhost:<port>`. The live test generates a temporary SSH keypair,
-mounts the host `~/.codex/auth.json` into each worker, verifies that Symphony can talk to them
-over real SSH, then runs the same orchestration flow against those worker addresses. This keeps
-the transport representative without depending on long-lived external machines.
-
-Set `SYMPHONY_LIVE_SSH_WORKER_HOSTS` if you want `make e2e` to target real SSH hosts instead.
-
-The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
+`make e2e` exercises only the local-worker scenario in the current Release 0/1 implementation
+profile. It creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
 a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
-Linear issue, then marks the project completed so the run remains visible in Linear.
+Linear issue, then marks the project completed so the run remains visible in Linear. The
+preserved upstream SSH live harness is tagged and skipped until remote-worker execution is
+implemented and accepted in Release 5; the current implementation rejects SSH worker
+configuration before dispatch.
 
 ## FAQ
 

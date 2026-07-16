@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-15): Symphony Studio validates the
+# non-shell Codex launch contract, method deadlines, and staged release scope.
 defmodule SymphonyElixir.Config do
   @moduledoc """
   Runtime configuration loaded from `WORKFLOW.md`.
@@ -19,6 +21,11 @@ defmodule SymphonyElixir.Config do
   No description provided.
   {% endif %}
   """
+
+  @remote_workers_release :release_5
+  @max_codex_command_bytes 65_536
+  @max_codex_command_arguments 256
+  @max_codex_command_argument_bytes 16_384
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
@@ -91,6 +98,38 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc """
+  Converts the legacy `codex.command` string into a non-shell argv.
+
+  Only the first-word `$CODEX_BIN` compatibility token is expanded. Arguments
+  remain literal, so command substitution and glob syntax cannot execute.
+  """
+  @spec codex_command_argv(String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def codex_command_argv(command) when is_binary(command) do
+    with :ok <- validate_codex_command_characters(command),
+         {:ok, argv} <- split_codex_command(command),
+         :ok <- validate_codex_command_limits(argv),
+         :ok <- validate_codex_command_tokens(argv),
+         {:ok, executable} <- resolve_codex_executable(hd(argv)) do
+      {:ok, [executable | tl(argv)]}
+    end
+  end
+
+  def codex_command_argv(_command), do: {:error, {:invalid_codex_command, :not_a_string}}
+
+  @doc "Returns the configured absolute deadline for a synchronous App Server method."
+  @spec codex_request_timeout(String.t()) :: pos_integer()
+  def codex_request_timeout(method) when is_binary(method) do
+    codex = settings!().codex
+
+    case method do
+      "initialize" -> codex.initialize_timeout_ms
+      "thread/start" -> codex.thread_start_timeout_ms
+      "turn/start" -> codex.turn_start_timeout_ms
+      _ordinary_read -> codex.read_timeout_ms
+    end
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings() do
@@ -115,21 +154,113 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
+    with :ok <- validate_remote_workers(settings.worker),
+         :ok <- validate_tracker_kind(settings.tracker),
+         :ok <- validate_tracker_credentials(settings.tracker) do
+      validate_codex_command(settings.codex.command)
+    end
+  end
+
+  defp validate_remote_workers(%{ssh_hosts: []}), do: :ok
+
+  defp validate_remote_workers(_worker) do
+    {:error, {:unsupported_release_feature, :remote_workers, @remote_workers_release}}
+  end
+
+  defp validate_tracker_kind(%{kind: nil}), do: {:error, :missing_tracker_kind}
+  defp validate_tracker_kind(%{kind: kind}) when kind in ["linear", "memory"], do: :ok
+
+  defp validate_tracker_kind(%{kind: kind}) do
+    {:error, {:unsupported_tracker_kind, kind}}
+  end
+
+  defp validate_tracker_credentials(%{kind: "linear"} = tracker) do
     cond do
-      is_nil(settings.tracker.kind) ->
-        {:error, :missing_tracker_kind}
+      not is_binary(tracker.api_key) -> {:error, :missing_linear_api_token}
+      not is_binary(tracker.project_slug) -> {:error, :missing_linear_project_slug}
+      true -> :ok
+    end
+  end
 
-      settings.tracker.kind not in ["linear", "memory"] ->
-        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
+  defp validate_tracker_credentials(_tracker), do: :ok
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
+  defp validate_codex_command(command) do
+    case codex_command_argv(command) do
+      {:ok, _argv} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
+  defp validate_codex_command_characters(command) do
+    cond do
+      byte_size(command) > @max_codex_command_bytes ->
+        {:error, {:invalid_codex_command, :command_too_long}}
+
+      String.contains?(command, [<<0>>, "\r", "\n"]) ->
+        {:error, {:invalid_codex_command, :forbidden_character}}
 
       true ->
         :ok
+    end
+  end
+
+  defp split_codex_command(command) do
+    case OptionParser.split(command) do
+      [] -> {:error, {:invalid_codex_command, :blank}}
+      argv -> {:ok, argv}
+    end
+  rescue
+    RuntimeError -> {:error, {:invalid_codex_command, :malformed}}
+  end
+
+  defp validate_codex_command_limits(argv) do
+    cond do
+      length(argv) > @max_codex_command_arguments ->
+        {:error, {:invalid_codex_command, :too_many_arguments}}
+
+      oversized_index =
+          Enum.find_index(argv, &(byte_size(&1) > @max_codex_command_argument_bytes)) ->
+        {:error, {:invalid_codex_command, {:argument_too_long, oversized_index}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_codex_command_tokens([executable | arguments]) do
+    cond do
+      environment_assignment?(executable) ->
+        {:error, {:invalid_codex_command, :environment_assignment}}
+
+      control_operator_index = Enum.find_index(arguments, &control_operator?/1) ->
+        {:error, {:invalid_codex_command, {:control_operator, control_operator_index + 1}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp environment_assignment?(token) do
+    Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*=/, token)
+  end
+
+  defp control_operator?(token) when token in [";", "&&", "||", "|", "&", "(", ")"], do: true
+
+  defp control_operator?(token) do
+    Regex.match?(~r/^(?:\d*)?(?:>>?|<<?|<>|>&|<&)/, token)
+  end
+
+  defp resolve_codex_executable("$CODEX_BIN") do
+    case System.get_env("CODEX_BIN") do
+      value when is_binary(value) and value != "" -> resolve_codex_executable(value)
+      _missing -> {:error, {:invalid_codex_command, :missing_codex_bin}}
+    end
+  end
+
+  defp resolve_codex_executable(executable) do
+    case System.find_executable(executable) do
+      path when is_binary(path) -> {:ok, Path.expand(path)}
+      nil -> {:error, {:invalid_codex_command, :executable_not_found}}
     end
   end
 

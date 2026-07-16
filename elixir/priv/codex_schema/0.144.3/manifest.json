@@ -53,10 +53,18 @@
         "test",
         "test/symphony_elixir/codex_schema_bundle_test.exs",
         "test/symphony_elixir/app_server_test.exs",
+        "test/symphony_elixir/codex_compatibility_circuit_test.exs",
+        "test/symphony_elixir/codex_connection_test.exs",
+        "test/symphony_elixir/codex_jsonl_framer_test.exs",
+        "test/symphony_elixir/codex_process_adapter_test.exs",
+        "test/symphony_elixir/codex_request_policy_test.exs",
+        "test/symphony_elixir/codex_stderr_diagnostics_test.exs",
         "test/symphony_elixir/dynamic_tool_test.exs",
         "test/symphony_elixir/fake_codex_app_server_test.exs",
         "test/symphony_elixir/fake_linear_test.exs",
         "test/symphony_elixir/network_hermeticity_test.exs",
+        "test/symphony_elixir/orchestrator_status_test.exs",
+        "test/symphony_elixir/workspace_and_config_test.exs",
         "--seed",
         "0"
       ],
@@ -77,18 +85,18 @@
       ],
       "matrixSha256": "f102c992bc99faaa7442f1bc22b6f41cce70e0f1a5d2ba56e99a8dabafdd8b25",
       "schemaBundleSha256": "5044e15b8aa187e7deec44ee16b0848a4f9a20aa25e6ec66f10c1d5bcc40141a",
-      "sourceFileCount": 71,
+      "sourceFileCount": 113,
       "sourceHashAlgorithm": "sha256-text-lf-binary-raw-relative-path-v2",
-      "sourceSha256": "4a59a423518e2db4f92bb4f0ba36a90d23eec851034e19bfb217ef584f54309e",
-      "testCount": 55,
-      "testedAt": "2026-07-15"
+      "sourceSha256": "fc44e9692d6f443256ee304ae7ccd9df8e7267eaa1e5d453648956143eb47f91",
+      "testCount": 276,
+      "testedAt": "2026-07-16"
     },
     "fixtures": "pass",
     "overall": "pending_r0_06",
     "runtimeCapabilities": "not_run",
     "schemaContract": "pass",
-    "testedAt": "2026-07-15",
-    "transportConformance": "not_run"
+    "testedAt": "2026-07-16",
+    "transportConformance": "pass"
   },
   "generation": {
     "cleanCodexHome": true,

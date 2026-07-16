@@ -505,15 +505,50 @@ turn_start.multi_agent_mode
 FIXTURE_TEST_FILES = (
     "test/symphony_elixir/codex_schema_bundle_test.exs",
     "test/symphony_elixir/app_server_test.exs",
+    "test/symphony_elixir/codex_compatibility_circuit_test.exs",
+    "test/symphony_elixir/codex_connection_test.exs",
+    "test/symphony_elixir/codex_jsonl_framer_test.exs",
+    "test/symphony_elixir/codex_process_adapter_test.exs",
+    "test/symphony_elixir/codex_request_policy_test.exs",
+    "test/symphony_elixir/codex_stderr_diagnostics_test.exs",
     "test/symphony_elixir/dynamic_tool_test.exs",
     "test/symphony_elixir/fake_codex_app_server_test.exs",
     "test/symphony_elixir/fake_linear_test.exs",
     "test/symphony_elixir/network_hermeticity_test.exs",
+    "test/symphony_elixir/orchestrator_status_test.exs",
+    "test/symphony_elixir/workspace_and_config_test.exs",
 )
+VENDORED_ERLEXEC_SOURCE_FILES = (
+    ".gitignore",
+    "CHANGELOG.txt",
+    "LICENSE",
+    "README.md",
+    "SYMPHONY_PATCH.md",
+    "c_src/Makefile",
+    "c_src/ei++.cpp",
+    "c_src/ei++.hpp",
+    "c_src/exec.cpp",
+    "c_src/exec.hpp",
+    "c_src/exec_impl.cpp",
+    "c_src/poll_handler.hpp",
+    "c_src/select_handler.hpp",
+    "c_src/ttymodes.hpp",
+    "hex_metadata.config",
+    "include/exec.hrl",
+    "rebar.config",
+    "rebar.config.script",
+    "rebar.lock",
+    "src/edoc.css",
+    "src/erlexec.app.src",
+    "src/exec.erl",
+    "src/exec_app.erl",
+    "src/exec_util.erl",
+)
+ERLEXEC_PATH_ENV = "SYMPHONY_ERLEXEC_PATH"
 FIXTURE_TEST_COMMAND = ("mise", "exec", "--", "mix", "test", *FIXTURE_TEST_FILES, "--seed", "0")
 FIXTURE_DEPENDENCY_COMMAND = ("mise", "exec", "--", "mix", "deps.get", "--check-locked")
 FIXTURE_DEPENDENCY_COMPILE_COMMAND = ("mise", "exec", "--", "mix", "deps.compile")
-FIXTURE_EXPECTED_TEST_COUNT = 55
+FIXTURE_EXPECTED_TEST_COUNT = 276
 TEST_MANIFEST_ENV = "SYMPHONY_CODEX_SCHEMA_TEST_MANIFEST"
 RESERVED_MANIFEST_PATTERNS = (".manifest.*",)
 LF_NORMALIZED_SUFFIXES = {
@@ -538,6 +573,13 @@ LF_NORMALIZED_FILENAMES = {
     "Makefile",
     "SEMANTIC-SHA256SUMS",
 }
+
+
+@dataclass(frozen=True)
+class VendoredErlexecSourceProof:
+    file_count: int
+    byte_count: int
+    sha256: str
 
 
 class SchemaError(RuntimeError):
@@ -986,6 +1028,7 @@ def fixture_source_files(
         "CODEX_LOCK.json",
         "CODEX_VERSION",
         "elixir/Makefile",
+        "elixir/WORKFLOW.md",
         "elixir/mise.toml",
         "elixir/mix.exs",
         "elixir/mix.lock",
@@ -997,6 +1040,7 @@ def fixture_source_files(
         "scripts/run_codex_schema_tests.py",
         "scripts/test_codex_schema.py",
         *(f"elixir/{path}" for path in FIXTURE_TEST_FILES),
+        *(f"elixir/vendor/erlexec/{path}" for path in VENDORED_ERLEXEC_SOURCE_FILES),
     }
 
     for root, pattern in (
@@ -2310,6 +2354,7 @@ def validate_compatibility(
     *,
     require_fixture_seal: bool,
     allow_fixture_candidate: bool = False,
+    allow_legacy_fixture_only_seal_source: bool = False,
     repo_root: Path | None = None,
 ) -> None:
     repo_root = repo_root or REPO_ROOT
@@ -2324,7 +2369,6 @@ def validate_compatibility(
 
     expected_static = {
         "schemaContract": "pass",
-        "transportConformance": "not_run",
         "runtimeCapabilities": "not_run",
         "overall": "pending_r0_06",
         "testedAt": tested_at,
@@ -2334,6 +2378,24 @@ def validate_compatibility(
             raise SchemaError(f"manifest compatibility {key} must be {expected!r}")
 
     fixture_status = compatibility.get("fixtures")
+    expected_transport_status = {
+        "not_run": "not_run",
+        "under_test": "under_test",
+        "pass": "pass",
+    }.get(fixture_status)
+    transport_status = compatibility.get("transportConformance")
+    legacy_fixture_only_seal_source = (
+        allow_legacy_fixture_only_seal_source
+        and not require_fixture_seal
+        and not allow_fixture_candidate
+        and fixture_status == "pass"
+        and transport_status == "not_run"
+    )
+    if transport_status != expected_transport_status and not legacy_fixture_only_seal_source:
+        raise SchemaError(
+            "manifest transportConformance must match the fixture verification state"
+        )
+
     if fixture_status == "pass":
         if (
             require_fixture_seal
@@ -2341,17 +2403,25 @@ def validate_compatibility(
             != sealed_fixture_evidence_for_repo(tested_at, manifest, repo_root)
         ):
             raise SchemaError("manifest fixture evidence does not match current fixture sources")
-        expected_keys = set(expected_static) | {"fixtures", "fixtureEvidence"}
+        expected_keys = set(expected_static) | {
+            "fixtures",
+            "fixtureEvidence",
+            "transportConformance",
+        }
     elif fixture_status == "under_test" and allow_fixture_candidate:
         if compatibility.get("fixtureEvidence") != sealed_fixture_evidence_for_repo(
             tested_at, manifest, repo_root
         ):
             raise SchemaError("test manifest fixture evidence does not match current fixture sources")
-        expected_keys = set(expected_static) | {"fixtures", "fixtureEvidence"}
+        expected_keys = set(expected_static) | {
+            "fixtures",
+            "fixtureEvidence",
+            "transportConformance",
+        }
     elif fixture_status == "not_run" and not require_fixture_seal:
         if "fixtureEvidence" in compatibility:
             raise SchemaError("unsealed manifest must not contain fixture evidence")
-        expected_keys = set(expected_static) | {"fixtures"}
+        expected_keys = set(expected_static) | {"fixtures", "transportConformance"}
     else:
         raise SchemaError("manifest fixture evidence is not sealed")
 
@@ -2368,6 +2438,7 @@ def build_sealed_manifest(manifest: dict[str, Any], tested_at: str) -> dict[str,
 
     compatibility = candidate["compatibility"]
     compatibility["fixtures"] = "pass"
+    compatibility["transportConformance"] = "pass"
     compatibility["fixtureEvidence"] = sealed_fixture_evidence(tested_at, candidate)
     compatibility["testedAt"] = tested_at
     return candidate
@@ -2376,6 +2447,7 @@ def build_sealed_manifest(manifest: dict[str, Any], tested_at: str) -> dict[str,
 def build_test_manifest(manifest: dict[str, Any], tested_at: str) -> dict[str, Any]:
     candidate = build_sealed_manifest(manifest, tested_at)
     candidate["compatibility"]["fixtures"] = "under_test"
+    candidate["compatibility"]["transportConformance"] = "under_test"
     return candidate
 
 
@@ -2383,6 +2455,7 @@ def build_unsealed_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     candidate = copy.deepcopy(manifest)
     compatibility = candidate["compatibility"]
     compatibility["fixtures"] = "not_run"
+    compatibility["transportConformance"] = "not_run"
     compatibility.pop("fixtureEvidence", None)
     return candidate
 
@@ -2567,6 +2640,57 @@ def copy_fixture_sources(
     for relative in fixture_source_files(repo_root=repo_root, version=version):
         source = regular_relative_file(repo_root, relative)
         copy_regular_file(source, snapshot_root / relative)
+
+
+def vendored_erlexec_source_proof(root: Path) -> VendoredErlexecSourceProof:
+    entries: list[tuple[str, str, int]] = []
+    for relative in VENDORED_ERLEXEC_SOURCE_FILES:
+        content = read_regular_bytes(regular_relative_file(root, relative))
+        entries.append((relative, sha256_bytes(content), len(content)))
+    return VendoredErlexecSourceProof(
+        file_count=len(entries),
+        byte_count=sum(size for _path, _digest, size in entries),
+        sha256=sha256_bytes(checksum_stream(entries)),
+    )
+
+
+def assert_vendored_erlexec_source_proof(
+    root: Path, expected: VendoredErlexecSourceProof
+) -> None:
+    if vendored_erlexec_source_proof(root) != expected:
+        raise SchemaError("writable erlexec copy changed a selected vendored source file")
+
+
+def prepare_runtime_erlexec(
+    snapshot_root: Path, runtime_root: Path
+) -> tuple[Path, VendoredErlexecSourceProof]:
+    source_root = snapshot_root / "elixir" / "vendor" / "erlexec"
+    expected_inventory = tuple(sorted(VENDORED_ERLEXEC_SOURCE_FILES))
+    if (
+        VENDORED_ERLEXEC_SOURCE_FILES != expected_inventory
+        or len(set(VENDORED_ERLEXEC_SOURCE_FILES)) != len(expected_inventory)
+    ):
+        raise SchemaError("vendored erlexec source inventory must be unique and sorted")
+    source_inventory = tuple(
+        path.relative_to(source_root).as_posix() for path in regular_tree_files(source_root)
+    )
+    if source_inventory != expected_inventory:
+        raise SchemaError("fixture vendored erlexec tree differs from the exact source inventory")
+
+    source_proof = vendored_erlexec_source_proof(source_root)
+    runtime_erlexec = runtime_root / "vendor" / "erlexec"
+    for relative in VENDORED_ERLEXEC_SOURCE_FILES:
+        copy_regular_file(
+            regular_relative_file(source_root, relative), runtime_erlexec / relative
+        )
+    runtime_inventory = tuple(
+        path.relative_to(runtime_erlexec).as_posix()
+        for path in regular_tree_files(runtime_erlexec)
+    )
+    if runtime_inventory != expected_inventory:
+        raise SchemaError("writable erlexec copy differs from the exact source inventory")
+    assert_vendored_erlexec_source_proof(runtime_erlexec, source_proof)
+    return runtime_erlexec, source_proof
 
 
 def artifact_evidence(bundle: Path) -> dict[str, str]:
@@ -3441,6 +3565,8 @@ def fixture_child_environment(
     state_root = runtime_root / "state"
     for path in (private_home, cache_root, config_root, state_root):
         mkdir_parents_no_follow(path, mode=0o700)
+    runtime_erlexec = runtime_root / "vendor" / "erlexec"
+    directory_identity(runtime_erlexec)
 
     return {
         "CLICOLOR": "0",
@@ -3460,6 +3586,8 @@ def fixture_child_environment(
             (str(mise_path.parent), "/usr/local/bin", "/usr/bin", "/bin")
         ),
         "REBAR_CACHE_DIR": str(cache_root / "rebar3"),
+        "SHELL": "/bin/sh",
+        ERLEXEC_PATH_ENV: str(runtime_erlexec),
         "SYMPHONY_FIXTURE_LOG_FILE": str(temporary_path / "symphony.log"),
         "TERM": "dumb",
         TEST_MANIFEST_ENV: str(test_manifest_path),
@@ -3627,6 +3755,40 @@ def validate_no_mutation_events(
     raise SchemaError(f"{label} mutated a frozen input: {preview}")
 
 
+def validate_vendored_erlexec_source_events(
+    events: list[tuple[str, int, str]], *, label: str
+) -> None:
+    selected = set(VENDORED_ERLEXEC_SOURCE_FILES)
+
+    def touches_selected_source(directory: str, mask: int, name: str) -> bool:
+        if mask & 0x00004000 or directory == "<unknown>":
+            return True
+        if directory in {"", "."}:
+            relative = name
+        elif name:
+            relative = f"{directory}/{name}"
+        else:
+            relative = directory
+        if not relative:
+            return True
+        return relative in selected or any(
+            source.startswith(f"{relative}/") for source in selected
+        )
+
+    invalid = [
+        event for event in events if touches_selected_source(*event)
+    ]
+    if not invalid:
+        return
+    preview = ", ".join(
+        f"{directory}/{name or '<root>'}:0x{mask:x}"
+        for directory, mask, name in invalid[:8]
+    )
+    raise SchemaError(
+        f"{label} changed a selected vendored erlexec source file transiently: {preview}"
+    )
+
+
 @contextmanager
 def writable_snapshot_dependency_cwd(
     snapshot_elixir: Path,
@@ -3679,6 +3841,9 @@ def execute_snapshot_fixture_tests(
     )
     test_manifest_path = snapshot_bundle / "manifest.json"
     runtime_root, build_path, deps_path, temporary_path = create_snapshot_runtime(snapshot_root)
+    runtime_erlexec, erlexec_source_proof = prepare_runtime_erlexec(
+        snapshot_root, runtime_root
+    )
     freeze_snapshot_inputs(snapshot_root, runtime_root)
     validate_fixture_snapshot(
         snapshot_root,
@@ -3700,13 +3865,18 @@ def execute_snapshot_fixture_tests(
         snapshot_root=snapshot_root,
         runtime_root=runtime_root,
     ):
-        deps_result = run_bounded_process(
-            FIXTURE_DEPENDENCY_COMMAND,
-            cwd=snapshot_elixir,
-            env=environment,
-            deadline_seconds=FIXTURE_CHILD_DEADLINE_SECONDS,
-            max_output_bytes=MAX_CHILD_OUTPUT_BYTES,
-        )
+        with dependency_source_event_log(runtime_erlexec) as erlexec_events:
+            deps_result = run_bounded_process(
+                FIXTURE_DEPENDENCY_COMMAND,
+                cwd=snapshot_elixir,
+                env=environment,
+                deadline_seconds=FIXTURE_CHILD_DEADLINE_SECONDS,
+                max_output_bytes=MAX_CHILD_OUTPUT_BYTES,
+            )
+    validate_vendored_erlexec_source_events(
+        erlexec_events, label="snapshot dependency resolution"
+    )
+    assert_vendored_erlexec_source_proof(runtime_erlexec, erlexec_source_proof)
     if deps_result.failure_reason is not None or deps_result.returncode != 0:
         raise_process_failure(
             "snapshot dependency resolution",
@@ -3719,13 +3889,18 @@ def execute_snapshot_fixture_tests(
         snapshot_root=snapshot_root,
         runtime_root=runtime_root,
     ):
-        dependency_compile_result = run_bounded_process(
-            FIXTURE_DEPENDENCY_COMPILE_COMMAND,
-            cwd=snapshot_elixir,
-            env=dict(environment, HEX_OFFLINE="1"),
-            deadline_seconds=FIXTURE_CHILD_DEADLINE_SECONDS,
-            max_output_bytes=MAX_CHILD_OUTPUT_BYTES,
-        )
+        with dependency_source_event_log(runtime_erlexec) as erlexec_events:
+            dependency_compile_result = run_bounded_process(
+                FIXTURE_DEPENDENCY_COMPILE_COMMAND,
+                cwd=snapshot_elixir,
+                env=dict(environment, HEX_OFFLINE="1"),
+                deadline_seconds=FIXTURE_CHILD_DEADLINE_SECONDS,
+                max_output_bytes=MAX_CHILD_OUTPUT_BYTES,
+            )
+    validate_vendored_erlexec_source_events(
+        erlexec_events, label="snapshot dependency compilation"
+    )
+    assert_vendored_erlexec_source_proof(runtime_erlexec, erlexec_source_proof)
     if (
         dependency_compile_result.failure_reason is not None
         or dependency_compile_result.returncode != 0
@@ -3751,15 +3926,20 @@ def execute_snapshot_fixture_tests(
         snapshot_root, excluded_root=runtime_root
     ) as source_events:
         with dependency_source_event_log(deps_path) as dependency_events:
-            test_result = run_bounded_process(
-                FIXTURE_TEST_COMMAND,
-                cwd=snapshot_elixir,
-                env=test_environment,
-                deadline_seconds=FIXTURE_CHILD_DEADLINE_SECONDS,
-                max_output_bytes=MAX_CHILD_OUTPUT_BYTES,
-            )
+            with dependency_source_event_log(runtime_erlexec) as erlexec_events:
+                test_result = run_bounded_process(
+                    FIXTURE_TEST_COMMAND,
+                    cwd=snapshot_elixir,
+                    env=test_environment,
+                    deadline_seconds=FIXTURE_CHILD_DEADLINE_SECONDS,
+                    max_output_bytes=MAX_CHILD_OUTPUT_BYTES,
+                )
     validate_no_mutation_events(source_events, label="snapshot fixture tests")
     validate_no_mutation_events(dependency_events, label="snapshot fixture tests")
+    validate_vendored_erlexec_source_events(
+        erlexec_events, label="snapshot fixture tests"
+    )
+    assert_vendored_erlexec_source_proof(runtime_erlexec, erlexec_source_proof)
     output = normalized_process_output(test_result)
     summary = f"{FIXTURE_EXPECTED_TEST_COUNT} tests, 0 failures"
     summary_lines = [line for line in output.splitlines() if re.match(r"^\d+ tests?,", line)]
@@ -4057,6 +4237,7 @@ def verify_bundle(
     require_fixture_seal: bool = True,
     manifest_path: Path | None = None,
     allow_fixture_candidate: bool = False,
+    allow_legacy_fixture_only_seal_source: bool = False,
     repo_root: Path | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str, str, int]]]:
     repo_root = repo_root or REPO_ROOT
@@ -4120,6 +4301,7 @@ def verify_bundle(
         manifest,
         require_fixture_seal=require_fixture_seal,
         allow_fixture_candidate=allow_fixture_candidate,
+        allow_legacy_fixture_only_seal_source=allow_legacy_fixture_only_seal_source,
         repo_root=repo_root,
     )
 
@@ -4158,7 +4340,11 @@ def seal_fixtures(args: argparse.Namespace) -> None:
     bundle = SCHEMA_ROOT / read_version()
     bundle_identity = directory_identity(bundle)
     manifest_path = bundle / "manifest.json"
-    manifest, _entries = verify_bundle(bundle, require_fixture_seal=False)
+    manifest, _entries = verify_bundle(
+        bundle,
+        require_fixture_seal=False,
+        allow_legacy_fixture_only_seal_source=True,
+    )
     assert_directory_unchanged(bundle, bundle_identity)
     committed_identity = regular_file_identity(manifest_path)
     original_manifest = read_regular_bytes(manifest_path)
@@ -4172,7 +4358,11 @@ def seal_fixtures(args: argparse.Namespace) -> None:
 
     assert_directory_unchanged(bundle, bundle_identity)
     assert_file_unchanged(manifest_path, committed_identity, committed_digest)
-    fresh_manifest, _entries = verify_bundle(bundle, require_fixture_seal=False)
+    fresh_manifest, _entries = verify_bundle(
+        bundle,
+        require_fixture_seal=False,
+        allow_legacy_fixture_only_seal_source=True,
+    )
     assert_directory_unchanged(bundle, bundle_identity)
     publication_manifest = build_sealed_manifest(fresh_manifest, tested_at)
     if publication_manifest["compatibility"]["fixtureEvidence"] != test_evidence:

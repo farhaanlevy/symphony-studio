@@ -7,7 +7,12 @@ import Config
 # the initial WorkflowStore and Orchestrator on the hermetic memory tracker so
 # no startup poll can fall back to the repository's real Linear workflow.
 config :symphony_elixir,
-  workflow_file_path: Path.expand("../test/support/network_hermetic_workflow.md", __DIR__)
+  workflow_file_path: Path.expand("../test/support/network_hermetic_workflow.md", __DIR__),
+  codex_child_environment_allowlist: [
+    "SYMP_TEST_CODEx_TRACE",
+    "SYMP_TEST_CODex_TRACE",
+    "SYMP_TEST_SSH_TRACE"
+  ]
 
 # The fixture sealer runs this exact config from a read-only source snapshot and
 # supplies a private writable runtime path for OTP's disk logger.

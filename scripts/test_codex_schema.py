@@ -26,10 +26,44 @@ import run_codex_schema_tests
 FOCUSED_TEST_FILES = (
     "test/symphony_elixir/codex_schema_bundle_test.exs",
     "test/symphony_elixir/app_server_test.exs",
+    "test/symphony_elixir/codex_compatibility_circuit_test.exs",
+    "test/symphony_elixir/codex_connection_test.exs",
+    "test/symphony_elixir/codex_jsonl_framer_test.exs",
+    "test/symphony_elixir/codex_process_adapter_test.exs",
+    "test/symphony_elixir/codex_request_policy_test.exs",
+    "test/symphony_elixir/codex_stderr_diagnostics_test.exs",
     "test/symphony_elixir/dynamic_tool_test.exs",
     "test/symphony_elixir/fake_codex_app_server_test.exs",
     "test/symphony_elixir/fake_linear_test.exs",
     "test/symphony_elixir/network_hermeticity_test.exs",
+    "test/symphony_elixir/orchestrator_status_test.exs",
+    "test/symphony_elixir/workspace_and_config_test.exs",
+)
+ERLEXEC_SOURCE_FILES = (
+    ".gitignore",
+    "CHANGELOG.txt",
+    "LICENSE",
+    "README.md",
+    "SYMPHONY_PATCH.md",
+    "c_src/Makefile",
+    "c_src/ei++.cpp",
+    "c_src/ei++.hpp",
+    "c_src/exec.cpp",
+    "c_src/exec.hpp",
+    "c_src/exec_impl.cpp",
+    "c_src/poll_handler.hpp",
+    "c_src/select_handler.hpp",
+    "c_src/ttymodes.hpp",
+    "hex_metadata.config",
+    "include/exec.hrl",
+    "rebar.config",
+    "rebar.config.script",
+    "rebar.lock",
+    "src/edoc.css",
+    "src/erlexec.app.src",
+    "src/exec.erl",
+    "src/exec_app.erl",
+    "src/exec_util.erl",
 )
 
 
@@ -406,11 +440,13 @@ class MatrixValidationTest(unittest.TestCase):
 class FixtureProvenanceTest(unittest.TestCase):
     def test_focused_test_paths_and_source_inventory_match_independent_baseline(self) -> None:
         self.assertEqual(codex_schema.FIXTURE_TEST_FILES, FOCUSED_TEST_FILES)
+        self.assertEqual(codex_schema.VENDORED_ERLEXEC_SOURCE_FILES, ERLEXEC_SOURCE_FILES)
 
         expected = {
             "CODEX_LOCK.json",
             "CODEX_VERSION",
             "elixir/Makefile",
+            "elixir/WORKFLOW.md",
             "elixir/mise.toml",
             "elixir/mix.exs",
             "elixir/mix.lock",
@@ -422,6 +458,7 @@ class FixtureProvenanceTest(unittest.TestCase):
             "scripts/run_codex_schema_tests.py",
             "scripts/test_codex_schema.py",
             *(f"elixir/{path}" for path in FOCUSED_TEST_FILES),
+            *(f"elixir/vendor/erlexec/{path}" for path in ERLEXEC_SOURCE_FILES),
         }
         expected.update(relative_files(codex_schema.REPO_ROOT / "elixir" / "lib", "*.ex"))
         expected.update(relative_files(codex_schema.REPO_ROOT / "elixir" / "config", "*.exs"))
@@ -439,6 +476,7 @@ class FixtureProvenanceTest(unittest.TestCase):
                 "CODEX_LOCK.json",
                 "CODEX_VERSION",
                 "elixir/Makefile",
+                "elixir/WORKFLOW.md",
                 "elixir/config/test.exs",
                 "elixir/lib/example.ex",
                 "elixir/mise.toml",
@@ -455,6 +493,7 @@ class FixtureProvenanceTest(unittest.TestCase):
                 "scripts/run_codex_schema_tests.py",
                 "scripts/test_codex_schema.py",
                 *(f"elixir/{path}" for path in FOCUSED_TEST_FILES),
+                *(f"elixir/vendor/erlexec/{path}" for path in ERLEXEC_SOURCE_FILES),
             }
             for relative in paths:
                 path = repo_root / relative
@@ -489,7 +528,7 @@ class FixtureProvenanceTest(unittest.TestCase):
         self.assertEqual(evidence["artifactBundleSha256"], "a" * 64)
         self.assertEqual(evidence["schemaBundleSha256"], "b" * 64)
         self.assertEqual(evidence["matrixSha256"], "c" * 64)
-        self.assertEqual(evidence["testCount"], 55)
+        self.assertEqual(evidence["testCount"], codex_schema.FIXTURE_EXPECTED_TEST_COUNT)
         self.assertEqual(evidence["dependencyCommand"], list(codex_schema.FIXTURE_DEPENDENCY_COMMAND))
         self.assertEqual(
             evidence["dependencyCompileCommand"],
@@ -512,6 +551,57 @@ class FixtureProvenanceTest(unittest.TestCase):
             )
 
         self.assertEqual(candidate["compatibility"]["fixtures"], "under_test")
+        self.assertEqual(candidate["compatibility"]["transportConformance"], "under_test")
+        self.assertEqual(candidate["compatibility"]["runtimeCapabilities"], "not_run")
+        self.assertEqual(candidate["compatibility"]["overall"], "pending_r0_06")
+
+    def test_fixture_and_transport_states_cannot_diverge(self) -> None:
+        with fixture_summary_patch():
+            candidates = (
+                (base_manifest(), False, False, "pass"),
+                (
+                    codex_schema.build_test_manifest(base_manifest(), "2026-07-15"),
+                    True,
+                    True,
+                    "not_run",
+                ),
+                (
+                    codex_schema.build_sealed_manifest(base_manifest(), "2026-07-15"),
+                    True,
+                    False,
+                    "under_test",
+                ),
+            )
+            for manifest, require_seal, allow_candidate, transport_status in candidates:
+                with self.subTest(
+                    fixture_status=manifest["compatibility"]["fixtures"],
+                    transport_status=transport_status,
+                ):
+                    manifest["compatibility"]["transportConformance"] = transport_status
+                    with self.assertRaisesRegex(
+                        codex_schema.SchemaError,
+                        "transportConformance must match the fixture verification state",
+                    ):
+                        codex_schema.validate_compatibility(
+                            manifest,
+                            require_fixture_seal=require_seal,
+                            allow_fixture_candidate=allow_candidate,
+                        )
+
+    def test_unsealed_manifest_rejects_any_compatibility_evidence(self) -> None:
+        for key in ("fixtureEvidence", "transportEvidence"):
+            with self.subTest(key=key):
+                manifest = base_manifest()
+                manifest["compatibility"][key] = {"unexpected": True}
+                expected = (
+                    "unsealed manifest must not contain fixture evidence"
+                    if key == "fixtureEvidence"
+                    else "unexpected or missing keys"
+                )
+                with self.assertRaisesRegex(codex_schema.SchemaError, expected):
+                    codex_schema.validate_compatibility(
+                        manifest, require_fixture_seal=False
+                    )
 
     def test_fixture_date_may_equal_or_follow_generation_but_not_precede_it(self) -> None:
         for tested_at in ("2026-07-14", "2026-07-15"):
@@ -536,6 +626,14 @@ class FixtureProvenanceTest(unittest.TestCase):
         self.assertEqual(second["generation"]["generatedAt"], "2026-07-14")
         self.assertEqual(second["compatibility"]["testedAt"], "2026-07-16")
         self.assertEqual(second["compatibility"]["fixtureEvidence"]["testedAt"], "2026-07-16")
+        self.assertEqual(second["compatibility"]["transportConformance"], "pass")
+        self.assertEqual(second["compatibility"]["runtimeCapabilities"], "not_run")
+        self.assertEqual(second["compatibility"]["overall"], "pending_r0_06")
+
+        unsealed = codex_schema.build_unsealed_manifest(second)
+        self.assertEqual(unsealed["compatibility"]["fixtures"], "not_run")
+        self.assertEqual(unsealed["compatibility"]["transportConformance"], "not_run")
+        self.assertNotIn("fixtureEvidence", unsealed["compatibility"])
 
 
 class MetadataPathSafetyTest(unittest.TestCase):
@@ -675,6 +773,50 @@ class MetadataPathSafetyTest(unittest.TestCase):
 
 
 class SnapshotExecutionTest(unittest.TestCase):
+    def test_runtime_erlexec_copy_is_exact_and_selected_sources_are_proven(self) -> None:
+        with snapshot_execution_workspace() as (snapshot_root, _source, _manifest_path):
+            runtime_root, _build_path, _deps_path, _temporary_path = (
+                codex_schema.create_snapshot_runtime(snapshot_root)
+            )
+            runtime_erlexec, proof = codex_schema.prepare_runtime_erlexec(
+                snapshot_root, runtime_root
+            )
+
+            self.assertEqual(proof.file_count, len(ERLEXEC_SOURCE_FILES))
+            self.assertEqual(
+                tuple(
+                    path.relative_to(runtime_erlexec).as_posix()
+                    for path in codex_schema.regular_tree_files(runtime_erlexec)
+                ),
+                ERLEXEC_SOURCE_FILES,
+            )
+            self.assertEqual(
+                codex_schema.vendored_erlexec_source_proof(runtime_erlexec), proof
+            )
+
+            selected_source = runtime_erlexec / "src" / "exec.erl"
+            selected_source.write_bytes(b"mutated\n")
+            with self.assertRaisesRegex(
+                codex_schema.SchemaError, "changed a selected vendored source file"
+            ):
+                codex_schema.assert_vendored_erlexec_source_proof(
+                    runtime_erlexec, proof
+                )
+
+    def test_runtime_erlexec_copy_rejects_uninventoried_source(self) -> None:
+        with snapshot_execution_workspace() as (snapshot_root, _source, _manifest_path):
+            unexpected = (
+                snapshot_root / "elixir" / "vendor" / "erlexec" / "unexpected.txt"
+            )
+            unexpected.write_text("not inventoried\n", encoding="utf-8")
+            runtime_root, _build_path, _deps_path, _temporary_path = (
+                codex_schema.create_snapshot_runtime(snapshot_root)
+            )
+            with self.assertRaisesRegex(
+                codex_schema.SchemaError, "differs from the exact source inventory"
+            ):
+                codex_schema.prepare_runtime_erlexec(snapshot_root, runtime_root)
+
     def test_focused_tests_use_read_only_snapshot_and_exact_success_summary(self) -> None:
         with snapshot_execution_workspace() as (snapshot_root, source, manifest_path):
             with tempfile.TemporaryDirectory() as worktree:
@@ -693,6 +835,7 @@ class SnapshotExecutionTest(unittest.TestCase):
                     self.assertEqual(kwargs["max_output_bytes"], codex_schema.MAX_CHILD_OUTPUT_BYTES)
                     self.assertEqual(kwargs["env"]["NO_COLOR"], "1")
                     self.assertEqual(kwargs["env"]["CLICOLOR"], "0")
+                    self.assertEqual(kwargs["env"]["SHELL"], "/bin/sh")
                     self.assertNotIn("LINEAR_API_KEY", kwargs["env"])
                     self.assertNotIn("OPENAI_API_KEY", kwargs["env"])
                     self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
@@ -704,6 +847,19 @@ class SnapshotExecutionTest(unittest.TestCase):
                     self.assertEqual(
                         kwargs["env"]["ERL_CRASH_DUMP"],
                         str(Path(kwargs["env"]["TMPDIR"]) / "erl_crash.dump"),
+                    )
+                    runtime_erlexec = (
+                        snapshot_root / ".fixture-runtime" / "vendor" / "erlexec"
+                    )
+                    self.assertEqual(
+                        kwargs["env"][codex_schema.ERLEXEC_PATH_ENV],
+                        str(runtime_erlexec),
+                    )
+                    self.assertEqual(
+                        codex_schema.vendored_erlexec_source_proof(runtime_erlexec),
+                        codex_schema.vendored_erlexec_source_proof(
+                            snapshot_root / "elixir" / "vendor" / "erlexec"
+                        ),
                     )
                     if calls in {1, 2}:
                         expected = (
@@ -779,13 +935,61 @@ class SnapshotExecutionTest(unittest.TestCase):
                 self.assertEqual(source.read_text(encoding="utf-8"), "snapshot-original\n")
                 self.assertEqual(worktree_source.read_text(encoding="utf-8"), "original\n")
 
+    def test_compile_detects_selected_erlexec_source_change_and_restore(self) -> None:
+        with snapshot_execution_workspace() as (snapshot_root, _source, _manifest_path):
+            calls = 0
+
+            def run(command, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    selected_source = (
+                        Path(kwargs["env"][codex_schema.ERLEXEC_PATH_ENV])
+                        / "src"
+                        / "exec.erl"
+                    )
+                    original = selected_source.read_bytes()
+                    selected_source.write_bytes(b"temporary replacement\n")
+                    selected_source.write_bytes(original)
+                return codex_schema.BoundedProcessResult(
+                    tuple(command),
+                    0,
+                    (
+                        f"{codex_schema.FIXTURE_EXPECTED_TEST_COUNT} tests, 0 failures\n"
+                        if calls == 3
+                        else "dependency phase complete\n"
+                    ),
+                    "",
+                )
+
+            try:
+                with (
+                    mock.patch.object(
+                        codex_schema, "run_bounded_process", side_effect=run
+                    ),
+                    mock.patch.object(codex_schema, "validate_fixture_snapshot"),
+                    mock.patch.object(codex_schema, "verify_test_manifest"),
+                ):
+                    with self.assertRaisesRegex(
+                        codex_schema.SchemaError,
+                        "changed a selected vendored erlexec source file transiently",
+                    ):
+                        codex_schema.execute_snapshot_fixture_tests(
+                            snapshot_root, snapshot_evidence()
+                        )
+            finally:
+                codex_schema.thaw_snapshot_for_cleanup(snapshot_root)
+
+            self.assertEqual(calls, 2)
+
     def test_summary_with_suffix_or_duplicate_is_rejected_and_output_is_surfaced(self) -> None:
+        summary = f"{codex_schema.FIXTURE_EXPECTED_TEST_COUNT} tests, 0 failures"
         invalid_outputs = (
-            ("55 tests, 0 failures, 1 excluded\n", None),
-            ("55 tests, 0 failures\n1 skipped\n", None),
-            ("55 tests, 0 failures\n55 tests, 0 failures\n", None),
+            (f"{summary}, 1 excluded\n", None),
+            (f"{summary}\n1 skipped\n", None),
+            (f"{summary}\n{summary}\n", None),
             (
-                "55 tests, 0 failures\nLINEAR_API_KEY=sentinel-secret\n1 skipped\n",
+                f"{summary}\nLINEAR_API_KEY=sentinel-secret\n1 skipped\n",
                 "LINEAR_API_KEY=[REDACTED]",
             ),
         )
@@ -1029,13 +1233,23 @@ class SnapshotExecutionTest(unittest.TestCase):
 
     def test_real_private_snapshot_runs_the_focused_mix_gate(self) -> None:
         bundle = codex_schema.SCHEMA_ROOT / codex_schema.read_version()
-        manifest, _entries = codex_schema.verify_bundle(
-            bundle, require_fixture_seal=False
-        )
-        tested_at = manifest["generation"]["generatedAt"]
-        test_manifest = codex_schema.build_test_manifest(manifest, tested_at)
-        evidence = test_manifest["compatibility"]["fixtureEvidence"]
-        codex_schema.run_snapshot_fixture_tests(test_manifest, evidence)
+        committed_manifest = codex_schema.read_json(bundle / "manifest.json")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            private_manifest_path = Path(temporary) / "manifest.json"
+            codex_schema.write_json(
+                private_manifest_path,
+                codex_schema.build_unsealed_manifest(committed_manifest),
+            )
+            manifest, _entries = codex_schema.verify_bundle(
+                bundle,
+                require_fixture_seal=False,
+                manifest_path=private_manifest_path,
+            )
+            tested_at = manifest["generation"]["generatedAt"]
+            test_manifest = codex_schema.build_test_manifest(manifest, tested_at)
+            evidence = test_manifest["compatibility"]["fixtureEvidence"]
+            codex_schema.run_snapshot_fixture_tests(test_manifest, evidence)
 
 
 class ProcessLockTest(unittest.TestCase):
@@ -1723,6 +1937,89 @@ codex_schema.publish_generated_bundle(staging, destination, backup, proof)
 
 
 class SealPublicationTest(unittest.TestCase):
+    def test_legacy_fixture_only_manifest_transitions_atomically_or_remains_exact(self) -> None:
+        def legacy_manifest() -> dict:
+            with fixture_summary_patch():
+                manifest = codex_schema.build_sealed_manifest(
+                    base_manifest(), "2026-07-15"
+                )
+            manifest["compatibility"]["transportConformance"] = "not_run"
+            return manifest
+
+        def strict_verifier(repo_root: Path, calls: list[dict]):
+            def verify(bundle: Path, **kwargs):
+                manifest_path = kwargs.get("manifest_path", bundle / "manifest.json")
+                manifest = codex_schema.read_json(manifest_path)
+                codex_schema.validate_compatibility(
+                    manifest,
+                    require_fixture_seal=kwargs.get("require_fixture_seal", True),
+                    allow_fixture_candidate=kwargs.get("allow_fixture_candidate", False),
+                    allow_legacy_fixture_only_seal_source=kwargs.get(
+                        "allow_legacy_fixture_only_seal_source", False
+                    ),
+                    repo_root=repo_root,
+                )
+                calls.append(
+                    {
+                        "fixtures": manifest["compatibility"]["fixtures"],
+                        "transport": manifest["compatibility"]["transportConformance"],
+                        "legacy_source": kwargs.get(
+                            "allow_legacy_fixture_only_seal_source", False
+                        ),
+                    }
+                )
+                return manifest, []
+
+            return verify
+
+        with seal_workspace() as (repo_root, schema_root, bundle, _original):
+            codex_schema.write_json(bundle / "manifest.json", legacy_manifest())
+            original = (bundle / "manifest.json").read_bytes()
+            calls: list[dict] = []
+            verifier = strict_verifier(repo_root, calls)
+            runner = mock.Mock(side_effect=subprocess.CalledProcessError(1, "mix test"))
+
+            with seal_patches(repo_root, schema_root, verifier, runner):
+                with self.assertRaisesRegex(
+                    codex_schema.SchemaError,
+                    "transportConformance must match the fixture verification state",
+                ):
+                    verifier(bundle)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    codex_schema.seal_fixtures(
+                        argparse.Namespace(tested_at="2026-07-15")
+                    )
+
+            assert_committed_unchanged(self, bundle, original)
+            self.assertEqual(
+                calls,
+                [{"fixtures": "pass", "transport": "not_run", "legacy_source": True}],
+            )
+
+        with seal_workspace() as (repo_root, schema_root, bundle, _original):
+            codex_schema.write_json(bundle / "manifest.json", legacy_manifest())
+            calls = []
+            verifier = strict_verifier(repo_root, calls)
+            runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+
+            with seal_patches(repo_root, schema_root, verifier, runner):
+                codex_schema.seal_fixtures(argparse.Namespace(tested_at="2026-07-15"))
+
+            published = codex_schema.read_json(bundle / "manifest.json")
+            self.assertEqual(published["compatibility"]["fixtures"], "pass")
+            self.assertEqual(
+                published["compatibility"]["transportConformance"], "pass"
+            )
+            self.assertEqual(
+                calls,
+                [
+                    {"fixtures": "pass", "transport": "not_run", "legacy_source": True},
+                    {"fixtures": "pass", "transport": "not_run", "legacy_source": True},
+                    {"fixtures": "pass", "transport": "pass", "legacy_source": False},
+                    {"fixtures": "pass", "transport": "pass", "legacy_source": False},
+                ],
+            )
+
     def test_test_failure_leaves_committed_manifest_byte_identical(self) -> None:
         with seal_workspace() as (repo_root, schema_root, bundle, original):
             verifier = VerificationHarness(repo_root)
@@ -1978,11 +2275,21 @@ class SealPublicationTest(unittest.TestCase):
             self.assertEqual(published["generation"]["generatedAt"], "2026-07-14")
             self.assertEqual(published["compatibility"]["testedAt"], "2026-07-15")
             self.assertEqual(published["compatibility"]["fixtures"], "pass")
+            self.assertEqual(published["compatibility"]["transportConformance"], "pass")
+            self.assertEqual(published["compatibility"]["runtimeCapabilities"], "not_run")
+            self.assertEqual(published["compatibility"]["overall"], "pending_r0_06")
             self.assertNotIn("attacker", published)
             self.assertEqual(list(bundle.glob(".manifest.*")), [])
 
             test_manifest, test_evidence = runner.call_args.args
             self.assertEqual(test_manifest["compatibility"]["fixtures"], "under_test")
+            self.assertEqual(
+                test_manifest["compatibility"]["transportConformance"], "under_test"
+            )
+            self.assertEqual(
+                test_manifest["compatibility"]["runtimeCapabilities"], "not_run"
+            )
+            self.assertEqual(test_manifest["compatibility"]["overall"], "pending_r0_06")
             self.assertEqual(test_manifest["compatibility"]["fixtureEvidence"], test_evidence)
             self.assertEqual(len(verifier.override_paths), 1)
             self.assertFalse(verifier.override_paths[0].is_relative_to(repo_root))
@@ -2117,6 +2424,11 @@ def snapshot_execution_workspace():
         )
         manifest_path.parent.mkdir(parents=True)
         manifest_path.write_text("{}\n", encoding="utf-8")
+        vendor_root = snapshot_root / "elixir" / "vendor" / "erlexec"
+        for relative in ERLEXEC_SOURCE_FILES:
+            source_path = vendor_root / relative
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_bytes(f"vendored:{relative}\n".encode("utf-8"))
         try:
             yield snapshot_root, source, manifest_path
         finally:
