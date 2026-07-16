@@ -1,5 +1,5 @@
-# Downstream modification notice (2026-07-14): Symphony Studio validates and
-# safely adapts legacy approval policies to its pinned Codex App Server schema.
+# Downstream modification notice (2026-07-16): Symphony Studio validates and
+# safely adapts pinned policies, canonical workspace roots, and managed sandboxes.
 defmodule SymphonyElixir.Config.Schema do
   @moduledoc false
 
@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
+  alias SymphonyElixir.Config.ManagedWorkspace
   alias SymphonyElixir.PathSafety
 
   @primary_key false
@@ -340,7 +341,13 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
-  def parse(config) when is_map(config) do
+  def parse(config) when is_map(config), do: parse(config, [])
+
+  @spec parse(map(), keyword()) ::
+          {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
+  def parse(config, opts) when is_map(config) and is_list(opts) do
+    base_dir = Keyword.get(opts, :base_dir, File.cwd!())
+
     config
     |> normalize_keys()
     |> drop_nil_values()
@@ -348,7 +355,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> apply_action(:validate)
     |> case do
       {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+        finalize_settings(settings, base_dir)
 
       {:error, changeset} ->
         {:error, {:invalid_workflow_config, format_errors(changeset)}}
@@ -378,16 +385,10 @@ defmodule SymphonyElixir.Config.Schema do
   @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
-    with :ok <- validate_remote_runtime_workspace(settings, workspace, opts) do
-      case settings.codex.turn_sandbox_policy do
-        %{} = policy ->
-          normalize_explicit_runtime_turn_sandbox_policy(policy)
-
-        _ ->
-          workspace
-          |> default_workspace_root(settings.workspace.root)
-          |> default_runtime_turn_sandbox_policy(opts)
-      end
+    with :ok <- validate_managed_runtime_mode(opts),
+         :ok <- validate_remote_runtime_workspace(settings, workspace, opts),
+         {:ok, policy} <- runtime_turn_sandbox_policy(settings, workspace, opts) do
+      maybe_narrow_managed_policy(settings, workspace, policy, opts)
     end
   end
 
@@ -479,16 +480,11 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 
-  defp finalize_settings(settings) do
+  defp finalize_settings(settings, base_dir) do
     tracker = %{
       settings.tracker
       | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
         assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
-    }
-
-    workspace = %{
-      settings.workspace
-      | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
     codex = %{
@@ -500,7 +496,15 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_turn_sandbox_policy(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    with {:ok, workspace_root} <-
+           resolve_workspace_root(
+             settings.workspace.root,
+             Path.join(System.tmp_dir!(), "symphony_workspaces"),
+             base_dir
+           ) do
+      workspace = %{settings.workspace | root: workspace_root}
+      {:ok, %{settings | tracker: tracker, workspace: workspace, codex: codex}}
+    end
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -635,6 +639,51 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defp runtime_turn_sandbox_policy(settings, workspace, opts) do
+    case settings.codex.turn_sandbox_policy do
+      %{} = policy ->
+        normalize_explicit_runtime_turn_sandbox_policy(policy)
+
+      _ ->
+        workspace
+        |> default_workspace_root(settings.workspace.root)
+        |> default_runtime_turn_sandbox_policy(opts)
+    end
+  end
+
+  defp validate_managed_runtime_mode(opts) do
+    if Keyword.get(opts, :managed, false) and Keyword.get(opts, :remote, false) do
+      {:error, {:unsafe_turn_sandbox_policy, :managed_remote_workspace_unsupported}}
+    else
+      :ok
+    end
+  end
+
+  defp maybe_narrow_managed_policy(settings, workspace, policy, opts) do
+    if Keyword.get(opts, :managed, false) do
+      narrow_managed_policy(settings, workspace, policy)
+    else
+      {:ok, policy}
+    end
+  end
+
+  defp narrow_managed_policy(settings, workspace, %{"type" => "workspaceWrite"} = policy) do
+    with {:ok, canonical_workspace} <- ManagedWorkspace.validate(settings.workspace.root, workspace) do
+      {:ok,
+       policy
+       |> Map.put("writableRoots", [canonical_workspace])
+       |> Map.put_new("networkAccess", false)}
+    end
+  end
+
+  defp narrow_managed_policy(_settings, _workspace, %{"type" => "readOnly"} = policy) do
+    {:ok, Map.put_new(policy, "networkAccess", false)}
+  end
+
+  defp narrow_managed_policy(_settings, _workspace, %{"type" => type}) do
+    {:error, {:unsafe_turn_sandbox_policy, {:managed_policy_type, type}}}
+  end
+
   defp normalize_approval_policy("on-failure"), do: "on-request"
   defp normalize_approval_policy(value) when is_binary(value), do: value
 
@@ -712,6 +761,23 @@ defmodule SymphonyElixir.Config.Schema do
         path
     end
   end
+
+  defp resolve_workspace_root(value, default, base_dir)
+       when is_binary(value) and is_binary(default) and is_binary(base_dir) do
+    resolved_path = resolve_path_value(value, default)
+    expanded_path = Path.expand(resolved_path, Path.expand(base_dir))
+
+    case PathSafety.canonicalize(expanded_path) do
+      {:ok, canonical_path} ->
+        {:ok, canonical_path}
+
+      {:error, {:path_canonicalize_failed, _path, reason}} ->
+        {:error, {:invalid_workflow_config, "workspace.root could not be canonicalized: #{format_path_error(reason)}"}}
+    end
+  end
+
+  defp format_path_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp format_path_error({classification, _detail}) when is_atom(classification), do: Atom.to_string(classification)
 
   defp resolve_env_value(value, fallback) when is_binary(value) do
     case env_reference_name(value) do

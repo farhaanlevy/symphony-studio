@@ -1,5 +1,5 @@
-# Downstream modification notice (2026-07-15): Symphony Studio validates the
-# non-shell Codex launch contract, method deadlines, and staged release scope.
+# Downstream modification notice (2026-07-16): Symphony Studio validates the
+# non-shell launch contract, deadlines, staged scope, and workflow-relative roots.
 defmodule SymphonyElixir.Config do
   @moduledoc """
   Runtime configuration loaded from `WORKFLOW.md`.
@@ -37,7 +37,7 @@ defmodule SymphonyElixir.Config do
   def settings do
     case Workflow.current() do
       {:ok, %{config: config}} when is_map(config) ->
-        Schema.parse(config)
+        Schema.parse(config, base_dir: Workflow.workflow_directory())
 
       {:error, reason} ->
         {:error, reason}

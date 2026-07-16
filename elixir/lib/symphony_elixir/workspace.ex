@@ -1,28 +1,60 @@
+# Copyright 2026 Symphony Studio contributors
+# SPDX-License-Identifier: Apache-2.0
+# Downstream modification notice (2026-07-16): Symphony Studio hardens local
+# workspace identity, hooks, symlinks, cleanup bounds, and remote release gates.
+
 defmodule SymphonyElixir.Workspace do
   @moduledoc """
   Creates isolated per-issue workspaces for parallel Codex agents.
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, PathSafety, SSH, WorkspaceHookRunner}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @remote_workers_error {:unsupported_release_feature, :remote_workers, :release_5}
+  @max_identifier_bytes 180
+  @identifier_digest_bytes 16
 
   @type worker_host :: String.t() | nil
+  @type binding :: %{path: Path.t(), root: Path.t()}
 
   @spec create_for_issue(map() | String.t() | nil, worker_host()) ::
           {:ok, Path.t()} | {:error, term()}
   def create_for_issue(issue_or_identifier, worker_host \\ nil) do
+    case create_for_issue_bound(issue_or_identifier, worker_host) do
+      {:ok, %{path: workspace}} -> {:ok, workspace}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc "Creates an issue workspace and returns its immutable path/root binding."
+  @spec create_for_issue_bound(map() | String.t() | nil, worker_host(), keyword()) ::
+          {:ok, binding()} | {:error, term()}
+  def create_for_issue_bound(issue_or_identifier, worker_host \\ nil, opts \\ []) do
     issue_context = issue_context(issue_or_identifier)
 
     try do
       safe_id = safe_identifier(issue_context.issue_identifier)
 
-      with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
-           :ok <- validate_workspace_path(workspace, worker_host),
+      with :ok <- validate_worker_host(worker_host),
+           settings <- Config.settings!(),
+           {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host, settings),
+           :ok <- validate_workspace_path(workspace, worker_host, settings.workspace.root),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
-        {:ok, workspace}
+           binding = %{path: workspace, root: settings.workspace.root},
+           :ok <- publish_workspace_binding(binding, opts),
+           :ok <-
+             maybe_run_after_create_hook(
+               workspace,
+               issue_context,
+               created?,
+               worker_host,
+               settings.hooks,
+               settings.workspace.root,
+               opts
+             ) do
+        {:ok, binding}
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
@@ -32,16 +64,22 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp ensure_workspace(workspace, nil) do
-    cond do
-      File.dir?(workspace) ->
+    case File.lstat(workspace) do
+      {:ok, %File.Stat{type: :directory}} ->
         {:ok, workspace, false}
 
-      File.exists?(workspace) ->
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, {:workspace_issue_symlink, workspace}}
+
+      {:ok, _stat} ->
         File.rm_rf!(workspace)
         create_workspace(workspace)
 
-      true ->
+      {:error, :enoent} ->
         create_workspace(workspace)
+
+      {:error, reason} ->
+        {:error, {:workspace_path_unreadable, workspace, reason}}
     end
   end
 
@@ -79,9 +117,14 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp create_workspace(workspace) do
-    File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
-    {:ok, workspace, true}
+
+    case File.lstat(workspace) do
+      {:ok, %File.Stat{type: :directory}} -> {:ok, workspace, true}
+      {:ok, %File.Stat{type: :symlink}} -> {:error, {:workspace_issue_symlink, workspace}}
+      {:ok, %File.Stat{type: type}} -> {:error, {:workspace_not_directory, workspace, type}}
+      {:error, reason} -> {:error, {:workspace_path_unreadable, workspace, reason}}
+    end
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
@@ -89,24 +132,30 @@ defmodule SymphonyElixir.Workspace do
 
   @spec remove(Path.t(), worker_host()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace, nil) do
-    case File.exists?(workspace) do
-      true ->
-        case validate_workspace_path(workspace, nil) do
-          :ok ->
-            maybe_run_before_remove_hook(workspace, nil)
-            File.rm_rf(workspace)
+    settings = Config.settings!()
 
-          {:error, reason} ->
-            {:error, reason, ""}
-        end
+    case validate_workspace_path(workspace, nil, settings.workspace.root) do
+      :ok ->
+        remove_bound(workspace, settings.workspace.root, settings.hooks)
 
-      false ->
-        File.rm_rf(workspace)
+      {:error, {:workspace_issue_symlink, _symlink_path}} ->
+        remove_bound(workspace, settings.workspace.root)
+
+      {:error, reason} ->
+        {:error, reason, ""}
     end
   end
 
   def remove(workspace, worker_host) when is_binary(worker_host) do
-    maybe_run_before_remove_hook(workspace, worker_host)
+    case validate_worker_host(worker_host) do
+      :ok -> remove_remote(workspace, worker_host)
+      {:error, reason} -> {:error, reason, ""}
+    end
+  end
+
+  defp remove_remote(workspace, worker_host) do
+    settings = Config.settings!()
+    maybe_run_before_remove_hook(workspace, worker_host, settings.hooks)
 
     script =
       [
@@ -115,48 +164,84 @@ defmodule SymphonyElixir.Workspace do
       ]
       |> Enum.join("\n")
 
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
-      {:ok, {_output, 0}} ->
-        {:ok, []}
-
-      {:ok, {output, status}} ->
-        {:error, {:workspace_remove_failed, worker_host, status, output}, ""}
-
-      {:error, reason} ->
-        {:error, reason, ""}
+    case run_remote_command(worker_host, script, settings.hooks.timeout_ms) do
+      {:ok, {_output, 0}} -> {:ok, []}
+      {:ok, {output, status}} -> {:error, {:workspace_remove_failed, worker_host, status, output}, ""}
+      {:error, reason} -> {:error, reason, ""}
     end
   end
 
-  @spec remove_issue_workspaces(term()) :: :ok
+  @doc "Removes one normalized direct child of an explicitly captured canonical workspace root."
+  @spec remove_bound(Path.t(), Path.t()) ::
+          {:ok, [String.t()]} | {:error, term(), String.t()}
+  def remove_bound(workspace, canonical_root)
+      when is_binary(workspace) and is_binary(canonical_root) do
+    remove_bound(workspace, canonical_root, nil)
+  end
+
+  def remove_bound(workspace, canonical_root) do
+    {:error, {:workspace_bound_invalid, workspace, canonical_root}, ""}
+  end
+
+  @doc "Runs a captured before-remove hook, then revalidates and removes one bound workspace."
+  @spec remove_bound(Path.t(), Path.t(), map() | nil) ::
+          {:ok, [String.t()]} | {:error, term(), String.t()}
+  def remove_bound(workspace, canonical_root, hooks)
+      when is_binary(workspace) and is_binary(canonical_root) and
+             (is_map(hooks) or is_nil(hooks)) do
+    with :ok <- validate_canonical_root(canonical_root),
+         :ok <- validate_bound_workspace_path(workspace, canonical_root),
+         :ok <- maybe_run_bound_before_remove_hook(workspace, hooks),
+         :ok <- validate_canonical_root(canonical_root),
+         :ok <- validate_bound_workspace_path(workspace, canonical_root) do
+      File.rm_rf(workspace)
+    else
+      {:error, reason} -> {:error, reason, ""}
+    end
+  end
+
+  def remove_bound(workspace, canonical_root, hooks) do
+    {:error, {:workspace_bound_invalid, workspace, canonical_root, hooks}, ""}
+  end
+
+  @spec remove_issue_workspaces(term()) :: :ok | {:error, term()}
   def remove_issue_workspaces(identifier), do: remove_issue_workspaces(identifier, nil)
 
-  @spec remove_issue_workspaces(term(), worker_host()) :: :ok
+  @spec remove_issue_workspaces(term(), worker_host()) :: :ok | {:error, term()}
   def remove_issue_workspaces(identifier, worker_host) when is_binary(identifier) and is_binary(worker_host) do
-    safe_id = safe_identifier(identifier)
+    with :ok <- validate_worker_host(worker_host) do
+      settings = Config.settings!()
+      safe_id = safe_identifier(identifier)
 
-    case workspace_path_for_issue(safe_id, worker_host) do
-      {:ok, workspace} -> remove(workspace, worker_host)
-      {:error, _reason} -> :ok
+      {:ok, workspace} = workspace_path_for_issue(safe_id, worker_host, settings)
+
+      case remove(workspace, worker_host) do
+        {:ok, _removed} -> :ok
+        {:error, reason, _detail} -> {:error, reason}
+      end
     end
-
-    :ok
   end
 
   def remove_issue_workspaces(identifier, nil) when is_binary(identifier) do
+    settings = Config.settings!()
     safe_id = safe_identifier(identifier)
 
-    case Config.settings!().worker.ssh_hosts do
+    case settings.worker.ssh_hosts do
       [] ->
-        case workspace_path_for_issue(safe_id, nil) do
-          {:ok, workspace} -> remove(workspace, nil)
-          {:error, _reason} -> :ok
+        {:ok, workspace} = workspace_path_for_issue(safe_id, nil, settings)
+
+        case remove(workspace, nil) do
+          {:ok, _removed} -> :ok
+          {:error, reason, _detail} -> {:error, reason}
         end
 
-      worker_hosts ->
-        Enum.each(worker_hosts, &remove_issue_workspaces(identifier, &1))
+      _worker_hosts ->
+        {:error, @remote_workers_error}
     end
+  end
 
-    :ok
+  def remove_issue_workspaces(_identifier, worker_host) when is_binary(worker_host) do
+    {:error, @remote_workers_error}
   end
 
   def remove_issue_workspaces(_identifier, _worker_host) do
@@ -166,93 +251,281 @@ defmodule SymphonyElixir.Workspace do
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
           :ok | {:error, term()}
   def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
+    settings = Config.settings!()
+    run_before_run_hook_bound(workspace, settings.workspace.root, issue_or_identifier, worker_host)
+  end
+
+  @doc "Runs the current before-run hook against an immutable workspace root binding."
+  @spec run_before_run_hook_bound(
+          Path.t(),
+          Path.t(),
+          map() | String.t() | nil,
+          worker_host(),
+          keyword()
+        ) ::
+          :ok | {:error, term()}
+  def run_before_run_hook_bound(
+        workspace,
+        root,
+        issue_or_identifier,
+        worker_host \\ nil,
+        opts \\ []
+      )
+      when is_binary(workspace) and is_binary(root) do
     issue_context = issue_context(issue_or_identifier)
-    hooks = Config.settings!().hooks
+    settings = Config.settings!()
 
-    case hooks.before_run do
-      nil ->
-        :ok
+    with :ok <- validate_worker_host(worker_host),
+         :ok <- validate_bound_hook_workspace(workspace, root, worker_host) do
+      case settings.hooks.before_run do
+        nil ->
+          :ok
 
-      command ->
-        run_hook(command, workspace, issue_context, "before_run", worker_host)
+        command ->
+          run_hook(
+            command,
+            workspace,
+            issue_context,
+            "before_run",
+            worker_host,
+            settings.hooks,
+            opts
+          )
+      end
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, worker_host()) :: :ok
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
+          :ok | {:error, term()}
   def run_after_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
+    settings = Config.settings!()
+    run_after_run_hook_bound(workspace, settings.workspace.root, issue_or_identifier, worker_host)
+  end
+
+  @doc "Runs the current after-run hook against an immutable workspace root binding."
+  @spec run_after_run_hook_bound(
+          Path.t(),
+          Path.t(),
+          map() | String.t() | nil,
+          worker_host(),
+          keyword()
+        ) ::
+          :ok | {:error, term()}
+  def run_after_run_hook_bound(
+        workspace,
+        root,
+        issue_or_identifier,
+        worker_host \\ nil,
+        opts \\ []
+      )
+      when is_binary(workspace) and is_binary(root) do
     issue_context = issue_context(issue_or_identifier)
-    hooks = Config.settings!().hooks
+    settings = Config.settings!()
 
-    case hooks.after_run do
-      nil ->
-        :ok
+    with :ok <- validate_worker_host(worker_host),
+         :ok <- validate_bound_hook_workspace(workspace, root, worker_host) do
+      case settings.hooks.after_run do
+        nil ->
+          :ok
 
-      command ->
-        run_hook(command, workspace, issue_context, "after_run", worker_host)
-        |> ignore_hook_failure()
+        command ->
+          run_hook(
+            command,
+            workspace,
+            issue_context,
+            "after_run",
+            worker_host,
+            settings.hooks,
+            opts
+          )
+          |> ignore_hook_failure()
+      end
     end
   end
 
-  defp workspace_path_for_issue(safe_id, nil) when is_binary(safe_id) do
-    Config.settings!().workspace.root
-    |> Path.join(safe_id)
-    |> PathSafety.canonicalize()
+  defp workspace_path_for_issue(safe_id, nil, settings) when is_binary(safe_id) do
+    {:ok, Path.join(settings.workspace.root, safe_id)}
   end
 
-  defp workspace_path_for_issue(safe_id, worker_host) when is_binary(safe_id) and is_binary(worker_host) do
-    {:ok, Path.join(Config.settings!().workspace.root, safe_id)}
+  defp workspace_path_for_issue(safe_id, worker_host, settings)
+       when is_binary(safe_id) and is_binary(worker_host) do
+    {:ok, Path.join(settings.workspace.root, safe_id)}
+  end
+
+  defp safe_identifier(identifier) when is_binary(identifier) do
+    if ordinary_identifier?(identifier) do
+      identifier
+    else
+      identifier_with_digest(identifier)
+    end
   end
 
   defp safe_identifier(identifier) do
-    String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
+    identifier_with_digest(identifier)
   end
 
-  defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
-    hooks = Config.settings!().hooks
+  defp ordinary_identifier?(identifier) do
+    byte_size(identifier) <= @max_identifier_bytes and String.valid?(identifier) and
+      Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/, identifier)
+  end
 
-    case created? do
-      true ->
-        case hooks.after_create do
-          nil ->
-            :ok
+  defp identifier_with_digest(identifier) do
+    digest =
+      identifier
+      |> :erlang.term_to_binary([:deterministic])
+      |> then(&:crypto.hash(:sha256, &1))
+      |> binary_part(0, @identifier_digest_bytes)
+      |> Base.encode16(case: :lower)
 
-          command ->
-            run_hook(command, workspace, issue_context, "after_create", worker_host)
-        end
+    suffix = "--" <> digest
+    prefix_limit = @max_identifier_bytes - byte_size(suffix)
 
-      false ->
-        :ok
+    prefix =
+      identifier
+      |> identifier_binary()
+      |> sanitize_identifier_bytes()
+      |> binary_part_safely(prefix_limit)
+      |> normalize_identifier_prefix()
+
+    prefix <> suffix
+  end
+
+  defp identifier_binary(identifier) when is_binary(identifier), do: identifier
+  defp identifier_binary(_identifier), do: "issue"
+
+  defp sanitize_identifier_bytes(identifier) do
+    for <<byte <- identifier>>, into: <<>> do
+      if safe_identifier_byte?(byte), do: <<byte>>, else: "_"
     end
   end
 
-  defp maybe_run_before_remove_hook(workspace, nil) do
-    hooks = Config.settings!().hooks
+  defp safe_identifier_byte?(byte)
+       when byte in ?a..?z or byte in ?A..?Z or byte in ?0..?9 or byte in [?-, ?_, ?.],
+       do: true
 
-    case File.dir?(workspace) do
-      true ->
+  defp safe_identifier_byte?(_byte), do: false
+
+  defp binary_part_safely(binary, max_bytes) when byte_size(binary) <= max_bytes, do: binary
+  defp binary_part_safely(binary, max_bytes), do: binary_part(binary, 0, max_bytes)
+
+  defp normalize_identifier_prefix(prefix) do
+    normalized = String.trim_leading(prefix, ".")
+
+    if normalized == "" or normalized in [".", ".."], do: "issue", else: normalized
+  end
+
+  defp rollback_new_workspace(workspace, canonical_root, hook_reason, hook_error) do
+    if hook_cleanup_failure?(hook_reason) do
+      {:error, {:workspace_bootstrap_cleanup_blocked, hook_reason, %{path: workspace, root: canonical_root}}}
+    else
+      case remove_bound(workspace, canonical_root) do
+        {:ok, _removed} ->
+          hook_error
+
+        {:error, rollback_reason, _detail} ->
+          detail = %{path: workspace, root: canonical_root}
+
+          {:error, {:workspace_bootstrap_rollback_failed, hook_failure_class(hook_reason), rollback_reason, detail}}
+      end
+    end
+  end
+
+  defp maybe_run_after_create_hook(
+         workspace,
+         issue_context,
+         created?,
+         worker_host,
+         hooks,
+         canonical_root,
+         opts
+       ) do
+    if created? do
+      run_configured_after_create_hook(
+        hooks.after_create,
+        workspace,
+        issue_context,
+        worker_host,
+        hooks,
+        canonical_root,
+        opts
+      )
+    else
+      :ok
+    end
+  end
+
+  defp run_configured_after_create_hook(
+         nil,
+         _workspace,
+         _issue_context,
+         _worker_host,
+         _hooks,
+         _root,
+         _opts
+       ),
+       do: :ok
+
+  defp run_configured_after_create_hook(
+         command,
+         workspace,
+         issue_context,
+         worker_host,
+         hooks,
+         canonical_root,
+         opts
+       ) do
+    case run_hook(command, workspace, issue_context, "after_create", worker_host, hooks, opts) do
+      :ok ->
+        :ok
+
+      {:error, hook_reason} = hook_error ->
+        rollback_new_workspace(workspace, canonical_root, hook_reason, hook_error)
+    end
+  end
+
+  defp maybe_run_bound_before_remove_hook(_workspace, nil), do: :ok
+
+  defp maybe_run_bound_before_remove_hook(workspace, hooks) do
+    case File.lstat(workspace) do
+      {:ok, %File.Stat{type: :directory}} ->
         case hooks.before_remove do
           nil ->
             :ok
 
           command ->
-            run_hook(
-              command,
+            command
+            |> run_hook(
               workspace,
               %{issue_id: nil, issue_identifier: Path.basename(workspace)},
               "before_remove",
-              nil
+              nil,
+              hooks
             )
-            |> ignore_hook_failure()
+            |> classify_bound_before_remove_result()
         end
 
-      false ->
+      {:ok, _non_directory} ->
         :ok
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:workspace_path_unreadable, workspace, reason}}
     end
   end
 
-  defp maybe_run_before_remove_hook(workspace, worker_host) when is_binary(worker_host) do
-    hooks = Config.settings!().hooks
+  defp classify_bound_before_remove_result(:ok), do: :ok
 
+  defp classify_bound_before_remove_result({:error, reason}) do
+    if hook_cleanup_failure?(reason) do
+      {:error, {:workspace_before_remove_hook_cleanup_failed, reason}}
+    else
+      :ok
+    end
+  end
+
+  defp maybe_run_before_remove_hook(workspace, worker_host, hooks) when is_binary(worker_host) do
     case hooks.before_remove do
       nil ->
         :ok
@@ -268,7 +541,7 @@ defmodule SymphonyElixir.Workspace do
           ]
           |> Enum.join("\n")
 
-        run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
+        run_remote_command(worker_host, script, hooks.timeout_ms)
         |> case do
           {:ok, {output, status}} ->
             handle_hook_command_result(
@@ -289,33 +562,40 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp ignore_hook_failure(:ok), do: :ok
+
+  defp ignore_hook_failure({:error, reason} = error) when is_tuple(reason) do
+    if hook_cleanup_failure?(reason), do: error, else: :ok
+  end
+
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
-  defp run_hook(command, workspace, issue_context, hook_name, nil) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host, hooks, opts \\ [])
 
+  defp run_hook(command, workspace, issue_context, hook_name, nil, hooks, opts) do
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
-      end)
+    hook_runner = Keyword.get(opts, :hook_runner, WorkspaceHookRunner)
 
-    case Task.yield(task, timeout_ms) do
-      {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
+    case hook_runner.run(
+           command,
+           workspace,
+           hook_name,
+           hooks.timeout_ms,
+           hook_runner_options(opts)
+         ) do
+      :ok ->
+        :ok
 
-      nil ->
-        Task.shutdown(task, :brutal_kill)
+      {:error, reason} = error ->
+        Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local classification=#{hook_failure_class(reason)}")
 
-        Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local timeout_ms=#{timeout_ms}")
-
-        {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+        error
     end
   end
 
-  defp run_hook(command, workspace, issue_context, hook_name, worker_host) when is_binary(worker_host) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host, hooks, _opts)
+       when is_binary(worker_host) do
+    timeout_ms = hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
@@ -331,59 +611,58 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  defp publish_workspace_binding(binding, opts) when is_list(opts) do
+    case Keyword.get(opts, :on_bound) do
+      callback when is_function(callback, 1) ->
+        callback.(binding)
+        :ok
+
+      _no_callback ->
+        :ok
+    end
+  end
+
+  defp publish_workspace_binding(_binding, _opts), do: :ok
+
+  defp hook_runner_options(opts) when is_list(opts) do
+    case Keyword.get(opts, :hook_observer) do
+      observer when is_function(observer, 2) ->
+        hook_ref = make_ref()
+        [observer: fn event -> observer.(hook_ref, event) end]
+
+      _no_observer ->
+        []
+    end
+  end
+
   defp handle_hook_command_result({_output, 0}, _workspace, _issue_id, _hook_name) do
     :ok
   end
 
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do
-    sanitized_output = sanitize_hook_output_for_log(output)
+    output_bytes = output |> IO.iodata_to_binary() |> byte_size()
 
-    Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
+    Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output_bytes=#{output_bytes}")
 
-    {:error, {:workspace_hook_failed, hook_name, status, output}}
+    output_summary = %{
+      stdout_bytes: min(output_bytes, 65_536),
+      stderr_bytes: 0,
+      truncated: output_bytes > 65_536
+    }
+
+    {:error, {:workspace_hook_failed, hook_name, status, output_summary}}
   end
 
-  defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
-    binary_output = IO.iodata_to_binary(output)
-
-    case byte_size(binary_output) <= max_bytes do
-      true ->
-        binary_output
-
-      false ->
-        binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
-    end
-  end
-
-  defp validate_workspace_path(workspace, nil) when is_binary(workspace) do
+  defp validate_workspace_path(workspace, nil, canonical_root) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
-    expanded_root_prefix = expanded_root <> "/"
 
-    with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
-         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
-      canonical_root_prefix = canonical_root <> "/"
-
-      cond do
-        canonical_workspace == canonical_root ->
-          {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
-
-        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
-          :ok
-
-        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
-          {:error, {:workspace_symlink_escape, expanded_workspace, canonical_root}}
-
-        true ->
-          {:error, {:workspace_outside_root, canonical_workspace, canonical_root}}
-      end
-    else
-      {:error, {:path_canonicalize_failed, path, reason}} ->
-        {:error, {:workspace_path_unreadable, path, reason}}
+    with :ok <- validate_normalized_root(canonical_root),
+         :ok <- validate_direct_child(expanded_workspace, canonical_root) do
+      reject_issue_leaf_symlink(expanded_workspace)
     end
   end
 
-  defp validate_workspace_path(workspace, worker_host)
+  defp validate_workspace_path(workspace, worker_host, _canonical_root)
        when is_binary(workspace) and is_binary(worker_host) do
     cond do
       String.trim(workspace) == "" ->
@@ -396,6 +675,102 @@ defmodule SymphonyElixir.Workspace do
         :ok
     end
   end
+
+  defp validate_bound_hook_workspace(workspace, root, nil) do
+    with :ok <- validate_canonical_root(root),
+         :ok <- validate_bound_workspace_path(workspace, root) do
+      reject_issue_leaf_symlink(workspace)
+    end
+  end
+
+  defp validate_bound_hook_workspace(workspace, _root, worker_host)
+       when is_binary(workspace) and is_binary(worker_host) do
+    validate_workspace_path(workspace, worker_host, workspace)
+  end
+
+  defp validate_bound_workspace_path(workspace, canonical_root) do
+    expanded_workspace = Path.expand(workspace)
+
+    with true <- expanded_workspace == workspace,
+         :ok <- validate_direct_child(expanded_workspace, canonical_root) do
+      :ok
+    else
+      false -> {:error, {:workspace_not_normalized, workspace, expanded_workspace}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_canonical_root(canonical_root) do
+    with :ok <- validate_normalized_root(canonical_root) do
+      case PathSafety.canonicalize(canonical_root) do
+        {:ok, ^canonical_root} ->
+          :ok
+
+        {:ok, other_root} ->
+          {:error, {:workspace_root_not_canonical, canonical_root, other_root}}
+
+        {:error, {:path_canonicalize_failed, path, reason}} ->
+          {:error, {:workspace_path_unreadable, path, reason}}
+      end
+    end
+  end
+
+  defp validate_normalized_root(canonical_root) do
+    expanded_root = Path.expand(canonical_root)
+
+    cond do
+      Path.type(canonical_root) != :absolute ->
+        {:error, {:workspace_root_not_absolute, canonical_root}}
+
+      expanded_root != canonical_root ->
+        {:error, {:workspace_root_not_normalized, canonical_root, expanded_root}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_direct_child(workspace, canonical_root) do
+    cond do
+      workspace == canonical_root ->
+        {:error, {:workspace_equals_root, workspace, canonical_root}}
+
+      Path.dirname(workspace) == canonical_root ->
+        :ok
+
+      true ->
+        {:error, {:workspace_outside_root, workspace, canonical_root}}
+    end
+  end
+
+  defp reject_issue_leaf_symlink(workspace) do
+    case File.lstat(workspace) do
+      {:ok, %File.Stat{type: :symlink}} -> {:error, {:workspace_issue_symlink, workspace}}
+      {:ok, _stat} -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:workspace_path_unreadable, workspace, reason}}
+    end
+  end
+
+  defp validate_worker_host(nil), do: :ok
+  defp validate_worker_host(worker_host) when is_binary(worker_host), do: {:error, @remote_workers_error}
+  defp validate_worker_host(worker_host), do: {:error, {:invalid_worker_host, worker_host}}
+
+  defp hook_failure_class({classification, _hook_name}) when is_atom(classification), do: classification
+
+  defp hook_failure_class({classification, _hook_name, _detail}) when is_atom(classification),
+    do: classification
+
+  defp hook_failure_class({classification, _hook_name, _status, _summary})
+       when is_atom(classification),
+       do: classification
+
+  defp hook_failure_class(_reason), do: :workspace_hook_failed
+
+  defp hook_cleanup_failure?({:workspace_hook_cleanup_failed, _hook_name, _phase}), do: true
+  defp hook_cleanup_failure?({:workspace_hook_runner_failed, _hook_name}), do: true
+  defp hook_cleanup_failure?({:workspace_hook_supervisor_unavailable, _hook_name}), do: true
+  defp hook_cleanup_failure?(_reason), do: false
 
   defp remote_shell_assign(variable_name, raw_path)
        when is_binary(variable_name) and is_binary(raw_path) do

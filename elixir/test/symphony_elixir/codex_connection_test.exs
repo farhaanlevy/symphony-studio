@@ -6,6 +6,7 @@
 defmodule SymphonyElixir.Codex.ConnectionTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.AgentRunner
   alias SymphonyElixir.Codex.{CleanupGuardian, Connection, TransportError}
   alias SymphonyElixir.TestSupport.FakeCodexAppServer, as: FakeCodex
 
@@ -21,15 +22,11 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     def metadata(adapter), do: ProcessAdapter.metadata(adapter)
 
     def stop(adapter, timeout_ms) do
-      key = {__MODULE__, adapter.os_pid}
+      counter = Application.fetch_env!(:symphony_elixir, :fail_first_stop_counter)
 
-      case Process.get(key) do
-        nil ->
-          Process.put(key, :failed_once)
-          {:error, {:private_adapter_reason, @canary}}
-
-        :failed_once ->
-          ProcessAdapter.stop(adapter, timeout_ms)
+      case Agent.get_and_update(counter, fn count -> {count, count + 1} end) do
+        0 -> {:error, {:private_adapter_reason, @canary}}
+        _later_attempt -> ProcessAdapter.stop(adapter, timeout_ms)
       end
     end
   end
@@ -40,6 +37,24 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
 
     def canary, do: @canary
     def start(_argv, _opts), do: {:error, {:private_adapter_reason, @canary}}
+  end
+
+  defmodule UnverifiedStartRollbackAdapter do
+    @moduledoc false
+    @canary "PRIVATE-STARTUP-ROLLBACK-CANARY"
+
+    def canary, do: @canary
+
+    def start(_argv, _opts) do
+      {:error,
+       {:process_identity_unavailable, {:private_adapter_reason, @canary},
+        {:startup_rollback_unverified,
+         %{
+           group_empty: false,
+           manager_alive: true,
+           private: @canary
+         }}}}
+    end
   end
 
   defmodule CanarySendAdapter do
@@ -233,6 +248,68 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     end
   end
 
+  defmodule ConcurrentStopProbeAdapter do
+    @moduledoc false
+
+    def start(_argv, _opts) do
+      %{counter: counter, test_pid: test_pid} =
+        Application.fetch_env!(:symphony_elixir, :concurrent_stop_probe_control)
+
+      child = spawn_link(fn -> Process.sleep(:infinity) end)
+
+      adapter = %{
+        counter: counter,
+        os_pid: System.unique_integer([:positive]),
+        pid: child,
+        test_pid: test_pid
+      }
+
+      Kernel.send(test_pid, {:concurrent_stop_probe_started, adapter})
+      {:ok, adapter}
+    end
+
+    def send(_adapter, _data), do: :ok
+    def metadata(adapter), do: %{os_pid: adapter.os_pid, pid: adapter.pid}
+
+    def stop(adapter, _timeout_ms) do
+      {active, max_seen} =
+        Agent.get_and_update(adapter.counter, fn state ->
+          active = state.active + 1
+          max_seen = max(state.max_seen, active)
+
+          {{active, max_seen},
+           %{
+             state
+             | active: active,
+               callers: MapSet.put(state.callers, self()),
+               max_seen: max_seen
+           }}
+        end)
+
+      Kernel.send(adapter.test_pid, {:concurrent_stop_entered, self(), active, max_seen})
+
+      try do
+        receive do
+          {:release_concurrent_stop, result} ->
+            if result == :ok and Process.alive?(adapter.pid) do
+              Process.unlink(adapter.pid)
+              Process.exit(adapter.pid, :kill)
+            end
+
+            result
+        end
+      after
+        Agent.update(adapter.counter, fn state ->
+          %{
+            state
+            | active: state.active - 1,
+              callers: MapSet.delete(state.callers, self())
+          }
+        end)
+      end
+    end
+  end
+
   setup do
     root =
       Path.join(
@@ -243,6 +320,56 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf(root) end)
     %{root: root}
+  end
+
+  test "successful connection publishes its established cleanup authority before readiness" do
+    parent = self()
+
+    assert {:ok, connection} =
+             Connection.start(["/fake-app-server"],
+               process_adapter: CanarySendAdapter,
+               on_cleanup_authority: fn handle ->
+                 send(parent, {:established_cleanup_authority, handle})
+               end,
+               on_started: fn pid -> send(parent, {:connection_ready, pid}) end
+             )
+
+    connection_ref = Process.monitor(connection)
+
+    assert_receive {:established_cleanup_authority, %CleanupGuardian.Handle{} = handle},
+                   1_000
+
+    assert_receive {:connection_ready, ^connection}, 1_000
+    assert Process.alive?(handle.pid)
+    refute CleanupGuardian.verified?(handle)
+
+    assert :ok = Connection.close(connection)
+    assert CleanupGuardian.verified?(handle)
+    assert_receive {:DOWN, ^connection_ref, :process, ^connection, :normal}, 1_000
+    assert AgentRunner.connection_retired_for_test(connection, handle)
+  end
+
+  test "dead established connection is not retired before its guardian proves cleanup" do
+    {:ok, allow_stop} = Agent.start_link(fn -> false end)
+    connection = spawn(fn -> Process.sleep(:infinity) end)
+
+    handle =
+      CleanupGuardian.start_handle(
+        connection,
+        ControlledStopAdapter,
+        %{allow_stop: allow_stop},
+        0
+      )
+
+    connection_ref = Process.monitor(connection)
+    Process.exit(connection, :kill)
+    assert_receive {:DOWN, ^connection_ref, :process, ^connection, :killed}, 1_000
+
+    refute AgentRunner.connection_retired_for_test(connection, handle)
+    Agent.update(allow_stop, fn _blocked -> true end)
+    :ok = CleanupGuardian.request_cleanup(handle)
+    assert eventually(fn -> CleanupGuardian.verified?(handle) end)
+    assert AgentRunner.connection_retired_for_test(connection, handle)
   end
 
   test "cleanup guardian retains authority after its foreground retry window" do
@@ -320,6 +447,245 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
 
       assert_receive {:DOWN, ^faulting_guardian_ref, :process, ^faulting_guardian, :normal},
                      2_000
+    end)
+  end
+
+  test "runtime cleanup guardian fails closed after an unacknowledged pre-ready death" do
+    {:ok, allow_stop} = Agent.start_link(fn -> true end)
+
+    pre_ready_death = fn _guardian_fun ->
+      guardian = spawn(fn -> :ok end)
+      guardian_ref = Process.monitor(guardian)
+      assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, :normal}, 1_000
+      {:ok, guardian}
+    end
+
+    assert_raise RuntimeError, "runtime cleanup guardian unavailable", fn ->
+      CleanupGuardian.start_handle_with_starter_for_test(
+        self(),
+        ControlledStopAdapter,
+        %{allow_stop: allow_stop, test_pid: self()},
+        0,
+        pre_ready_death
+      )
+    end
+
+    refute_receive {:controlled_stop_attempt, _worker, _allowed?}, 100
+  end
+
+  test "late owner exit retires a Connection after guardian handoff" do
+    {:ok, allow_stop} = Agent.start_link(fn -> false end)
+    test_pid = self()
+
+    previous_control =
+      Application.get_env(:symphony_elixir, :delayed_cleanup_test_control)
+
+    Application.put_env(:symphony_elixir, :delayed_cleanup_test_control, %{
+      allow_stop: allow_stop,
+      test_pid: test_pid
+    })
+
+    on_exit(fn ->
+      if is_nil(previous_control) do
+        Application.delete_env(:symphony_elixir, :delayed_cleanup_test_control)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :delayed_cleanup_test_control,
+          previous_control
+        )
+      end
+    end)
+
+    owner =
+      spawn(fn ->
+        result =
+          Connection.start(["/bin/true"],
+            kill_timeout_ms: 0,
+            process_adapter: DelayedCleanupAdapter
+          )
+
+        send(test_pid, {:late_owner_connection, self(), result})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:late_owner_connection, ^owner, {:ok, connection}}, 1_000
+    assert_receive {:delayed_cleanup_adapter_started, adapter}, 1_000
+
+    assert {:error, %TransportError{kind: :process_cleanup_failed}} =
+             Connection.close(connection)
+
+    state = wait_for_guardian_handoff!(connection)
+    guardian = state.cleanup_guardian
+    guardian_ref = Process.monitor(guardian)
+    connection_ref = Process.monitor(connection)
+
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^connection_ref, :process, ^connection, _reason}, 1_000
+    assert Process.alive?(guardian)
+    assert Process.alive?(adapter.pid)
+
+    Agent.update(allow_stop, fn _blocked -> true end)
+    send(guardian, :retry_cleanup)
+
+    assert_receive {:delayed_cleanup_verified, _worker}, 1_000
+    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, :normal}, 1_000
+    refute Process.alive?(adapter.pid)
+  end
+
+  test "a failed close transfers all retry authority to one guardian caller" do
+    {:ok, counter} =
+      Agent.start(fn -> %{active: 0, callers: MapSet.new(), max_seen: 0} end)
+
+    previous_control = Application.get_env(:symphony_elixir, :concurrent_stop_probe_control)
+
+    Application.put_env(:symphony_elixir, :concurrent_stop_probe_control, %{
+      counter: counter,
+      test_pid: self()
+    })
+
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        result =
+          Connection.start(["/bin/true"],
+            kill_timeout_ms: 0,
+            process_adapter: ConcurrentStopProbeAdapter
+          )
+
+        send(parent, {:concurrent_stop_connection, self(), result})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:concurrent_stop_connection, ^owner, {:ok, connection}}, 1_000
+    assert_receive {:concurrent_stop_probe_started, adapter}, 1_000
+
+    connection_ref = Process.monitor(connection)
+
+    on_exit(fn ->
+      if Process.alive?(counter) do
+        counter
+        |> Agent.get(& &1.callers)
+        |> Enum.each(&send(&1, {:release_concurrent_stop, :ok}))
+      end
+
+      if Process.alive?(owner), do: Process.exit(owner, :kill)
+      if Process.alive?(adapter.pid), do: Process.exit(adapter.pid, :kill)
+
+      if is_nil(previous_control) do
+        Application.delete_env(:symphony_elixir, :concurrent_stop_probe_control)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :concurrent_stop_probe_control,
+          previous_control
+        )
+      end
+    end)
+
+    close_task = Task.async(fn -> Connection.close(connection) end)
+
+    assert_receive {:concurrent_stop_entered, initial_caller, 1, 1}, 1_000
+    refute initial_caller == connection
+    send(initial_caller, {:release_concurrent_stop, {:error, :cleanup_held}})
+
+    assert {:error, %TransportError{kind: :process_cleanup_failed}} =
+             Task.await(close_task, 1_000)
+
+    assert_receive {:concurrent_stop_entered, guardian_caller, 1, 1}, 1_000
+    refute guardian_caller == connection
+
+    Process.exit(owner, :kill)
+
+    refute_receive {:concurrent_stop_entered, _second_caller, _active, _max_seen}, 750
+
+    assert %{active: 1, max_seen: 1} = Agent.get(counter, &Map.take(&1, [:active, :max_seen]))
+    assert Process.alive?(connection)
+    assert Process.alive?(adapter.pid)
+
+    send(guardian_caller, {:release_concurrent_stop, :ok})
+
+    assert_receive {:DOWN, ^connection_ref, :process, ^connection, _reason}, 1_000
+    refute Process.alive?(adapter.pid)
+    assert %{active: 0, max_seen: 1} = Agent.get(counter, &Map.take(&1, [:active, :max_seen]))
+  end
+
+  test "runtime supervisor exit detaches an already-handed-off Connection without overlap" do
+    {:ok, allow_stop} = Agent.start(fn -> false end)
+    test_pid = self()
+    previous_control = Application.get_env(:symphony_elixir, :delayed_cleanup_test_control)
+
+    Application.put_env(:symphony_elixir, :delayed_cleanup_test_control, %{
+      allow_stop: allow_stop,
+      test_pid: test_pid
+    })
+
+    on_exit(fn ->
+      if is_nil(previous_control) do
+        Application.delete_env(:symphony_elixir, :delayed_cleanup_test_control)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :delayed_cleanup_test_control,
+          previous_control
+        )
+      end
+    end)
+
+    assert {:ok, connection} =
+             Connection.start(["/bin/true"],
+               kill_timeout_ms: 0,
+               process_adapter: DelayedCleanupAdapter
+             )
+
+    assert_receive {:delayed_cleanup_adapter_started, adapter}, 1_000
+
+    assert {:error, %TransportError{kind: :process_cleanup_failed}} =
+             Connection.close(connection)
+
+    guardian = wait_for_guardian_handoff!(connection).cleanup_guardian
+    guardian_ref = Process.monitor(guardian)
+    connection_ref = Process.monitor(connection)
+
+    on_exit(fn ->
+      if Process.alive?(allow_stop) do
+        Agent.update(allow_stop, fn _blocked -> true end)
+      end
+
+      if Process.alive?(guardian), do: send(guardian, :retry_cleanup)
+    end)
+
+    runtime_children = [
+      SymphonyElixir.CleanupBarrier,
+      SymphonyElixir.CleanupSupervisor,
+      SymphonyElixir.ConnectionSupervisor,
+      SymphonyElixir.WorkspaceHookSupervisor,
+      SymphonyElixir.TaskSupervisor,
+      SymphonyElixir.Orchestrator
+    ]
+
+    runtime = Map.new(runtime_children, &{&1, Process.whereis(&1)})
+    Process.exit(Map.fetch!(runtime, SymphonyElixir.Orchestrator), :kill)
+
+    assert_receive {:DOWN, ^connection_ref, :process, ^connection, _reason}, 1_000
+    assert Process.alive?(guardian)
+    assert Process.alive?(adapter.pid)
+
+    Enum.each(runtime, fn {name, old_pid} ->
+      current = Process.whereis(name)
+      assert is_nil(current) or current == old_pid
+    end)
+
+    Agent.update(allow_stop, fn _blocked -> true end)
+    send(guardian, :retry_cleanup)
+
+    assert_receive {:delayed_cleanup_verified, _worker}, 1_000
+    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, :normal}, 1_000
+    refute Process.alive?(adapter.pid)
+
+    Enum.each(runtime, fn {name, old_pid} ->
+      assert is_pid(await_registered_replacement(name, old_pid, 2_000))
     end)
   end
 
@@ -503,6 +869,28 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
 
     refute inspect(exit_error) =~ CanaryExitAdapter.canary()
     assert :ok = Connection.close(exit_connection)
+  end
+
+  test "classifies unverified startup rollback as cleanup failure and reports it before stop" do
+    test_pid = self()
+
+    assert {:error,
+            %TransportError{
+              kind: :process_cleanup_failed,
+              details: %{
+                cleanup_verified: false,
+                reason: :startup_rollback_unverified
+              }
+            } = error} =
+             Connection.start(["/bin/true"],
+               process_adapter: UnverifiedStartRollbackAdapter,
+               on_transport_failure: fn failure ->
+                 send(test_pid, {:startup_transport_failure, failure})
+               end
+             )
+
+    assert_receive {:startup_transport_failure, ^error}, 1_000
+    refute inspect(error) =~ UnverifiedStartRollbackAdapter.canary()
   end
 
   test "classifies a known stderr condition across split chunks", %{root: root} do
@@ -1617,6 +2005,18 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
   end
 
   test "promotes cleanup failure to a top-level non-retryable blocker", %{root: root} do
+    {:ok, stop_counter} = Agent.start(fn -> 0 end)
+    previous_counter = Application.get_env(:symphony_elixir, :fail_first_stop_counter)
+    Application.put_env(:symphony_elixir, :fail_first_stop_counter, stop_counter)
+
+    on_exit(fn ->
+      if is_nil(previous_counter) do
+        Application.delete_env(:symphony_elixir, :fail_first_stop_counter)
+      else
+        Application.put_env(:symphony_elixir, :fail_first_stop_counter, previous_counter)
+      end
+    end)
+
     fixture =
       FakeCodex.create!(root, [
         FakeCodex.expect(%{"id" => 1, "method" => "account/read", "params" => %{}}),
@@ -1633,6 +2033,7 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
             } = error} = Connection.request(connection, "account/read", %{}, 2_000)
 
     refute inspect(error) =~ FailFirstStopAdapter.canary()
+    wait_for_cleanup_verified!(connection)
     assert :ok = Connection.close(connection)
   end
 
@@ -1731,6 +2132,56 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     end
   end
 
+  defp wait_for_cleanup_verified!(connection, attempts \\ 200)
+
+  defp wait_for_cleanup_verified!(_connection, 0),
+    do: flunk("cleanup guardian did not verify adapter retirement")
+
+  defp wait_for_cleanup_verified!(connection, attempts) do
+    if is_nil(:sys.get_state(connection).adapter) do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_cleanup_verified!(connection, attempts - 1)
+    end
+  end
+
+  defp wait_for_guardian_handoff!(connection, attempts \\ 500)
+
+  defp wait_for_guardian_handoff!(_connection, 0),
+    do: flunk("cleanup guardian did not enter persistent handoff")
+
+  defp wait_for_guardian_handoff!(connection, attempts) do
+    state = :sys.get_state(connection)
+
+    if state.cleanup_guardian_handed_off? do
+      state
+    else
+      Process.sleep(10)
+      wait_for_guardian_handoff!(connection, attempts - 1)
+    end
+  end
+
+  defp await_registered_replacement(name, old_pid, timeout_ms) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_registered_replacement(name, old_pid, deadline_ms)
+  end
+
+  defp do_await_registered_replacement(name, old_pid, deadline_ms) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) and pid != old_pid ->
+        pid
+
+      _pending ->
+        if System.monotonic_time(:millisecond) < deadline_ms do
+          Process.sleep(10)
+          do_await_registered_replacement(name, old_pid, deadline_ms)
+        else
+          flunk("#{inspect(name)} did not restart after cleanup handoff")
+        end
+    end
+  end
+
   defp wait_for_barrier!(fixture, name, attempts \\ 400)
 
   defp wait_for_barrier!(_fixture, name, 0), do: flunk("barrier #{inspect(name)} was not reached")
@@ -1808,6 +2259,19 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
   end
 
   defp refute_process_exists(pid, 0), do: refute(os_process_exists?(pid))
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(fun, attempts) when is_function(fun, 0) and attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(fun, 0) when is_function(fun, 0), do: fun.()
 
   defp os_process_exists?(pid), do: File.exists?("/proc/#{pid}/stat")
 

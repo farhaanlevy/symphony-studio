@@ -209,8 +209,13 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
-- For path values, `~` is expanded to the home directory.
+- For path values, `~` is expanded to the home directory. Relative `workspace.root` values resolve
+  against the directory containing the selected `WORKFLOW.md`, not the service process's current
+  directory. The resulting root is canonicalized once during configuration loading.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling.
+  Per-issue leaf names preserve ordinary ASCII identifiers; unsafe or oversized identifiers gain a
+  deterministic digest suffix so distinct tracker identifiers cannot collapse onto one workspace.
+  Existing, sibling, broken, and outside-root issue-leaf symlinks are never accepted as workspaces.
   `codex.command` is parsed as a quoted argument vector and is never run through a shell. Only an
   exact first token of `$CODEX_BIN` is resolved from the environment; other `$VAR` text, command
   substitutions, backticks, and globs remain literal arguments. Shell control operators and
@@ -244,6 +249,16 @@ Notes:
   correlation.
 - Remote App Server workers are outside the supported Release 0/1 profile. A configured SSH worker
   or `worker_host` is rejected before launch and remains gated until Release 5.
+- Local workspace hooks run in the same verified descendant-containment boundary as App Server
+  children. They inherit only `HOME`, locale/user/terminal variables, `PATH`, `TMPDIR`, and the
+  optional `SOURCE_REPO_URL`; tracker credentials and unrelated Studio secrets are absent. Hook
+  execution stops at a 64 KiB aggregate output ceiling, and raw output is never copied into errors
+  or logs. A fresh workspace is rolled back when bootstrap fails, while a reused workspace is never
+  reset by a hook failure.
+- The upstream runtime sandbox resolver remains available for non-Studio callers. Managed Studio
+  callers opt into a narrower policy that binds `workspaceWrite.writableRoots` to the exact issue
+  workspace, keeps network access off by default, preserves an explicit network opt-in, and rejects
+  broad sandbox variants.
 
 ```yaml
 tracker:

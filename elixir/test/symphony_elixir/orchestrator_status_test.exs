@@ -1373,7 +1373,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              error: ^cleanup_error,
              workspace_path: "/workspaces/MT-CLEANUP",
              last_codex_event: :process_cleanup_failed,
-             last_codex_timestamp: ^timestamp
+             last_codex_timestamp: ^timestamp,
+             preserve_on_terminal?: true
            } = state.blocked[issue_id]
 
     assert %{
@@ -1388,6 +1389,227 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                }
              ]
            } = Orchestrator.snapshot(orchestrator_name, 1_000)
+
+    terminal_issue = %{issue | state: "Closed"}
+
+    terminal_state =
+      Orchestrator.reconcile_blocked_issue_states_for_test([terminal_issue], state)
+
+    assert terminal_state.blocked[issue_id].blocked_at == state.blocked[issue_id].blocked_at
+    assert terminal_state.blocked[issue_id].preserve_on_terminal?
+    assert MapSet.member?(terminal_state.claimed, issue_id)
+    refute Map.has_key?(terminal_state.retry_attempts, issue_id)
+  end
+
+  test "a cleanup failure arriving after worker DOWN stays blocked through terminal follow-up" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: nil)
+
+    issue_id = "issue-late-process-cleanup-failed"
+    orchestrator_name = Module.concat(__MODULE__, :LateProcessCleanupBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn -> stop_named_process(orchestrator_name) end)
+
+    run_id = "00000000-0000-4000-8000-000000000101"
+    attempt_id = "00000000-0000-4000-8000-000000000102"
+    ref = make_ref()
+    timestamp = DateTime.utc_now()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LATE-CLEANUP",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-LATE-CLEANUP"
+    }
+
+    put_running_issue(pid, issue, ref, timestamp, %{
+      run_id: run_id,
+      attempt_id: attempt_id,
+      session_id: "thread-late-cleanup-turn-late-cleanup",
+      codex_app_server_pid: "4102",
+      workspace_path: "/workspaces/MT-LATE-CLEANUP",
+      workspace_root: "/workspaces"
+    })
+
+    send(pid, {:DOWN, ref, :process, self(), :killed})
+
+    assert %{blocked: [%{issue_id: ^issue_id, last_codex_event: :uncertain_external_outcome}]} =
+             wait_for_snapshot(pid, fn snapshot ->
+               Enum.any?(snapshot.blocked, &(&1.issue_id == issue_id))
+             end)
+
+    transport_error =
+      TransportError.new(:process_cleanup_failed, %{
+        cause: %{kind: :owner_down},
+        cleanup: %{reason: :process_group_still_alive}
+      })
+
+    late_timestamp = DateTime.add(timestamp, 1, :millisecond)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :process_cleanup_failed,
+         reason: transport_error,
+         timestamp: late_timestamp,
+         run_id: run_id,
+         attempt_id: attempt_id
+       }}
+    )
+
+    assert %{
+             blocked: [
+               %{
+                 issue_id: ^issue_id,
+                 last_codex_event: :process_cleanup_failed,
+                 last_codex_timestamp: ^late_timestamp
+               }
+             ]
+           } =
+             wait_for_snapshot(pid, fn snapshot ->
+               Enum.any?(snapshot.blocked, fn entry ->
+                 entry.issue_id == issue_id and entry.last_codex_event == :process_cleanup_failed
+               end)
+             end)
+
+    state = :sys.get_state(pid)
+    blocked_at = state.blocked[issue_id].blocked_at
+
+    assert state.blocked[issue_id].preserve_on_terminal?
+    assert MapSet.member?(state.claimed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    terminal_state =
+      Orchestrator.reconcile_blocked_issue_states_for_test(
+        [%{issue | state: "Closed"}],
+        state
+      )
+
+    assert terminal_state.blocked[issue_id].blocked_at == blocked_at
+    assert terminal_state.blocked[issue_id].last_codex_event == :process_cleanup_failed
+    assert terminal_state.blocked[issue_id].preserve_on_terminal?
+    assert MapSet.member?(terminal_state.claimed, issue_id)
+    refute Map.has_key?(terminal_state.retry_attempts, issue_id)
+  end
+
+  test "an old-attempt cleanup failure after redispatch stops and safety-blocks the current attempt" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: nil)
+
+    issue_id = "issue-redispatched-cleanup-failed"
+    orchestrator_name = Module.concat(__MODULE__, :RedispatchedProcessCleanupBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    parent = self()
+
+    current_controller =
+      spawn(fn ->
+        receive do
+          {:cancel_agent_attempt, caller, cancel_token} ->
+            send(parent, {:current_attempt_cancelled, self()})
+
+            send(
+              caller,
+              {:agent_attempt_cancelled, cancel_token,
+               {:ok,
+                %{
+                  workspace_path: "/workspaces/MT-REDISPATCHED-CLEANUP",
+                  workspace_root: "/workspaces"
+                }}}
+            )
+        end
+      end)
+
+    controller_ref = Process.monitor(current_controller)
+
+    on_exit(fn ->
+      stop_named_process(orchestrator_name)
+
+      if Process.alive?(current_controller) do
+        Process.exit(current_controller, :kill)
+      end
+    end)
+
+    run_id = "00000000-0000-4000-8000-000000000201"
+    old_attempt_id = "00000000-0000-4000-8000-000000000202"
+    current_attempt_id = "00000000-0000-4000-8000-000000000203"
+    current_ref = make_ref()
+    timestamp = DateTime.utc_now()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-REDISPATCHED-CLEANUP",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-REDISPATCHED-CLEANUP"
+    }
+
+    put_running_issue(pid, issue, current_ref, timestamp, %{
+      cancel_mode: :cooperative,
+      pid: current_controller,
+      run_id: run_id,
+      attempt_id: current_attempt_id,
+      retry_attempt: 2,
+      workspace_path: "/workspaces/MT-REDISPATCHED-CLEANUP",
+      workspace_root: "/workspaces"
+    })
+
+    transport_error =
+      TransportError.new(:process_cleanup_failed, %{
+        cause: %{kind: :owner_down},
+        cleanup: %{reason: :process_group_still_alive}
+      })
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :process_cleanup_failed,
+         reason: transport_error,
+         timestamp: timestamp,
+         run_id: run_id,
+         attempt_id: old_attempt_id
+       }}
+    )
+
+    assert_receive {:current_attempt_cancelled, ^current_controller}, 1_000
+    assert_receive {:DOWN, ^controller_ref, :process, ^current_controller, :normal}, 1_000
+
+    assert %{
+             running: [],
+             retrying: [],
+             blocked: [
+               %{
+                 issue_id: ^issue_id,
+                 last_codex_event: :process_cleanup_failed,
+                 last_codex_timestamp: ^timestamp
+               }
+             ]
+           } =
+             wait_for_snapshot(pid, fn snapshot ->
+               Enum.any?(snapshot.blocked, fn entry ->
+                 entry.issue_id == issue_id and entry.last_codex_event == :process_cleanup_failed
+               end)
+             end)
+
+    state = :sys.get_state(pid)
+    blocked_entry = state.blocked[issue_id]
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert blocked_entry.run_id == run_id
+    assert blocked_entry.attempt_id == current_attempt_id
+    assert blocked_entry.preserve_on_terminal?
+
+    terminal_state =
+      Orchestrator.reconcile_blocked_issue_states_for_test(
+        [%{issue | state: "Closed"}],
+        state
+      )
+
+    assert terminal_state.blocked[issue_id].blocked_at == blocked_entry.blocked_at
+    assert terminal_state.blocked[issue_id].preserve_on_terminal?
+    assert MapSet.member?(terminal_state.claimed, issue_id)
   end
 
   test "status dashboard humanizes cleanup failures as reconciliation blockers" do
@@ -1781,19 +2003,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "status dashboard coalesces rapid updates to one render per interval" do
     dashboard_name = Module.concat(__MODULE__, :RenderDashboard)
     parent = self()
-    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+    runtime_supervisor_pid = Process.whereis(SymphonyElixir.RuntimeSupervisor)
 
     on_exit(fn ->
-      if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
-        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+      if is_nil(Process.whereis(SymphonyElixir.RuntimeSupervisor)) do
+        case Supervisor.restart_child(
+               SymphonyElixir.Supervisor,
+               SymphonyElixir.RuntimeSupervisor
+             ) do
           {:ok, _pid} -> :ok
           {:error, {:already_started, _pid}} -> :ok
         end
       end
     end)
 
-    if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    if is_pid(runtime_supervisor_pid) do
+      assert :ok =
+               Supervisor.terminate_child(
+                 SymphonyElixir.Supervisor,
+                 SymphonyElixir.RuntimeSupervisor
+               )
     end
 
     {:ok, pid} =

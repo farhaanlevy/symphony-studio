@@ -6,6 +6,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.WorkspaceHookRunner
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -55,7 +56,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, second_workspace} = Workspace.create_for_issue("MT/Det")
 
     assert first_workspace == second_workspace
-    assert Path.basename(first_workspace) == "MT_Det"
+    assert Path.basename(first_workspace) =~ ~r/^MT_Det--[0-9a-f]{32}$/
+  end
+
+  test "workspace identifiers preserve ordinary IDs and separate colliding unsafe inputs" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-identifiers-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      assert {:ok, ordinary_workspace} = Workspace.create_for_issue("MT-123")
+      assert Path.basename(ordinary_workspace) == "MT-123"
+
+      assert {:ok, slash_workspace} = Workspace.create_for_issue("MT/A")
+      assert {:ok, question_workspace} = Workspace.create_for_issue("MT?A")
+      refute slash_workspace == question_workspace
+      assert Path.basename(slash_workspace) =~ ~r/^MT_A--[0-9a-f]{32}$/
+      assert Path.basename(question_workspace) =~ ~r/^MT_A--[0-9a-f]{32}$/
+
+      assert {:ok, invalid_utf8_workspace} = Workspace.create_for_issue(<<255, 0, 47>>)
+      assert String.valid?(Path.basename(invalid_utf8_workspace))
+      assert byte_size(Path.basename(invalid_utf8_workspace)) <= 180
+
+      assert {:ok, long_workspace} = Workspace.create_for_issue(String.duplicate("A", 500))
+      assert byte_size(Path.basename(long_workspace)) == 180
+    after
+      File.rm_rf(workspace_root)
+    end
   end
 
   test "workspace reuses existing issue directory without deleting local changes" do
@@ -135,11 +166,74 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-      assert {:ok, canonical_outside_root} = SymphonyElixir.PathSafety.canonicalize(outside_root)
-      assert {:ok, canonical_workspace_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
-
-      assert {:error, {:workspace_outside_root, ^canonical_outside_root, ^canonical_workspace_root}} =
+      assert {:error, {:workspace_issue_symlink, ^symlink_path}} =
                Workspace.create_for_issue("MT-SYM")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace rejects sibling and broken issue-leaf symlinks without following either" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-leaf-symlinks-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      sibling_workspace = Path.join(workspace_root, "MT-SIBLING")
+      sibling_target = Path.join(workspace_root, "OTHER")
+      broken_workspace = Path.join(workspace_root, "MT-BROKEN")
+
+      File.mkdir_p!(sibling_target)
+      File.ln_s!(sibling_target, sibling_workspace)
+      File.ln_s!(Path.join(test_root, "missing-target"), broken_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      assert {:error, {:workspace_issue_symlink, ^sibling_workspace}} =
+               Workspace.create_for_issue("MT-SIBLING")
+
+      assert {:error, {:workspace_issue_symlink, ^broken_workspace}} =
+               Workspace.create_for_issue("MT-BROKEN")
+
+      assert File.dir?(sibling_target)
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(broken_workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "path canonicalization detects symlink loops and bounds acyclic traversal" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-path-symlink-loop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(test_root)
+      first = Path.join(test_root, "first")
+      second = Path.join(test_root, "second")
+      File.ln_s!(second, first)
+      File.ln_s!(first, second)
+
+      assert {:error, {:path_canonicalize_failed, ^first, {:symlink_loop, loop_path}}} =
+               SymphonyElixir.PathSafety.canonicalize(first)
+
+      assert loop_path in [first, second]
+
+      chain_root = Path.join(test_root, "chain")
+      File.mkdir_p!(chain_root)
+
+      for index <- 0..40 do
+        target = if index == 40, do: "target", else: "link-#{index + 1}"
+        File.ln_s!(target, Path.join(chain_root, "link-#{index}"))
+      end
+
+      assert {:error, {:path_canonicalize_failed, _chain_path, {:too_many_symlinks, 40}}} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(chain_root, "link-0"))
     after
       File.rm_rf(test_root)
     end
@@ -206,8 +300,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_after_create: "echo nope && exit 17"
       )
 
-      assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
+      assert {:error,
+              {:workspace_hook_failed, "after_create", 17,
+               %{
+                 stdout_bytes: _stdout_bytes,
+                 stderr_bytes: _stderr_bytes,
+                 truncated: false
+               }}} =
                Workspace.create_for_issue("MT-FAIL")
+
+      assert {:ok, []} = File.ls(workspace_root)
     after
       File.rm_rf(workspace_root)
     end
@@ -229,8 +331,151 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
                Workspace.create_for_issue("MT-TIMEOUT")
+
+      assert {:ok, []} = File.ls(workspace_root)
     after
       File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace hooks receive only the explicit environment allowlist" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-env-#{System.unique_integer([:positive])}"
+      )
+
+    previous_linear_key = System.get_env("LINEAR_API_KEY")
+    previous_source_repo = System.get_env("SOURCE_REPO_URL")
+
+    on_exit(fn ->
+      restore_env("LINEAR_API_KEY", previous_linear_key)
+      restore_env("SOURCE_REPO_URL", previous_source_repo)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      System.put_env("LINEAR_API_KEY", "HOOK-SECRET-CANARY")
+      System.put_env("SOURCE_REPO_URL", "https://example.invalid/source.git")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "/usr/bin/env > hook-env.txt"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOK-ENV")
+      hook_environment = File.read!(Path.join(workspace, "hook-env.txt"))
+
+      assert hook_environment =~ "SOURCE_REPO_URL=https://example.invalid/source.git"
+      refute hook_environment =~ "LINEAR_API_KEY"
+      refute hook_environment =~ "HOOK-SECRET-CANARY"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "hook failure metadata and logs never contain raw bounded output" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-output-#{System.unique_integer([:positive])}"
+      )
+
+    canary = "RAW-HOOK-OUTPUT-CANARY"
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "printf '#{canary}'; i=0; while [ $i -lt 70000 ]; do printf x; i=$((i+1)); done; exit 23"
+      )
+
+      {result, log} =
+        with_log(fn ->
+          Workspace.create_for_issue("MT-HOOK-OUTPUT")
+        end)
+
+      assert {:error, {:workspace_hook_output_limit, "after_create", 65_536, output_summary} = reason} =
+               result
+
+      assert output_summary == %{stdout_bytes: 65_536, stderr_bytes: 0, truncated: true}
+
+      refute inspect(reason) =~ canary
+      refute log =~ canary
+      assert {:ok, []} = File.ls(workspace_root)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "a reused workspace survives a failed before_run hook unchanged" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-reused-hook-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-REUSED-HOOK")
+      progress_path = Path.join(workspace, "progress.txt")
+      File.write!(progress_path, "preserve me")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: "printf 'failed'; exit 31"
+      )
+
+      assert {:error, {:workspace_hook_failed, "before_run", 31, _summary}} =
+               Workspace.run_before_run_hook(workspace, "MT-REUSED-HOOK")
+
+      assert File.read!(progress_path) == "preserve me"
+      assert File.dir?(workspace)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "hook runner verifies descendant cleanup before exiting after owner death" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hook-owner-death-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      ready_path = Path.join(test_root, "ready")
+      leaked_path = Path.join(test_root, "leaked")
+      File.mkdir_p!(workspace)
+      observer = self()
+
+      owner =
+        spawn(fn ->
+          WorkspaceHookRunner.run(
+            "printf ready > '#{ready_path}'; (sleep 1; printf leaked > '#{leaked_path}') & wait",
+            workspace,
+            "owner_death",
+            60_000,
+            observer: observer
+          )
+        end)
+
+      owner_monitor = Process.monitor(owner)
+      assert_receive {:workspace_hook_runner_started, runner}, 1_000
+      runner_monitor = Process.monitor(runner)
+      assert wait_for_path(ready_path, 2_000)
+
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :killed}, 1_000
+
+      assert_receive {:workspace_hook_runner_stopped, ^runner, {:error, {:workspace_hook_owner_exited, "owner_death"}}},
+                     3_000
+
+      assert_receive {:DOWN, ^runner_monitor, :process, ^runner, :normal}, 1_000
+      Process.sleep(1_100)
+      refute File.exists?(leaked_path)
+    after
+      File.rm_rf(test_root)
     end
   end
 
@@ -642,13 +887,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "workspace remove returns error information for missing directory" do
-    random_path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-missing-#{System.unique_integer([:positive])}"
-      )
+    random_path = Path.join(Config.settings!().workspace.root, "MT-MISSING")
 
     assert {:ok, []} = Workspace.remove(random_path)
+  end
+
+  test "bound removal uses the captured canonical root after workflow root reload" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-bound-removal-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      first_root = Path.join(test_root, "first")
+      second_root = Path.join(test_root, "second")
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: first_root)
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-BOUND")
+      canonical_first_root = Config.settings!().workspace.root
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: second_root)
+
+      assert {:error, {:workspace_outside_root, ^workspace, _current_root}, ""} =
+               Workspace.remove(workspace)
+
+      assert {:ok, [_removed]} = Workspace.remove_bound(workspace, canonical_first_root)
+      refute File.exists?(workspace)
+
+      assert {:error, {:workspace_outside_root, _, ^canonical_first_root}, ""} =
+               Workspace.remove_bound(Path.join(test_root, "outside"), canonical_first_root)
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "workspace hooks support multiline YAML scripts and run at lifecycle boundaries" do
@@ -740,18 +1011,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "workspace remove continues when before_remove hook times out" do
-    previous_timeout = Application.get_env(:symphony_elixir, :workspace_hook_timeout_ms)
-
-    on_exit(fn ->
-      if is_nil(previous_timeout) do
-        Application.delete_env(:symphony_elixir, :workspace_hook_timeout_ms)
-      else
-        Application.put_env(:symphony_elixir, :workspace_hook_timeout_ms, previous_timeout)
-      end
-    end)
-
-    Application.put_env(:symphony_elixir, :workspace_hook_timeout_ms, 10)
-
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -765,6 +1024,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        hook_timeout_ms: 10,
         hook_before_remove: "sleep 1"
       )
 
@@ -772,6 +1032,96 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS-TIMEOUT")
       refute File.exists?(workspace)
     after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "bound workspace removal preserves the workspace when its before_remove runner dies" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-before-remove-runner-death-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      ready_path = Path.join(test_root, "before-remove.ready")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_timeout_ms: 10_000,
+        hook_before_remove: "printf ready > '#{ready_path}'; sleep 30"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-BEFORE-REMOVE-RUNNER-DEATH")
+      hooks = Config.settings!().hooks
+
+      removal =
+        Task.async(fn ->
+          Process.flag(:trap_exit, true)
+          Workspace.remove_bound(workspace, workspace_root, hooks)
+        end)
+
+      assert wait_for_path(ready_path, 3_000)
+
+      runner =
+        await_supervised_child_linked_to(
+          SymphonyElixir.WorkspaceHookSupervisor,
+          removal.pid,
+          1_000
+        )
+
+      Process.exit(runner, :kill)
+
+      assert {:error, {:workspace_before_remove_hook_cleanup_failed, {:workspace_hook_runner_failed, "before_remove"}}, ""} =
+               Task.await(removal, 5_000)
+
+      assert File.dir?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "bound workspace removal preserves the workspace when hook supervision is unavailable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-before-remove-supervisor-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    supervisor_name = SymphonyElixir.WorkspaceHookSupervisor
+    supervisor = Process.whereis(supervisor_name)
+
+    restore_supervisor_name = fn ->
+      if is_pid(supervisor) and Process.alive?(supervisor) and
+           is_nil(Process.whereis(supervisor_name)) do
+        Process.register(supervisor, supervisor_name)
+      end
+    end
+
+    on_exit(restore_supervisor_name)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_remove: "printf should-not-run"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-BEFORE-REMOVE-NO-SUPERVISOR")
+      hooks = Config.settings!().hooks
+      assert is_pid(supervisor)
+      assert true = Process.unregister(supervisor_name)
+
+      expected_error =
+        {:workspace_before_remove_hook_cleanup_failed, {:workspace_hook_supervisor_unavailable, "before_remove"}}
+
+      assert {:error, ^expected_error, ""} =
+               Workspace.remove_bound(workspace, workspace_root, hooks)
+
+      assert File.dir?(workspace)
+    after
+      restore_supervisor_name.()
       File.rm_rf(test_root)
     end
   end
@@ -1157,9 +1507,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         worker_ssh_hosts: ["worker-01:2200"]
       )
 
-      send(pid, :run_poll_cycle)
+      log =
+        capture_log(fn ->
+          send(pid, :run_poll_cycle)
+          assert is_map(Orchestrator.snapshot(orchestrator_name, 1_000))
+        end)
+
       state_after_poll = :sys.get_state(pid)
 
+      assert log =~ "WORKFLOW.md validation failed failure_kind=unsupported_release_feature"
+      refute log =~ "Failed to fetch from tracker"
+      refute log =~ "remote_workers"
+      refute log =~ "release_5"
       assert Map.has_key?(state_after_poll.blocked, blocked_issue.id)
       refute File.exists?(trace_file)
 
@@ -1415,7 +1774,30 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     config = Config.settings!()
     assert config.tracker.api_key == "env:#{api_key_env_var}"
-    assert config.workspace.root == "env:#{workspace_env_var}"
+
+    assert config.workspace.root ==
+             Path.join(Workflow.workflow_directory(), "env:#{workspace_env_var}")
+  end
+
+  test "relative workspace roots resolve against the selected WORKFLOW.md directory" do
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: "state/workspaces")
+
+    assert Config.settings!().workspace.root ==
+             Path.join(Workflow.workflow_directory(), "state/workspaces")
+
+    changed_cwd = Path.join(System.tmp_dir!(), "symphony-unrelated-cwd")
+    File.mkdir_p!(changed_cwd)
+    original_cwd = File.cwd!()
+
+    try do
+      File.cd!(changed_cwd)
+
+      assert Config.settings!().workspace.root ==
+               Path.join(Workflow.workflow_directory(), "state/workspaces")
+    after
+      File.cd!(original_cwd)
+      File.rm_rf(changed_cwd)
+    end
   end
 
   test "config supports per-state max concurrent agent overrides" do
@@ -1579,14 +1961,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "schema keeps workspace roots raw while sandbox helpers expand only for local use" do
+  test "schema canonicalizes workspace roots before sandbox resolution" do
     assert {:ok, settings} =
              Schema.parse(%{
                workspace: %{root: "~/.symphony-workspaces"},
                codex: %{}
              })
 
-    assert settings.workspace.root == "~/.symphony-workspaces"
+    assert settings.workspace.root == Path.expand("~/.symphony-workspaces")
 
     assert Schema.resolve_turn_sandbox_policy(settings) == %{
              "type" => "workspaceWrite",
@@ -1596,8 +1978,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "excludeSlashTmp" => false
            }
 
-    assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, "~/.symphony-workspaces", _reason}}} =
+    assert {:ok, remote_policy} =
              Schema.resolve_runtime_turn_sandbox_policy(settings, nil, remote: true)
+
+    assert remote_policy["writableRoots"] == [Path.expand("~/.symphony-workspaces")]
   end
 
   test "runtime sandbox policy resolution normalizes valid explicit policies and rejects invented ones" do
@@ -1648,6 +2032,195 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "managed runtime sandbox narrows writable roots and preserves explicit network opt-in" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-managed-sandbox-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-MANAGED")
+      unrelated_root = Path.join(test_root, "unrelated")
+      File.mkdir_p!(issue_workspace)
+      File.mkdir_p!(unrelated_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          writableRoots: [workspace_root, unrelated_root],
+          networkAccess: true
+        }
+      )
+
+      settings = Config.settings!()
+
+      assert {:ok, upstream_policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, issue_workspace)
+
+      assert upstream_policy["writableRoots"] == [workspace_root, unrelated_root]
+
+      assert {:ok, managed_policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, issue_workspace, managed: true)
+
+      assert managed_policy["writableRoots"] == [issue_workspace]
+      assert managed_policy["networkAccess"] == true
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      default_settings = Config.settings!()
+
+      assert {:ok, default_managed_policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(default_settings, issue_workspace, managed: true)
+
+      assert default_managed_policy["writableRoots"] == [issue_workspace]
+      assert default_managed_policy["networkAccess"] == false
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "managed runtime sandbox rejects broad variants and issue-leaf symlinks" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-managed-sandbox-denial-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-LINK")
+      target_workspace = Path.join(workspace_root, "TARGET")
+      File.mkdir_p!(target_workspace)
+      File.ln_s!(target_workspace, issue_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      settings = Config.settings!()
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:managed_workspace_symlink, ^issue_workspace}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, issue_workspace, managed: true)
+
+      broad_settings = %{
+        settings
+        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "dangerFullAccess"}}
+      }
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:managed_policy_type, "dangerFullAccess"}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(broad_settings, target_workspace, managed: true)
+
+      assert {:error, {:unsafe_turn_sandbox_policy, :managed_remote_workspace_unsupported}} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, issue_workspace,
+                 managed: true,
+                 remote: true
+               )
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "managed runtime sandbox handles read-only and invalid workspace shapes fail closed" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-managed-sandbox-branches-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      missing_workspace = Path.join(workspace_root, "MT-MISSING")
+      nested_workspace = Path.join([workspace_root, "nested", "MT-NESTED"])
+      File.mkdir_p!(nested_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      settings = Config.settings!()
+
+      read_only_settings = %{
+        settings
+        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly"}}
+      }
+
+      assert {:ok, %{"type" => "readOnly", "networkAccess" => false}} =
+               Schema.resolve_runtime_turn_sandbox_policy(
+                 read_only_settings,
+                 missing_workspace,
+                 managed: true
+               )
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:managed_workspace_unreadable, :enoent}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(
+                 settings,
+                 missing_workspace,
+                 managed: true
+               )
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_managed_workspace, ^nested_workspace}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(
+                 settings,
+                 nested_workspace,
+                 managed: true
+               )
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_managed_workspace, nil}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, nil, managed: true)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "schema reports atom and classified workspace canonicalization errors" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-root-errors-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(test_root)
+      overlong_root = Path.join(test_root, String.duplicate("a", 300))
+
+      assert {:error, {:invalid_workflow_config, overlong_message}} =
+               Schema.parse(%{workspace: %{root: overlong_root}})
+
+      assert overlong_message =~
+               "workspace.root could not be canonicalized: enametoolong"
+
+      first = Path.join(test_root, "first")
+      second = Path.join(test_root, "second")
+      File.ln_s!(second, first)
+      File.ln_s!(first, second)
+
+      assert {:error, {:invalid_workflow_config, loop_message}} =
+               Schema.parse(%{workspace: %{root: first}})
+
+      assert loop_message =~
+               "workspace.root could not be canonicalized: symlink_loop"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "granular approval policy validation accepts boolean maps and rejects other shapes" do
+    assert Schema.validate_approval_policy(
+             :approval_policy,
+             %{
+               "granular" => %{
+                 "sandbox_approval" => false,
+                 "rules" => true,
+                 "mcp_elicitations" => false,
+                 "skill_approval" => true,
+                 "request_permissions" => false
+               }
+             }
+           ) == []
+
+    assert Schema.validate_approval_policy(
+             :approval_policy,
+             %{"granular" => "never"}
+           ) ==
+             [approval_policy: "approval policy flags must be a map"]
   end
 
   test "path safety returns errors for invalid path segments" do
@@ -1790,7 +2363,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
-  test "remote workspace lifecycle uses ssh host aliases from worker config" do
+  test "every remote workspace API fails at the Release 5 gate before SSH" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1808,8 +2381,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       trace_file = Path.join(test_root, "ssh.trace")
       fake_ssh = Path.join(test_root, "ssh")
-      workspace_root = "~/.symphony-remote-workspaces"
       workspace_path = "/remote/home/.symphony-remote-workspaces/MT-SSH-WS"
+      release_error = {:unsupported_release_feature, :remote_workers, :release_5}
 
       File.mkdir_p!(test_root)
       System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
@@ -1817,22 +2390,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       File.write!(fake_ssh, """
       #!/bin/sh
-      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
-      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
-
-      case "$*" in
-        *"__SYMPHONY_WORKSPACE__"*)
-          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
-          ;;
-      esac
-
-      exit 0
+      printf 'SSH_INVOKED\\n' >> "$SYMP_TEST_SSH_TRACE"
+      exit 99
       """)
 
       File.chmod!(fake_ssh, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
+        workspace_root: "~/.symphony-remote-workspaces",
         worker_ssh_hosts: ["worker-01:2200"],
         hook_before_run: "echo before-run",
         hook_after_run: "echo after-run",
@@ -1840,24 +2405,72 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       )
 
       assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
-      assert Config.settings!().workspace.root == workspace_root
-      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
 
-      trace = File.read!(trace_file)
-      assert trace =~ "-p 2200 worker-01 bash -lc"
-      assert trace =~ "__SYMPHONY_WORKSPACE__"
-      assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
-      assert trace =~ "${workspace#~/}"
-      assert trace =~ "echo before-run"
-      assert trace =~ "echo after-run"
-      assert trace =~ "echo before-remove"
-      assert trace =~ "rm -rf"
-      assert trace =~ workspace_path
+      assert {:error, ^release_error} =
+               Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
+
+      assert {:error, ^release_error} =
+               Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+
+      assert {:error, ^release_error} =
+               Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+
+      assert {:error, ^release_error, ""} = Workspace.remove(workspace_path, "worker-01:2200")
+
+      assert {:error, ^release_error} =
+               Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
+
+      refute File.exists?(trace_file)
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  defp wait_for_path(path, timeout_ms) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    wait_for_path_until(path, deadline_ms)
+  end
+
+  defp await_supervised_child_linked_to(supervisor, owner, timeout_ms) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_supervised_child_linked_to(supervisor, owner, deadline_ms)
+  end
+
+  defp do_await_supervised_child_linked_to(supervisor, owner, deadline_ms) do
+    child =
+      supervisor
+      |> Task.Supervisor.children()
+      |> Enum.find(fn child ->
+        case Process.info(child, :links) do
+          {:links, links} -> owner in links
+          nil -> false
+        end
+      end)
+
+    cond do
+      is_pid(child) ->
+        child
+
+      System.monotonic_time(:millisecond) >= deadline_ms ->
+        flunk("timed out waiting for supervised child linked to #{inspect(owner)}")
+
+      true ->
+        Process.sleep(10)
+        do_await_supervised_child_linked_to(supervisor, owner, deadline_ms)
+    end
+  end
+
+  defp wait_for_path_until(path, deadline_ms) do
+    cond do
+      File.exists?(path) ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline_ms ->
+        false
+
+      true ->
+        Process.sleep(20)
+        wait_for_path_until(path, deadline_ms)
     end
   end
 end

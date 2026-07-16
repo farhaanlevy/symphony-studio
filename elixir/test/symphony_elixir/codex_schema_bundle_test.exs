@@ -70,7 +70,7 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
     expected_test_count =
       case {compatibility["fixtures"], compatibility["transportConformance"]} do
         {"pass", "not_run"} -> 55
-        {status, status} when status in ["under_test", "pass"] -> 308
+        {status, status} when status in ["under_test", "pass"] -> 411
         statuses -> flunk("unexpected fixture/transport transition state: #{inspect(statuses)}")
       end
 

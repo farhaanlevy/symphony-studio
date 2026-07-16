@@ -446,13 +446,17 @@ defmodule SymphonyElixir.LiveE2ETest do
     worker_setup = live_worker_setup!(backend, run_id, test_root)
     team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
     original_workflow_path = Workflow.workflow_file_path()
-    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+    runtime_supervisor_pid = Process.whereis(SymphonyElixir.RuntimeSupervisor)
 
     File.mkdir_p!(workflow_root)
 
     try do
-      if is_pid(orchestrator_pid) do
-        assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+      if is_pid(runtime_supervisor_pid) do
+        assert :ok =
+                 Supervisor.terminate_child(
+                   SymphonyElixir.Supervisor,
+                   SymphonyElixir.RuntimeSupervisor
+                 )
       end
 
       Workflow.set_workflow_file_path(workflow_file)
@@ -551,8 +555,11 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp cleanup_live_worker_setup(_worker_setup), do: :ok
 
   defp restart_orchestrator_if_needed do
-    if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
-      case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+    if is_nil(Process.whereis(SymphonyElixir.RuntimeSupervisor)) do
+      case Supervisor.restart_child(
+             SymphonyElixir.Supervisor,
+             SymphonyElixir.RuntimeSupervisor
+           ) do
         {:ok, _pid} -> :ok
         {:error, {:already_started, _pid}} -> :ok
       end

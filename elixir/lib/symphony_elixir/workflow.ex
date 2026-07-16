@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-16): Symphony Studio binds relative
+# runtime paths to the exact selected WORKFLOW.md directory.
 defmodule SymphonyElixir.Workflow do
   @moduledoc """
   Loads workflow configuration and prompt from WORKFLOW.md.
@@ -11,6 +13,14 @@ defmodule SymphonyElixir.Workflow do
   def workflow_file_path do
     Application.get_env(:symphony_elixir, :workflow_file_path) ||
       Path.join(File.cwd!(), @workflow_file_name)
+  end
+
+  @doc "Returns the normalized directory of the selected WORKFLOW.md path."
+  @spec workflow_directory() :: Path.t()
+  def workflow_directory do
+    workflow_file_path()
+    |> Path.expand()
+    |> Path.dirname()
   end
 
   @spec set_workflow_file_path(Path.t()) :: :ok

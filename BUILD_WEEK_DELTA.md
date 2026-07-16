@@ -54,6 +54,22 @@ pin and clean regeneration, 73-test schema harness, full 432-test gate with
 initialize-only App Server smoke, hygiene audit, and independent adversarial
 review on 2026-07-16. R0-04 is an accepted downstream package.
 
+R0-05 hardens cancellation and retry convergence, binds cleanup to the exact
+workspace that ran, contains local hooks, makes guardian cleanup authority
+single-owner across runtime and nested-supervisor crashes, repairs upstream raw
+GraphQL to exactly one parsed operation, and adds an explicit opt-in managed
+authorization/outbox seam without durable tracker claims. Unsupported workflow
+features remain blocked before SSH and now produce only a stable, content-free
+validation classification rather than a misleading tracker-fetch diagnostic.
+Its accepted package binds 133 source files and 411 tests, passes the 535-test
+complete gate with 100.00% measured coverage and zero Dialyzer errors, verifies
+installed Codex 0.144.3 against 1,873 schema artifacts, and passes a real
+initialize-only no-model smoke. The exact pin rejected host drift to 0.144.5,
+and acceptance restarted under user-local exact 0.144.3 without resealing.
+Provenance, secret/path/media and archive-exclusion scans pass; normalized
+package construction is reproducible; and fresh repaired-tree reviews report no
+remaining P0/P1/P2. R0-05 is an accepted downstream package.
+
 Runtime capability discovery, durable event history, restart/browser replay,
 the durable operation ledger, Studio state, the operator UI, and submission
 hardening remain unclaimed until their later packages pass.

@@ -1,7 +1,8 @@
 # Copyright 2026 Symphony Studio contributors
 # SPDX-License-Identifier: Apache-2.0
 # Downstream modification notice (2026-07-16): Symphony Studio assigns stable
-# logical operation IDs before transport and preserves them across wire retries.
+# logical operation IDs before transport, preserves them across wire retries,
+# and registers process containment before initialization can complete.
 
 defmodule SymphonyElixir.Codex.Connection do
   @moduledoc """
@@ -15,6 +16,7 @@ defmodule SymphonyElixir.Codex.Connection do
   use GenServer
 
   alias SymphonyElixir.Codex.{
+    CleanupBarrier,
     CleanupGuardian,
     JSONLFramer,
     ProcessAdapter,
@@ -40,6 +42,7 @@ defmodule SymphonyElixir.Codex.Connection do
   @default_max_completed_request_ids 4_096
   @default_write_timeout_ms 5_000
   @cleanup_retry_interval_ms 250
+  @supervisor SymphonyElixir.ConnectionSupervisor
 
   @type request_metadata :: %{
           attempt: pos_integer(),
@@ -57,7 +60,34 @@ defmodule SymphonyElixir.Codex.Connection do
 
   @spec start([String.t()], keyword()) :: GenServer.on_start()
   def start([executable | _args] = argv, opts \\ []) when is_binary(executable) do
-    GenServer.start(__MODULE__, {self(), argv, opts})
+    owner = self()
+
+    case Process.whereis(@supervisor) do
+      supervisor when is_pid(supervisor) ->
+        child_spec = %{
+          id: {__MODULE__, make_ref()},
+          start: {__MODULE__, :start_link, [{owner, argv, opts}]},
+          restart: :temporary,
+          shutdown: :infinity,
+          type: :worker
+        }
+
+        try do
+          DynamicSupervisor.start_child(supervisor, child_spec)
+        catch
+          :exit, _reason -> {:error, :connection_supervisor_unavailable}
+        end
+
+      nil ->
+        GenServer.start(__MODULE__, {owner, argv, opts})
+    end
+  end
+
+  @doc false
+  @spec start_link({pid(), [String.t()], keyword()}) :: GenServer.on_start()
+  def start_link({owner, [executable | _args] = argv, opts})
+      when is_pid(owner) and is_binary(executable) and is_list(opts) do
+    GenServer.start_link(__MODULE__, {owner, argv, opts})
   end
 
   @spec request(pid(), String.t(), map(), pos_integer()) ::
@@ -150,8 +180,16 @@ defmodule SymphonyElixir.Codex.Connection do
   end
 
   @impl true
-  def init({owner, argv, opts}) do
+  def init({_owner, _argv, _opts} = init_args) do
     Process.flag(:trap_exit, true)
+
+    case CleanupBarrier.register_runtime_member(self()) do
+      :ok -> init_registered(init_args)
+      {:error, :barrier_unavailable} -> {:stop, :runtime_member_barrier_unavailable}
+    end
+  end
+
+  defp init_registered({owner, argv, opts}) do
     owner_ref = Process.monitor(owner)
     process_opts = Keyword.take(opts, [:cd, :env, :kill_timeout_ms])
     process_adapter = Keyword.get(opts, :process_adapter, ProcessAdapter)
@@ -159,68 +197,93 @@ defmodule SymphonyElixir.Codex.Connection do
     case process_adapter.start(argv, process_opts) do
       {:ok, adapter} ->
         cleanup_timeout_ms = Keyword.get(opts, :kill_timeout_ms, @default_kill_timeout_ms) + 1_000
-        cleanup_guardian = CleanupGuardian.start(self(), process_adapter, adapter, cleanup_timeout_ms)
 
-        {:ok,
-         %{
-           active_turn: nil,
-           adapter: adapter,
-           cleanup_guardian: cleanup_guardian,
-           cleanup_failure_notified: false,
-           cleanup_retry_deadline_ms: nil,
-           cleanup_retry_ref: nil,
-           completed_ids: MapSet.new(),
-           failure: nil,
-           framer: JSONLFramer.new(Keyword.get(opts, :max_frame_bytes, @default_max_frame_bytes)),
-           jitter_fn: Keyword.get(opts, :jitter_fn, &default_jitter/1),
-           id_generator: Keyword.get(opts, :id_generator, &Identity.uuid4/0),
-           kill_timeout_ms: Keyword.get(opts, :kill_timeout_ms, @default_kill_timeout_ms),
-           metadata: Keyword.get(opts, :metadata, %{}),
-           max_completed_request_ids: Keyword.get(opts, :max_completed_request_ids, @default_max_completed_request_ids),
-           max_queued_bytes: Keyword.get(opts, :max_queued_bytes, @default_max_queued_bytes),
-           max_queued_messages: Keyword.get(opts, :max_queued_messages, @default_max_queued_messages),
-           max_outbound_frame_bytes: Keyword.get(opts, :max_frame_bytes, @default_max_frame_bytes),
-           max_server_request_bytes:
-             Keyword.get(
-               opts,
-               :max_server_request_bytes,
-               @default_max_server_request_bytes
-             ),
-           max_server_requests: Keyword.get(opts, :max_server_requests, @default_max_server_requests),
-           next_id: Keyword.get(opts, :initial_request_id, 1),
-           on_request: Keyword.get(opts, :on_request, fn _metadata -> :ok end),
-           on_retry: Keyword.get(opts, :on_retry, fn _metadata -> :ok end),
-           on_transport_failure: Keyword.get(opts, :on_transport_failure, fn _error -> :ok end),
-           overload_backoff_base_ms: Keyword.get(opts, :overload_backoff_base_ms, @default_overload_base_ms),
-           overload_backoff_max_ms: Keyword.get(opts, :overload_backoff_max_ms, @default_overload_max_ms),
-           overload_max_attempts: Keyword.get(opts, :overload_max_attempts, @default_overload_attempts),
-           owner: owner,
-           owner_ref: owner_ref,
-           pending: nil,
-           process_adapter: process_adapter,
-           queue: :queue.new(),
-           queue_bytes: 0,
-           queue_count: 0,
-           schema_version: SchemaBundle.version(),
-           server_request_bytes: 0,
-           server_requests: %{},
-           side_effect_operation: nil,
-           stderr_diagnostics: StderrDiagnostics.new(Keyword.get(opts, :stderr_tail_bytes, @default_stderr_tail_bytes)),
-           terminal_delivery: nil,
-           write_timeout_ms: Keyword.get(opts, :write_timeout_ms, @default_write_timeout_ms),
-           waiter: nil
-         }}
+        case start_cleanup_guardian(process_adapter, adapter, cleanup_timeout_ms) do
+          {:ok, cleanup_handle} ->
+            notify_cleanup_authority(
+              Keyword.get(opts, :on_cleanup_authority),
+              cleanup_handle
+            )
+
+            state = %{
+              active_turn: nil,
+              adapter: adapter,
+              cleanup_authority: :connection,
+              cleanup_guardian: cleanup_handle.pid,
+              cleanup_guardian_handed_off?: false,
+              connection_supervisor: Process.whereis(@supervisor),
+              cleanup_failure_notified: false,
+              cleanup_retry_deadline_ms: nil,
+              cleanup_retry_ref: nil,
+              completed_ids: MapSet.new(),
+              failure: nil,
+              framer: JSONLFramer.new(Keyword.get(opts, :max_frame_bytes, @default_max_frame_bytes)),
+              jitter_fn: Keyword.get(opts, :jitter_fn, &default_jitter/1),
+              id_generator: Keyword.get(opts, :id_generator, &Identity.uuid4/0),
+              kill_timeout_ms: Keyword.get(opts, :kill_timeout_ms, @default_kill_timeout_ms),
+              metadata: Keyword.get(opts, :metadata, %{}),
+              max_completed_request_ids: Keyword.get(opts, :max_completed_request_ids, @default_max_completed_request_ids),
+              max_queued_bytes: Keyword.get(opts, :max_queued_bytes, @default_max_queued_bytes),
+              max_queued_messages: Keyword.get(opts, :max_queued_messages, @default_max_queued_messages),
+              max_outbound_frame_bytes: Keyword.get(opts, :max_frame_bytes, @default_max_frame_bytes),
+              max_server_request_bytes:
+                Keyword.get(
+                  opts,
+                  :max_server_request_bytes,
+                  @default_max_server_request_bytes
+                ),
+              max_server_requests: Keyword.get(opts, :max_server_requests, @default_max_server_requests),
+              next_id: Keyword.get(opts, :initial_request_id, 1),
+              on_request: Keyword.get(opts, :on_request, fn _metadata -> :ok end),
+              on_retry: Keyword.get(opts, :on_retry, fn _metadata -> :ok end),
+              on_transport_failure: Keyword.get(opts, :on_transport_failure, fn _error -> :ok end),
+              overload_backoff_base_ms: Keyword.get(opts, :overload_backoff_base_ms, @default_overload_base_ms),
+              overload_backoff_max_ms: Keyword.get(opts, :overload_backoff_max_ms, @default_overload_max_ms),
+              overload_max_attempts: Keyword.get(opts, :overload_max_attempts, @default_overload_attempts),
+              owner: owner,
+              owner_ref: owner_ref,
+              pending: nil,
+              process_adapter: process_adapter,
+              queue: :queue.new(),
+              queue_bytes: 0,
+              queue_count: 0,
+              schema_version: SchemaBundle.version(),
+              server_request_bytes: 0,
+              server_requests: %{},
+              side_effect_operation: nil,
+              stderr_diagnostics: StderrDiagnostics.new(Keyword.get(opts, :stderr_tail_bytes, @default_stderr_tail_bytes)),
+              terminal_delivery: nil,
+              write_timeout_ms: Keyword.get(opts, :write_timeout_ms, @default_write_timeout_ms),
+              waiter: nil
+            }
+
+            notify_started(Keyword.get(opts, :on_started))
+            {:ok, state}
+
+          {:error, :cleanup_runtime_unavailable} ->
+            fail_guardian_start_closed(
+              owner_ref,
+              process_adapter,
+              adapter,
+              cleanup_timeout_ms,
+              opts
+            )
+        end
 
       {:error, reason} ->
         Process.demonitor(owner_ref, [:flush])
+        notify_startup_cleanup_authority(Keyword.get(opts, :on_cleanup_authority), reason)
+
+        error_kind = process_start_error_kind(reason)
 
         error =
           TransportError.new(
-            :process_start_failed,
+            error_kind,
             Map.merge(
               StderrDiagnostics.new(@default_stderr_tail_bytes)
               |> StderrDiagnostics.public_summary(),
               %{
+                cleanup_verified: error_kind != :process_cleanup_failed,
                 os_pid: nil,
                 reason: adapter_failure_category(:start, reason),
                 schema_version: SchemaBundle.version()
@@ -228,9 +291,98 @@ defmodule SymphonyElixir.Codex.Connection do
             )
           )
 
+        safe_callback(Keyword.get(opts, :on_transport_failure, fn _error -> :ok end), error)
         {:stop, error}
     end
   end
+
+  defp notify_started(callback) when is_function(callback, 1) do
+    _result = callback.(self())
+    :ok
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  defp notify_started(_callback), do: :ok
+
+  defp start_cleanup_guardian(process_adapter, adapter, cleanup_timeout_ms) do
+    {:ok, CleanupGuardian.start_handle(self(), process_adapter, adapter, cleanup_timeout_ms)}
+  rescue
+    _error -> {:error, :cleanup_runtime_unavailable}
+  catch
+    _kind, _reason -> {:error, :cleanup_runtime_unavailable}
+  end
+
+  defp notify_cleanup_authority(callback, %CleanupGuardian.Handle{} = handle)
+       when is_function(callback, 1) do
+    safe_callback(callback, handle)
+  end
+
+  defp notify_cleanup_authority(_callback, _handle), do: :ok
+
+  defp fail_guardian_start_closed(
+         owner_ref,
+         process_adapter,
+         adapter,
+         cleanup_timeout_ms,
+         opts
+       ) do
+    await_inline_adapter_cleanup(process_adapter, adapter, cleanup_timeout_ms)
+    Process.demonitor(owner_ref, [:flush])
+
+    error =
+      TransportError.new(
+        :process_start_failed,
+        Map.merge(
+          StderrDiagnostics.new(@default_stderr_tail_bytes)
+          |> StderrDiagnostics.public_summary(),
+          %{
+            cleanup_verified: true,
+            os_pid: nil,
+            reason: :cleanup_runtime_unavailable,
+            schema_version: SchemaBundle.version()
+          }
+        )
+      )
+
+    safe_callback(Keyword.get(opts, :on_transport_failure, fn _error -> :ok end), error)
+    {:stop, error}
+  end
+
+  defp await_inline_adapter_cleanup(process_adapter, adapter, cleanup_timeout_ms) do
+    case safe_inline_adapter_stop(process_adapter, adapter, cleanup_timeout_ms) do
+      :ok ->
+        :ok
+
+      {:error, _reason} ->
+        Process.sleep(@cleanup_retry_interval_ms)
+        await_inline_adapter_cleanup(process_adapter, adapter, cleanup_timeout_ms)
+    end
+  end
+
+  defp safe_inline_adapter_stop(process_adapter, adapter, cleanup_timeout_ms) do
+    case process_adapter.stop(adapter, cleanup_timeout_ms) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+      _other -> {:error, :adapter_stop_failed}
+    end
+  rescue
+    _error -> {:error, :adapter_stop_failed}
+  catch
+    _kind, _reason -> {:error, :adapter_stop_failed}
+  end
+
+  defp notify_startup_cleanup_authority(
+         callback,
+         {:process_identity_unavailable, _reason, {:startup_rollback_unverified, _evidence, guardian}}
+       )
+       when is_function(callback, 1) and is_struct(guardian, CleanupGuardian.Handle) do
+    safe_callback(callback, guardian)
+  end
+
+  defp notify_startup_cleanup_authority(_callback, _reason), do: :ok
 
   @impl true
   def handle_call(:metadata, _from, %{failure: %TransportError{}} = state) do
@@ -595,6 +747,34 @@ defmodule SymphonyElixir.Codex.Connection do
   def handle_info({:message_deadline, _token}, state), do: {:noreply, state}
 
   def handle_info(
+        {:EXIT, supervisor, reason},
+        %{connection_supervisor: supervisor} = state
+      )
+      when is_pid(supervisor) do
+    state = detach_connection_owner(state)
+
+    case stop_adapter(state) do
+      {:ok, next_state} ->
+        {:stop, reason, next_state}
+
+      {{:error, cleanup_error}, next_state} ->
+        maybe_notify_transport_failure(next_state, cleanup_error)
+
+        next_state = %{
+          next_state
+          | cleanup_failure_notified: true,
+            failure: cleanup_error
+        }
+
+        if next_state.cleanup_guardian_handed_off? do
+          {:stop, :cleanup_authority_handed_off, detach_handed_off_cleanup(next_state)}
+        else
+          {:noreply, next_state}
+        end
+    end
+  end
+
+  def handle_info(
         {:EXIT, child_pid, :normal},
         %{terminal_delivery: %{}, adapter: adapter} = state
       )
@@ -606,8 +786,8 @@ defmodule SymphonyElixir.Codex.Connection do
         {:ok, next_state} ->
           {:noreply, next_state}
 
-        {{:error, cleanup_error}, _next_state} ->
-          {:noreply, fail_connection(state, cleanup_error, [])}
+        {{:error, cleanup_error}, next_state} ->
+          {:noreply, fail_connection(next_state, cleanup_error, [])}
       end
     else
       {:noreply, state}
@@ -638,37 +818,20 @@ defmodule SymphonyElixir.Codex.Connection do
       {{:error, cleanup_error}, next_state} ->
         error = attach_optional_cleanup_failure(operation_error, cleanup_error)
         maybe_notify_transport_failure(next_state, error)
-        next_state = schedule_cleanup_retry(next_state)
 
-        {:noreply,
-         %{
-           next_state
-           | cleanup_failure_notified: true,
-             failure: error,
-             owner: nil,
-             owner_ref: nil
-         }}
-    end
-  end
+        next_state = %{
+          next_state
+          | cleanup_failure_notified: true,
+            failure: error,
+            owner: nil,
+            owner_ref: nil
+        }
 
-  def handle_info(:cleanup_retry, state) do
-    state = %{state | cleanup_retry_ref: nil}
-
-    case stop_adapter(state) do
-      {:ok, next_state} when is_nil(next_state.owner) ->
-        {:stop, :normal, next_state}
-
-      {:ok, next_state} ->
-        {:noreply, %{next_state | cleanup_retry_deadline_ms: nil}}
-
-      {{:error, cleanup_error}, next_state} ->
-        unless next_state.cleanup_failure_notified do
-          maybe_notify_transport_failure(next_state, cleanup_error)
+        if next_state.cleanup_guardian_handed_off? do
+          {:stop, :cleanup_authority_handed_off, detach_handed_off_cleanup(next_state)}
+        else
+          {:noreply, next_state}
         end
-
-        next_state = schedule_cleanup_retry(next_state)
-
-        {:noreply, %{next_state | cleanup_failure_notified: true, failure: cleanup_error}}
     end
   end
 
@@ -679,7 +842,9 @@ defmodule SymphonyElixir.Codex.Connection do
     next_state = %{
       state
       | adapter: nil,
+        cleanup_authority: :verified,
         cleanup_guardian: nil,
+        cleanup_guardian_handed_off?: false,
         cleanup_retry_deadline_ms: nil,
         cleanup_retry_ref: cancel_cleanup_retry(state.cleanup_retry_ref)
     }
@@ -699,6 +864,7 @@ defmodule SymphonyElixir.Codex.Connection do
       state
       | adapter: nil,
         cleanup_guardian: nil,
+        cleanup_guardian_handed_off?: true,
         cleanup_retry_deadline_ms: nil,
         cleanup_retry_ref: cancel_cleanup_retry(state.cleanup_retry_ref)
     }
@@ -714,7 +880,8 @@ defmodule SymphonyElixir.Codex.Connection do
      %{
        state
        | cleanup_retry_deadline_ms: nil,
-         cleanup_retry_ref: cancel_cleanup_retry(state.cleanup_retry_ref)
+         cleanup_retry_ref: cancel_cleanup_retry(state.cleanup_retry_ref),
+         cleanup_guardian_handed_off?: true
      }}
   end
 
@@ -1434,10 +1601,7 @@ defmodule SymphonyElixir.Codex.Connection do
         waiter: nil
     }
 
-    case stop_result do
-      :ok -> next_state
-      {:error, %TransportError{}} -> schedule_cleanup_retry(next_state)
-    end
+    next_state
   end
 
   defp attach_cleanup_failure(error, :ok), do: error
@@ -1508,29 +1672,41 @@ defmodule SymphonyElixir.Codex.Connection do
 
   defp stop_adapter(%{adapter: nil} = state), do: {:ok, state}
 
-  defp stop_adapter(state) do
-    case state.process_adapter.stop(state.adapter, state.kill_timeout_ms + 1_000) do
-      :ok ->
-        cleanup_verified(state.cleanup_guardian)
+  defp stop_adapter(%{cleanup_authority: :guardian} = state) do
+    error =
+      transport_error(state, :process_cleanup_failed, %{
+        reason: :cleanup_in_progress
+      })
 
+    {{:error, error}, state}
+  end
+
+  defp stop_adapter(state) do
+    cleanup_wait_timeout_ms = state.kill_timeout_ms + 2_500
+
+    case CleanupGuardian.request_cleanup_once(
+           state.cleanup_guardian,
+           cleanup_wait_timeout_ms
+         ) do
+      :ok ->
         {:ok,
          %{
            state
            | adapter: nil,
+             cleanup_authority: :verified,
              cleanup_guardian: nil,
+             cleanup_guardian_handed_off?: false,
              cleanup_retry_deadline_ms: nil,
              cleanup_retry_ref: cancel_cleanup_retry(state.cleanup_retry_ref)
          }}
 
       {:error, reason} ->
-        request_guardian_cleanup(state.cleanup_guardian)
-
         error =
           transport_error(state, :process_cleanup_failed, %{
             reason: adapter_failure_category(:stop, reason)
           })
 
-        {{:error, error}, state}
+        {{:error, error}, %{state | cleanup_authority: :guardian}}
     end
   end
 
@@ -1549,7 +1725,6 @@ defmodule SymphonyElixir.Codex.Connection do
         error = attach_optional_cleanup_failure(base_error, cleanup_error)
 
         maybe_notify_transport_failure(next_state, error)
-        next_state = schedule_cleanup_retry(next_state)
 
         {:reply, {:error, error}, %{next_state | cleanup_failure_notified: true, failure: error}}
     end
@@ -1598,27 +1773,23 @@ defmodule SymphonyElixir.Codex.Connection do
     safe_callback(state.on_transport_failure, error)
   end
 
-  defp schedule_cleanup_retry(%{cleanup_retry_ref: ref} = state) when is_reference(ref),
-    do: state
-
-  defp schedule_cleanup_retry(state) do
-    deadline_ms =
-      state.cleanup_retry_deadline_ms ||
-        monotonic_ms() + max((state.kill_timeout_ms + 1_000) * 3, 3_000)
-
-    if monotonic_ms() < deadline_ms do
-      ref = Process.send_after(self(), :cleanup_retry, @cleanup_retry_interval_ms)
-      %{state | cleanup_retry_deadline_ms: deadline_ms, cleanup_retry_ref: ref}
-    else
-      %{state | cleanup_retry_deadline_ms: deadline_ms, cleanup_retry_ref: nil}
-    end
+  defp detach_handed_off_cleanup(state) do
+    %{
+      state
+      | adapter: nil,
+        cleanup_guardian: nil,
+        cleanup_retry_deadline_ms: nil,
+        cleanup_retry_ref: cancel_cleanup_retry(state.cleanup_retry_ref)
+    }
   end
 
-  defp cleanup_verified(nil), do: :ok
-  defp cleanup_verified(guardian), do: CleanupGuardian.cleanup_verified(guardian)
+  defp detach_connection_owner(state) do
+    if is_reference(state.owner_ref) do
+      Process.demonitor(state.owner_ref, [:flush])
+    end
 
-  defp request_guardian_cleanup(nil), do: :ok
-  defp request_guardian_cleanup(guardian), do: CleanupGuardian.request_cleanup(guardian)
+    %{state | owner: nil, owner_ref: nil}
+  end
 
   defp cancel_cleanup_retry(nil), do: nil
 
@@ -1750,6 +1921,19 @@ defmodule SymphonyElixir.Codex.Connection do
   defp adapter_failure_category(:start, {:invalid_options, _detail}), do: :invalid_configuration
   defp adapter_failure_category(:start, {:invalid_env, _detail}), do: :invalid_configuration
   defp adapter_failure_category(:start, {:invalid_cd, _detail}), do: :invalid_configuration
+
+  defp adapter_failure_category(
+         :start,
+         {:process_identity_unavailable, _reason, {:startup_rollback_unverified, _evidence}}
+       ),
+       do: :startup_rollback_unverified
+
+  defp adapter_failure_category(
+         :start,
+         {:process_identity_unavailable, _reason, {:startup_rollback_unverified, _evidence, %CleanupGuardian.Handle{}}}
+       ),
+       do: :startup_rollback_unverified
+
   defp adapter_failure_category(:start, :timeout), do: :start_timeout
   defp adapter_failure_category(:start, {:error, :enoent}), do: :executable_not_found
   defp adapter_failure_category(:start, :enoent), do: :executable_not_found
@@ -1770,6 +1954,14 @@ defmodule SymphonyElixir.Codex.Connection do
   defp adapter_failure_category(:stop, {:cleanup_timeout, _detail}), do: :cleanup_timeout
   defp adapter_failure_category(:stop, :timeout), do: :cleanup_timeout
   defp adapter_failure_category(:stop, _reason), do: :adapter_stop_failed
+
+  defp process_start_error_kind({:process_identity_unavailable, _reason, {:startup_rollback_unverified, _evidence}}),
+    do: :process_cleanup_failed
+
+  defp process_start_error_kind({:process_identity_unavailable, _reason, {:startup_rollback_unverified, _evidence, %CleanupGuardian.Handle{}}}),
+    do: :process_cleanup_failed
+
+  defp process_start_error_kind(_reason), do: :process_start_failed
 
   defp pending_deadline_expired?(%{pending: %{deadline_ms: deadline_ms}}),
     do: monotonic_ms() >= deadline_ms

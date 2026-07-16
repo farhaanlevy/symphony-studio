@@ -5,6 +5,52 @@ defmodule SymphonyElixir.AppServerTest do
 
   alias SymphonyElixir.Codex.{DynamicTool, TransportError}
 
+  test "App Server publishes each started connection exactly once" do
+    alias SymphonyElixir.TestSupport.FakeCodexAppServer, as: FakeCodex
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-connection-lifecycle-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-CONNECTION-LIFECYCLE")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    fixture =
+      FakeCodex.create!(
+        test_root,
+        FakeCodex.session_prelude(
+          thread_id: "thread-connection-lifecycle",
+          cwd: workspace
+        )
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: fixture.command
+    )
+
+    test_pid = self()
+
+    assert {:ok, session} =
+             AppServer.start_session(workspace,
+               on_connection_started: fn connection ->
+                 send(test_pid, {:connection_started_once, connection})
+               end
+             )
+
+    assert_receive {:connection_started_once, connection}, 1_000
+    assert connection == session.connection
+    refute_receive {:connection_started_once, _duplicate}, 100
+
+    connection_ref = Process.monitor(connection)
+    _stop_result = AppServer.stop_session(session)
+    assert_receive {:DOWN, ^connection_ref, :process, ^connection, _reason}, 1_000
+  end
+
   test "event callback failures are isolated without logging callback content" do
     canary = "PRIVATE-CALLBACK-FAILURE-CANARY"
 

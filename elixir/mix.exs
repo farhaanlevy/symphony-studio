@@ -1,6 +1,6 @@
-# Downstream modification notice (2026-07-14): Symphony Studio registers its
-# pinned Codex schema loader, deterministic fixtures, and test-only Draft 7
-# validator with release gates.
+# Downstream modification notice (2026-07-14, updated 2026-07-16): Symphony
+# Studio registers its pinned Codex schema loader, deterministic fixtures,
+# test-only Draft 7 validator, and pinned GraphQL AST parser with release gates.
 defmodule SymphonyElixir.MixProject do
   use Mix.Project
 
@@ -24,17 +24,20 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.AgentRunner,
           SymphonyElixir.CLI,
           SymphonyElixir.Codex.AppServer,
+          SymphonyElixir.Codex.CleanupGuardian,
           SymphonyElixir.Codex.CompatibilityCircuit,
           SymphonyElixir.Codex.Connection,
           SymphonyElixir.Codex.DynamicTool,
           SymphonyElixir.Codex.ProcessAdapter,
           SymphonyElixir.Codex.ProcessAdapter.IdentityTracker,
           SymphonyElixir.Codex.SchemaBundle,
+          SymphonyElixir.Config.ManagedWorkspace,
           SymphonyElixir.ErlexecRuntime,
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
           SymphonyElixir.Workspace,
+          SymphonyElixir.WorkspaceHookRunner,
           SymphonyElixirWeb.DashboardLive,
           SymphonyElixirWeb.Endpoint,
           SymphonyElixirWeb.ErrorHTML,
@@ -87,6 +90,7 @@ defmodule SymphonyElixir.MixProject do
       {:phoenix_live_view, "~> 1.1.0"},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
+      {:absinthe, "== 1.11.0"},
       {:yaml_elixir, "~> 2.12"},
       {:solid, "~> 1.2"},
       {:ecto, "~> 3.13"},

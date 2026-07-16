@@ -238,19 +238,26 @@ defmodule SymphonyElixir.CoreTest do
   test "SymphonyElixir.start_link delegates to the orchestrator" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
-    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+    runtime_supervisor_pid = Process.whereis(SymphonyElixir.RuntimeSupervisor)
 
     on_exit(fn ->
-      if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
-        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+      if is_nil(Process.whereis(SymphonyElixir.RuntimeSupervisor)) do
+        case Supervisor.restart_child(
+               SymphonyElixir.Supervisor,
+               SymphonyElixir.RuntimeSupervisor
+             ) do
           {:ok, _pid} -> :ok
           {:error, {:already_started, _pid}} -> :ok
         end
       end
     end)
 
-    if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    if is_pid(runtime_supervisor_pid) do
+      assert :ok =
+               Supervisor.terminate_child(
+                 SymphonyElixir.Supervisor,
+                 SymphonyElixir.RuntimeSupervisor
+               )
     end
 
     assert {:ok, pid} = SymphonyElixir.start_link()
@@ -369,6 +376,8 @@ defmodule SymphonyElixir.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+            workspace_path: workspace,
+            workspace_root: test_root,
             started_at: DateTime.utc_now()
           }
         },
@@ -2221,17 +2230,17 @@ defmodule SymphonyElixir.CoreTest do
     assert :ok =
              Supervisor.terminate_child(
                SymphonyElixir.Supervisor,
-               SymphonyElixir.Orchestrator
+               SymphonyElixir.RuntimeSupervisor
              )
 
     try do
       fun.()
     after
-      if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+      if is_nil(Process.whereis(SymphonyElixir.RuntimeSupervisor)) do
         assert {:ok, _pid} =
                  Supervisor.restart_child(
                    SymphonyElixir.Supervisor,
-                   SymphonyElixir.Orchestrator
+                   SymphonyElixir.RuntimeSupervisor
                  )
       end
     end

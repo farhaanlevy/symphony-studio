@@ -521,6 +521,11 @@ FIXTURE_TEST_FILES = (
     "test/symphony_elixir/orchestrator_event_test.exs",
     "test/symphony_elixir/orchestrator_status_test.exs",
     "test/symphony_elixir/workspace_and_config_test.exs",
+    "test/symphony_elixir/cancellation_lifecycle_test.exs",
+    "test/symphony_elixir/cancellation_safety_regression_test.exs",
+    "test/symphony_elixir/hook_cancellation_containment_test.exs",
+    "test/symphony_elixir/runtime_supervisor_test.exs",
+    "test/symphony_elixir/tracker_outbox_test.exs",
 )
 VENDORED_ERLEXEC_SOURCE_FILES = (
     ".gitignore",
@@ -552,7 +557,7 @@ ERLEXEC_PATH_ENV = "SYMPHONY_ERLEXEC_PATH"
 FIXTURE_TEST_COMMAND = ("mise", "exec", "--", "mix", "test", *FIXTURE_TEST_FILES, "--seed", "0")
 FIXTURE_DEPENDENCY_COMMAND = ("mise", "exec", "--", "mix", "deps.get", "--check-locked")
 FIXTURE_DEPENDENCY_COMPILE_COMMAND = ("mise", "exec", "--", "mix", "deps.compile")
-FIXTURE_EXPECTED_TEST_COUNT = 308
+FIXTURE_EXPECTED_TEST_COUNT = 411
 TEST_MANIFEST_ENV = "SYMPHONY_CODEX_SCHEMA_TEST_MANIFEST"
 RESERVED_MANIFEST_PATTERNS = (".manifest.*",)
 LF_NORMALIZED_SUFFIXES = {
@@ -3150,7 +3155,7 @@ ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MAX_DIAGNOSTIC_OUTPUT_BYTES = 32 * 1024
 MAX_CHILD_OUTPUT_BYTES = 1024 * 1024
 CODEX_CHILD_DEADLINE_SECONDS = 120.0
-FIXTURE_CHILD_DEADLINE_SECONDS = 180.0
+FIXTURE_CHILD_DEADLINE_SECONDS = 300.0
 PROCESS_TERMINATION_GRACE_SECONDS = 1.0
 SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b("

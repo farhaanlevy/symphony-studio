@@ -1,6 +1,7 @@
 # Downstream modification notice (2026-07-16): Symphony Studio keeps outbound
 # requests within the pinned contract, adds stable operation correlation,
-# launches local Codex without a shell, and gates remote execution until R5.
+# registers connection startup containment, adds opt-in managed tools, launches
+# local Codex without a shell, and gates remote execution until R5.
 defmodule SymphonyElixir.Codex.AppServer do
   @moduledoc """
   Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
@@ -63,6 +64,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           connection: pid(),
           metadata: map(),
           approval_policy: String.t() | map(),
+          dynamic_tool_options: keyword(),
           fail_closed_approval_requests: boolean(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
@@ -103,7 +105,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          {:ok, settings} <- Config.settings(),
          :ok <- validate_release_worker_config(settings.worker),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, settings.workspace.root),
-         {:ok, session_policies} <- session_policies(settings, expanded_workspace),
+         {:ok, session_policies} <- session_policies(settings, expanded_workspace, opts),
          {:ok, command_argv} <- Config.codex_command_argv(settings.codex.command),
          {:ok, connection} <-
            start_connection(expanded_workspace, command_argv, settings.codex, opts) do
@@ -119,6 +121,7 @@ defmodule SymphonyElixir.Codex.AppServer do
              fail_closed_approval_requests: session_policies.approval_policy == "never",
              thread_sandbox: session_policies.thread_sandbox,
              turn_sandbox_policy: session_policies.turn_sandbox_policy,
+             dynamic_tool_options: session_policies.dynamic_tool_options,
              thread_id: thread_id,
              workspace: expanded_workspace,
              worker_host: worker_host
@@ -141,16 +144,18 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace
-        },
+        } = session,
         prompt,
         issue,
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
 
+    dynamic_tool_options = Map.get(session, :dynamic_tool_options, [])
+
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
-        DynamicTool.execute(tool, arguments)
+        DynamicTool.execute(tool, arguments, dynamic_tool_options)
       end)
 
     case start_turn(connection, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy) do
@@ -238,6 +243,34 @@ defmodule SymphonyElixir.Codex.AppServer do
     Connection.close(connection)
   end
 
+  @doc """
+  Requests cancellation of the active pinned-protocol turn.
+
+  The acknowledgement only proves that App Server accepted the interrupt.
+  Callers must still wait for the worker to finish and for `stop_session/2` to
+  verify process retirement before deleting its workspace.
+  """
+  @spec interrupt_turn(session(), String.t()) :: :ok | {:error, term()}
+  def interrupt_turn(%{connection: connection, thread_id: thread_id}, turn_id)
+      when is_pid(connection) and is_binary(thread_id) and thread_id != "" and
+             is_binary(turn_id) and turn_id != "" do
+    case request(connection, "turn/interrupt", %{
+           "threadId" => thread_id,
+           "turnId" => turn_id
+         }) do
+      {:ok, %{}, _request_metadata} ->
+        :ok
+
+      {:ok, _invalid_result, request_metadata} ->
+        {:error, invalid_side_effect_response(request_metadata)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  def interrupt_turn(_session, _turn_id), do: {:error, :invalid_turn_interrupt_context}
+
   @spec close_failed_session_start(pid(), TransportError.t()) :: {:error, TransportError.t()}
   defp close_failed_session_start(connection, %TransportError{} = reason) do
     Connection.close_with_error(connection, reason)
@@ -279,7 +312,30 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_connection(workspace, command_argv, codex, opts) do
-    Connection.start(command_argv, connection_options(workspace, codex, opts))
+    notify_connection_lifecycle(opts, :on_connection_starting, [])
+
+    case Connection.start(command_argv, connection_options(workspace, codex, opts)) do
+      {:ok, _connection} = started ->
+        started
+
+      {:error, _reason} = error ->
+        notify_connection_lifecycle(opts, :on_connection_start_failed, [])
+        error
+    end
+  end
+
+  defp notify_connection_lifecycle(opts, key, args) when is_list(opts) and is_list(args) do
+    callback = Keyword.get(opts, key)
+
+    if is_function(callback, length(args)) do
+      apply(callback, args)
+    end
+
+    :ok
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   defp connection_options(workspace, codex, opts) do
@@ -288,10 +344,13 @@ defmodule SymphonyElixir.Codex.AppServer do
       kill_timeout_ms: codex.process_kill_timeout_ms,
       max_frame_bytes: codex.max_frame_bytes,
       metadata: Map.merge(worker_metadata(nil), correlation_metadata(opts)),
+      on_cleanup_authority: Keyword.get(opts, :on_cleanup_authority),
       overload_backoff_base_ms: codex.overload_backoff_base_ms,
       overload_backoff_max_ms: codex.overload_backoff_max_ms,
       overload_max_attempts: codex.overload_max_attempts,
+      on_started: Keyword.get(opts, :on_connection_started),
       on_transport_failure: Keyword.get(opts, :on_transport_failure, fn _error -> :ok end),
+      process_adapter: Keyword.get(opts, :process_adapter, SymphonyElixir.Codex.ProcessAdapter),
       stderr_tail_bytes: codex.stderr_tail_bytes
     ]
     |> Keyword.put(:cd, workspace)
@@ -377,12 +436,27 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp session_policies(settings, workspace) do
+  defp session_policies(settings, workspace, opts) do
+    runtime_policy_options =
+      if Keyword.get(opts, :managed, false), do: [managed: true], else: []
+
+    dynamic_tool_options =
+      if Keyword.get(opts, :managed, false) do
+        [policy: :managed, trusted_context: Keyword.get(opts, :trusted_tool_context, %{})]
+      else
+        [policy: :upstream]
+      end
+
     with {:ok, turn_sandbox_policy} <-
-           Schema.resolve_runtime_turn_sandbox_policy(settings, workspace) do
+           Schema.resolve_runtime_turn_sandbox_policy(
+             settings,
+             workspace,
+             runtime_policy_options
+           ) do
       {:ok,
        %{
          approval_policy: settings.codex.approval_policy,
+         dynamic_tool_options: dynamic_tool_options,
          thread_sandbox: settings.codex.thread_sandbox,
          turn_sandbox_policy: turn_sandbox_policy
        }}
@@ -398,13 +472,14 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp start_thread(connection, workspace, %{
          approval_policy: approval_policy,
+         dynamic_tool_options: dynamic_tool_options,
          thread_sandbox: thread_sandbox
        }) do
     params = %{
       "approvalPolicy" => approval_policy,
       "sandbox" => thread_sandbox,
       "cwd" => workspace,
-      "dynamicTools" => DynamicTool.tool_specs()
+      "dynamicTools" => DynamicTool.tool_specs(dynamic_tool_options)
     }
 
     case request(connection, "thread/start", params) do

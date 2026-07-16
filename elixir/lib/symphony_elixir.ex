@@ -1,5 +1,6 @@
-# Downstream modification notice (2026-07-15): Symphony Studio starts its
-# vendored process supervisor after establishing a systemd-safe shell fallback.
+# Downstream modification notice (2026-07-16): Symphony Studio starts its
+# vendored process supervisor after establishing a systemd-safe shell fallback
+# and couples each in-memory orchestrator lifetime to its agent and hook tasks.
 defmodule SymphonyElixir do
   @moduledoc """
   Entry point for the Symphony orchestrator.
@@ -31,9 +32,8 @@ defmodule SymphonyElixir.Application do
       children = [
         erlexec_child_spec(),
         {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-        {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
         SymphonyElixir.WorkflowStore,
-        SymphonyElixir.Orchestrator,
+        SymphonyElixir.RuntimeSupervisor,
         SymphonyElixir.HttpServer,
         SymphonyElixir.StatusDashboard
       ]

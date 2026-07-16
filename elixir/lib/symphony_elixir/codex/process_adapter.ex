@@ -622,6 +622,19 @@ defmodule SymphonyElixir.Codex.ProcessAdapter.CleanupEvidence do
   def complete?(_manager_alive?, _group_members, _namespace_root), do: false
 end
 
+defmodule SymphonyElixir.Codex.ProcessAdapter.StartupCleanup do
+  @moduledoc false
+
+  @enforce_keys [:pid, :process_group_id, :namespace_root]
+  defstruct [:pid, :process_group_id, :namespace_root]
+
+  @type t :: %__MODULE__{
+          pid: pid(),
+          process_group_id: pos_integer(),
+          namespace_root: map() | nil
+        }
+end
+
 defmodule SymphonyElixir.Codex.ProcessAdapter do
   @moduledoc """
   Owns a directly-executed OS process through `erlexec` and a private PID
@@ -1049,8 +1062,8 @@ defmodule SymphonyElixir.Codex.ProcessAdapter do
   sys.exit(main())
   """
 
-  alias SymphonyElixir.Codex.ProcessAdapter.CleanupEvidence
-  alias SymphonyElixir.Codex.ProcessAdapter.IdentityTracker
+  alias SymphonyElixir.Codex.CleanupGuardian
+  alias SymphonyElixir.Codex.ProcessAdapter.{CleanupEvidence, IdentityTracker, StartupCleanup}
 
   @enforce_keys [
     :pid,
@@ -1144,7 +1157,7 @@ defmodule SymphonyElixir.Codex.ProcessAdapter do
   through pidfds. Success is returned only after the linked Erlang process, the
   anchored outer group, and the namespace root have all disappeared.
   """
-  @spec stop(t(), non_neg_integer()) :: :ok | {:error, term()}
+  @spec stop(t() | StartupCleanup.t(), non_neg_integer()) :: :ok | {:error, term()}
   def stop(%__MODULE__{} = adapter, timeout_ms)
       when is_integer(timeout_ms) and timeout_ms >= 0 do
     deadline_ms = monotonic_ms() + timeout_ms
@@ -1167,6 +1180,30 @@ defmodule SymphonyElixir.Codex.ProcessAdapter do
       end
     after
       Process.demonitor(manager_monitor, [:flush])
+    end
+  end
+
+  @doc false
+  def stop(%StartupCleanup{} = cleanup, timeout_ms)
+      when is_integer(timeout_ms) and timeout_ms >= 0 do
+    deadline_ms = monotonic_ms() + timeout_ms
+    stop_deadline_ms = min(deadline_ms, monotonic_ms() + @stop_request_timeout_ms)
+    stop_result = run_bounded(fn -> :exec.stop(cleanup.pid) end, stop_deadline_ms)
+
+    namespace_kill_result = request_startup_namespace_kill(cleanup.namespace_root, deadline_ms)
+
+    case wait_for_startup_cleanup(
+           cleanup.pid,
+           cleanup.process_group_id,
+           cleanup.namespace_root,
+           deadline_ms,
+           stop_result
+         ) do
+      :ok ->
+        :ok
+
+      {:error, {:startup_rollback_unverified, evidence}} ->
+        {:error, {:startup_cleanup_unverified, Map.put(evidence, :namespace_kill, startup_cleanup_category(namespace_kill_result))}}
     end
   end
 
@@ -1453,8 +1490,53 @@ defmodule SymphonyElixir.Codex.ProcessAdapter do
       :ok ->
         {:error, {:process_identity_unavailable, reason}}
 
-      {:error, rollback_reason} ->
-        {:error, {:process_identity_unavailable, reason, rollback_reason}}
+      {:error, {:startup_rollback_unverified, evidence}} ->
+        cleanup = %StartupCleanup{
+          pid: pid,
+          process_group_id: os_pid,
+          namespace_root: namespace_root
+        }
+
+        case retain_startup_cleanup_authority(cleanup, config.kill_timeout_ms) do
+          {:retained, guardian} ->
+            {:error, {:process_identity_unavailable, reason, {:startup_rollback_unverified, evidence, guardian}}}
+
+          :cleanup_verified ->
+            {:error, {:process_identity_unavailable, reason}}
+        end
+    end
+  end
+
+  defp retain_startup_cleanup_authority(cleanup, kill_timeout_ms) do
+    cleanup_timeout_ms = kill_timeout_ms + @startup_rollback_extra_ms
+
+    case start_startup_cleanup_guardian(cleanup, cleanup_timeout_ms) do
+      {:ok, guardian} ->
+        Process.unlink(cleanup.pid)
+        CleanupGuardian.request_cleanup(guardian)
+        {:retained, guardian}
+
+      {:error, _reason} ->
+        retain_startup_cleanup_inline(cleanup, cleanup_timeout_ms)
+    end
+  end
+
+  defp start_startup_cleanup_guardian(cleanup, cleanup_timeout_ms) do
+    {:ok, CleanupGuardian.start_handle(self(), __MODULE__, cleanup, cleanup_timeout_ms)}
+  rescue
+    _error -> {:error, :cleanup_guardian_start_failed}
+  catch
+    _kind, _reason -> {:error, :cleanup_guardian_start_failed}
+  end
+
+  defp retain_startup_cleanup_inline(cleanup, cleanup_timeout_ms) do
+    case stop(cleanup, cleanup_timeout_ms) do
+      :ok ->
+        :cleanup_verified
+
+      {:error, _reason} ->
+        Process.sleep(@cleanup_poll_ms)
+        retain_startup_cleanup_inline(cleanup, cleanup_timeout_ms)
     end
   end
 
@@ -1542,6 +1624,22 @@ defmodule SymphonyElixir.Codex.ProcessAdapter do
   defp safe_stop_category({:ok, {:error, _reason}}), do: :erlexec_error
   defp safe_stop_category({:error, :timeout}), do: :stop_timeout
   defp safe_stop_category({:error, _reason}), do: :stop_failed
+
+  defp request_startup_namespace_kill(nil, _deadline_ms), do: :not_captured
+
+  defp request_startup_namespace_kill(namespace_root, deadline_ms) do
+    case IdentityTracker.exact_identity_state(namespace_root) do
+      {:active, _identity} -> run_pidfd_signal_helper("exact", [namespace_root], 9, deadline_ms)
+      :retired -> :retired
+      {:error, _reason} -> :identity_unavailable
+    end
+  end
+
+  defp startup_cleanup_category(:ok), do: :sent
+  defp startup_cleanup_category(:retired), do: :already_retired
+  defp startup_cleanup_category(:not_captured), do: :not_captured
+  defp startup_cleanup_category(:identity_unavailable), do: :identity_unavailable
+  defp startup_cleanup_category({:error, _reason}), do: :signal_failed
 
   defp validate_start(argv, opts) do
     with :ok <- validate_argv(argv),

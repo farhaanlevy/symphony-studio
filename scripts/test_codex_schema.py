@@ -42,6 +42,11 @@ FOCUSED_TEST_FILES = (
     "test/symphony_elixir/orchestrator_event_test.exs",
     "test/symphony_elixir/orchestrator_status_test.exs",
     "test/symphony_elixir/workspace_and_config_test.exs",
+    "test/symphony_elixir/cancellation_lifecycle_test.exs",
+    "test/symphony_elixir/cancellation_safety_regression_test.exs",
+    "test/symphony_elixir/hook_cancellation_containment_test.exs",
+    "test/symphony_elixir/runtime_supervisor_test.exs",
+    "test/symphony_elixir/tracker_outbox_test.exs",
 )
 ERLEXEC_SOURCE_FILES = (
     ".gitignore",

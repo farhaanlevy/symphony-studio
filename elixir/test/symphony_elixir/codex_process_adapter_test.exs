@@ -4,13 +4,46 @@
 defmodule SymphonyElixir.CodexProcessAdapterTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.Codex.ProcessAdapter
+  alias SymphonyElixir.Codex.{CleanupGuardian, ProcessAdapter}
   alias SymphonyElixir.Codex.ProcessAdapter.CleanupEvidence
   alias SymphonyElixir.Codex.ProcessAdapter.IdentityTracker
+  alias SymphonyElixir.Codex.ProcessAdapter.StartupCleanup
 
   setup do
     Process.flag(:trap_exit, true)
     :ok
+  end
+
+  test "startup cleanup handoff retains the real partial handle until proof succeeds" do
+    manager = spawn(fn -> Process.sleep(:infinity) end)
+    manager_ref = Process.monitor(manager)
+
+    cleanup = %StartupCleanup{
+      pid: manager,
+      process_group_id: 2_000_000_000,
+      namespace_root: nil
+    }
+
+    assert {:error, {:startup_cleanup_unverified, evidence}} =
+             ProcessAdapter.stop(cleanup, 0)
+
+    assert evidence.manager_alive
+    assert evidence.group_empty
+    assert evidence.namespace_kill == :not_captured
+
+    handle = CleanupGuardian.start_handle(self(), ProcessAdapter, cleanup, 0)
+    guardian_ref = Process.monitor(handle.pid)
+    :ok = CleanupGuardian.request_cleanup(handle)
+
+    refute CleanupGuardian.verified?(handle)
+    Process.exit(manager, :kill)
+    assert_receive {:DOWN, ^manager_ref, :process, ^manager, :killed}, 1_000
+
+    send(handle.pid, :retry_cleanup)
+    assert_receive {:cleanup_guardian_verified, guardian}, 1_000
+    assert guardian == handle.pid
+    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, :normal}, 1_000
+    assert CleanupGuardian.verified?(handle)
   end
 
   test "keeps stdout and stderr distinct and accepts stdin" do
