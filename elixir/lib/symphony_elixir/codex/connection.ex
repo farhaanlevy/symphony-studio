@@ -1,5 +1,7 @@
 # Copyright 2026 Symphony Studio contributors
 # SPDX-License-Identifier: Apache-2.0
+# Downstream modification notice (2026-07-16): Symphony Studio assigns stable
+# logical operation IDs before transport and preserves them across wire retries.
 
 defmodule SymphonyElixir.Codex.Connection do
   @moduledoc """
@@ -22,6 +24,8 @@ defmodule SymphonyElixir.Codex.Connection do
     TransportError
   }
 
+  alias SymphonyElixir.Identity
+
   @overload_code -32_001
   @default_max_frame_bytes 16_777_216
   @default_stderr_tail_bytes 65_536
@@ -41,8 +45,11 @@ defmodule SymphonyElixir.Codex.Connection do
           attempt: pos_integer(),
           classification: RequestPolicy.classification(),
           method: String.t(),
+          operation_id: String.t(),
           request_hash: String.t(),
           request_id: integer() | String.t(),
+          run_id: String.t() | nil,
+          attempt_id: String.t() | nil,
           send_state: :sent | :transmission_uncertain
         }
 
@@ -166,6 +173,7 @@ defmodule SymphonyElixir.Codex.Connection do
            failure: nil,
            framer: JSONLFramer.new(Keyword.get(opts, :max_frame_bytes, @default_max_frame_bytes)),
            jitter_fn: Keyword.get(opts, :jitter_fn, &default_jitter/1),
+           id_generator: Keyword.get(opts, :id_generator, &Identity.uuid4/0),
            kill_timeout_ms: Keyword.get(opts, :kill_timeout_ms, @default_kill_timeout_ms),
            metadata: Keyword.get(opts, :metadata, %{}),
            max_completed_request_ids: Keyword.get(opts, :max_completed_request_ids, @default_max_completed_request_ids),
@@ -396,6 +404,9 @@ defmodule SymphonyElixir.Codex.Connection do
           from: from,
           id: nil,
           method: method,
+          operation_id: new_operation_id(state),
+          run_id: Map.get(state.metadata, :run_id),
+          attempt_id: Map.get(state.metadata, :attempt_id),
           params: params,
           request_hash: request_hash,
           retry_ref: nil,
@@ -547,6 +558,7 @@ defmodule SymphonyElixir.Codex.Connection do
       transport_error(state, :request_timeout, %{
         attempt: state.pending.attempt,
         method: state.pending.method,
+        operation_id: state.pending.operation_id,
         request_hash: state.pending.request_hash,
         request_id: state.pending.id,
         send_state: state.pending.send_state
@@ -914,8 +926,11 @@ defmodule SymphonyElixir.Codex.Connection do
         :attempt,
         :classification,
         :method,
+        :operation_id,
         :request_hash,
         :request_id,
+        :run_id,
+        :attempt_id,
         :send_state
       ])
 
@@ -937,8 +952,11 @@ defmodule SymphonyElixir.Codex.Connection do
             :attempt,
             :classification,
             :method,
+            :operation_id,
             :request_hash,
             :request_id,
+            :run_id,
+            :attempt_id,
             :send_state
           ]),
         thread_id: thread_id,
@@ -958,6 +976,7 @@ defmodule SymphonyElixir.Codex.Connection do
         transport_error(state, :overloaded, %{
           code: @overload_code,
           method: pending.method,
+          operation_id: pending.operation_id,
           request_hash: pending.request_hash,
           request_id: pending.id,
           retryable: false
@@ -974,6 +993,7 @@ defmodule SymphonyElixir.Codex.Connection do
       transport_error(state, :overload_exhausted, %{
         attempts: pending.attempt,
         method: pending.method,
+        operation_id: pending.operation_id,
         request_hash: pending.request_hash,
         request_id: pending.id
       })
@@ -997,6 +1017,7 @@ defmodule SymphonyElixir.Codex.Connection do
         transport_error(state, :overload_exhausted, %{
           attempts: pending.attempt,
           method: pending.method,
+          operation_id: pending.operation_id,
           reason: :absolute_deadline,
           request_hash: pending.request_hash,
           request_id: pending.id
@@ -1011,6 +1032,7 @@ defmodule SymphonyElixir.Codex.Connection do
         attempt: pending.attempt + 1,
         delay_ms: delay_ms,
         method: pending.method,
+        operation_id: pending.operation_id,
         request_hash: pending.request_hash
       })
 
@@ -1613,7 +1635,9 @@ defmodule SymphonyElixir.Codex.Connection do
     adapter_metadata =
       if state.adapter, do: state.process_adapter.metadata(state.adapter), else: %{}
 
-    Map.merge(adapter_metadata, state.metadata)
+    adapter_metadata
+    |> Map.merge(state.metadata)
+    |> Map.merge(active_turn_metadata(state.active_turn))
   end
 
   defp diagnostic_metadata(state) do
@@ -1624,6 +1648,8 @@ defmodule SymphonyElixir.Codex.Connection do
       },
       StderrDiagnostics.public_summary(state.stderr_diagnostics)
     )
+    |> Map.merge(Map.take(state.metadata, [:attempt_id, :run_id]))
+    |> Map.merge(active_turn_metadata(state.active_turn))
   end
 
   defp transport_error(state, kind, details) do
@@ -1636,6 +1662,7 @@ defmodule SymphonyElixir.Codex.Connection do
       data_present: Map.has_key?(error, "data"),
       message_present: Map.get(error, "message", "") != "",
       method: state.pending.method,
+      operation_id: state.pending.operation_id,
       request_hash: state.pending.request_hash,
       request_id: state.pending.id
     })
@@ -1646,8 +1673,11 @@ defmodule SymphonyElixir.Codex.Connection do
       attempt: pending.attempt,
       classification: pending.classification,
       method: pending.method,
+      operation_id: pending.operation_id,
       request_hash: pending.request_hash,
       request_id: pending.id,
+      run_id: Map.get(pending, :run_id),
+      attempt_id: Map.get(pending, :attempt_id),
       send_state: normalize_send_state(pending.send_state)
     }
   end
@@ -1755,6 +1785,7 @@ defmodule SymphonyElixir.Codex.Connection do
     transport_error(state, :request_timeout, %{
       attempt: pending.attempt,
       method: pending.method,
+      operation_id: pending.operation_id,
       request_hash: pending.request_hash,
       request_id: pending.id,
       send_state: pending.send_state
@@ -1778,6 +1809,34 @@ defmodule SymphonyElixir.Codex.Connection do
 
   defp maybe_put_operation(details, nil), do: details
   defp maybe_put_operation(details, operation), do: Map.put(details, :operation, operation)
+
+  defp active_turn_metadata(%{
+         operation: operation,
+         thread_id: thread_id,
+         turn_id: turn_id
+       })
+       when is_map(operation) do
+    operation
+    |> Map.take([:attempt_id, :operation_id, :run_id])
+    |> Map.put(:thread_id, thread_id)
+    |> Map.put(:turn_id, turn_id)
+  end
+
+  defp active_turn_metadata(_active_turn), do: %{}
+
+  defp new_operation_id(%{id_generator: generator}) when is_function(generator, 0) do
+    case generator.() do
+      operation_id when is_binary(operation_id) ->
+        if operation_id == String.downcase(operation_id) and Identity.valid_uuid4?(operation_id),
+          do: operation_id,
+          else: Identity.uuid4()
+
+      _other ->
+        Identity.uuid4()
+    end
+  end
+
+  defp new_operation_id(_state), do: Identity.uuid4()
 
   defp cancel_timer(nil), do: :ok
 

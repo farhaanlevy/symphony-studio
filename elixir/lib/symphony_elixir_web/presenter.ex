@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-16): Symphony Studio exposes stable
+# run, attempt, and event correlation as additive observability API fields.
 defmodule SymphonyElixirWeb.Presenter do
   @moduledoc """
   Shared projections for the observability API and dashboard.
@@ -107,9 +109,14 @@ defmodule SymphonyElixirWeb.Presenter do
       state: entry.state,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
+      run_id: Map.get(entry, :run_id),
+      attempt_id: Map.get(entry, :attempt_id),
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
+      last_event_id: Map.get(entry, :last_event_id),
+      last_event_sequence: Map.get(entry, :last_event_sequence, 0),
+      last_event_type: Map.get(entry, :last_event_type),
       last_message: summarize_message(entry.last_codex_message),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_codex_timestamp),
@@ -130,7 +137,12 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
-      workspace_path: Map.get(entry, :workspace_path)
+      workspace_path: Map.get(entry, :workspace_path),
+      run_id: Map.get(entry, :run_id),
+      attempt_id: Map.get(entry, :attempt_id),
+      last_event_id: Map.get(entry, :last_event_id),
+      last_event_sequence: Map.get(entry, :last_event_sequence, 0),
+      last_event_type: Map.get(entry, :last_event_type)
     }
   end
 
@@ -143,9 +155,14 @@ defmodule SymphonyElixirWeb.Presenter do
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
+      run_id: Map.get(entry, :run_id),
+      attempt_id: Map.get(entry, :attempt_id),
       session_id: entry.session_id,
       blocked_at: iso8601(entry.blocked_at),
       last_event: entry.last_codex_event,
+      last_event_id: Map.get(entry, :last_event_id),
+      last_event_sequence: Map.get(entry, :last_event_sequence, 0),
+      last_event_type: Map.get(entry, :last_event_type),
       last_message: summarize_message(entry.last_codex_message),
       last_event_at: iso8601(entry.last_codex_timestamp)
     }
@@ -155,11 +172,16 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       worker_host: Map.get(running, :worker_host),
       workspace_path: Map.get(running, :workspace_path),
+      run_id: Map.get(running, :run_id),
+      attempt_id: Map.get(running, :attempt_id),
       session_id: running.session_id,
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),
       last_event: running.last_codex_event,
+      last_event_id: Map.get(running, :last_event_id),
+      last_event_sequence: Map.get(running, :last_event_sequence, 0),
+      last_event_type: Map.get(running, :last_event_type),
       last_message: summarize_message(running.last_codex_message),
       last_event_at: iso8601(running.last_codex_timestamp),
       tokens: %{
@@ -176,7 +198,12 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error,
       worker_host: Map.get(retry, :worker_host),
-      workspace_path: Map.get(retry, :workspace_path)
+      workspace_path: Map.get(retry, :workspace_path),
+      run_id: Map.get(retry, :run_id),
+      attempt_id: Map.get(retry, :attempt_id),
+      last_event_id: Map.get(retry, :last_event_id),
+      last_event_sequence: Map.get(retry, :last_event_sequence, 0),
+      last_event_type: Map.get(retry, :last_event_type)
     }
   end
 
@@ -184,11 +211,16 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       worker_host: Map.get(blocked, :worker_host),
       workspace_path: Map.get(blocked, :workspace_path),
+      run_id: Map.get(blocked, :run_id),
+      attempt_id: Map.get(blocked, :attempt_id),
       session_id: blocked.session_id,
       state: blocked.state,
       error: blocked.error,
       blocked_at: iso8601(blocked.blocked_at),
       last_event: blocked.last_codex_event,
+      last_event_id: Map.get(blocked, :last_event_id),
+      last_event_sequence: Map.get(blocked, :last_event_sequence, 0),
+      last_event_type: Map.get(blocked, :last_event_type),
       last_message: summarize_message(blocked.last_codex_message),
       last_event_at: iso8601(blocked.last_codex_timestamp)
     }
@@ -214,6 +246,8 @@ defmodule SymphonyElixirWeb.Presenter do
       %{
         at: iso8601(entry.last_codex_timestamp),
         event: entry.last_codex_event,
+        run_id: Map.get(entry, :run_id),
+        attempt_id: Map.get(entry, :attempt_id),
         message: summarize_message(entry.last_codex_message)
       }
     ]

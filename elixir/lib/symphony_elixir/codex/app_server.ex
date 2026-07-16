@@ -1,6 +1,6 @@
-# Downstream modification notice (2026-07-15): Symphony Studio keeps outbound
-# requests within the pinned contract, launches local Codex without a shell,
-# applies method deadlines, and gates remote execution until Release 5.
+# Downstream modification notice (2026-07-16): Symphony Studio keeps outbound
+# requests within the pinned contract, adds stable operation correlation,
+# launches local Codex without a shell, and gates remote execution until R5.
 defmodule SymphonyElixir.Codex.AppServer do
   @moduledoc """
   Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     TransportError
   }
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, Identity}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.PathSafety
 
@@ -27,23 +27,28 @@ defmodule SymphonyElixir.Codex.AppServer do
     approval_required: [:request_id_type, :request_kind],
     notification: [:method_category],
     other_message: [:message_category],
-    session_started: [:session_id],
+    session_started: [:operation_id, :session_id, :thread_id, :turn_id],
     startup_failed: [:reason],
-    tool_call_completed: [:request_id_type, :request_kind, :tool_kind],
-    tool_call_failed: [:request_id_type, :request_kind, :tool_kind],
+    tool_call_completed: [:operation_id, :request_id_type, :request_kind, :tool_kind],
+    tool_call_failed: [:operation_id, :request_id_type, :request_kind, :tool_kind],
     turn_cancelled: [:terminal],
     turn_completed: [:terminal],
     turn_ended_with_error: [:reason, :session_id],
     turn_failed: [:terminal],
     turn_input_required: [:request_id_type, :request_kind],
     uncertain_external_outcome: [:operation, :reason],
-    unsupported_tool_call: [:request_id_type, :request_kind, :tool_kind]
+    unsupported_tool_call: [:operation_id, :request_id_type, :request_kind, :tool_kind]
   }
 
   @public_event_metadata_keys [
+    :attempt_id,
     :cleanup_scope,
     :codex_app_server_pid,
+    :operation_id,
     :remote_cleanup_conformance,
+    :run_id,
+    :thread_id,
+    :turn_id,
     :usage
   ]
 
@@ -149,8 +154,15 @@ defmodule SymphonyElixir.Codex.AppServer do
       end)
 
     case start_turn(connection, thread_id, prompt, workspace, approval_policy, turn_sandbox_policy) do
-      {:ok, turn_id, _request_metadata} ->
+      {:ok, turn_id, request_metadata} ->
         session_id = public_session_id(thread_id, turn_id)
+
+        turn_metadata =
+          metadata
+          |> Map.merge(Map.take(request_metadata, [:attempt_id, :operation_id, :run_id]))
+          |> Map.put(:thread_id, thread_id)
+          |> Map.put(:turn_id, turn_id)
+
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
         emit_message(
@@ -159,9 +171,10 @@ defmodule SymphonyElixir.Codex.AppServer do
           %{
             session_id: session_id,
             thread_id: thread_id,
-            turn_id: turn_id
+            turn_id: turn_id,
+            operation_id: request_metadata.operation_id
           },
-          metadata
+          turn_metadata
         )
 
         case await_turn_completion(
@@ -178,7 +191,8 @@ defmodule SymphonyElixir.Codex.AppServer do
                result: result,
                session_id: session_id,
                thread_id: thread_id,
-               turn_id: turn_id
+               turn_id: turn_id,
+               operation_id: request_metadata.operation_id
              }}
 
           {:error, reason} ->
@@ -193,10 +207,10 @@ defmodule SymphonyElixir.Codex.AppServer do
                 session_id: session_id,
                 reason: public_reason
               },
-              metadata
+              turn_metadata
             )
 
-            maybe_emit_uncertain_outcome(on_message, reason, metadata)
+            maybe_emit_uncertain_outcome(on_message, reason, turn_metadata)
 
             {:error, reason}
         end
@@ -273,7 +287,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       env: child_environment(),
       kill_timeout_ms: codex.process_kill_timeout_ms,
       max_frame_bytes: codex.max_frame_bytes,
-      metadata: worker_metadata(nil),
+      metadata: Map.merge(worker_metadata(nil), correlation_metadata(opts)),
       overload_backoff_base_ms: codex.overload_backoff_base_ms,
       overload_backoff_max_ms: codex.overload_backoff_max_ms,
       overload_max_attempts: codex.overload_max_attempts,
@@ -303,7 +317,15 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     base_metadata =
       metadata
-      |> Map.take([:cleanup_scope, :remote_cleanup_conformance])
+      |> Map.take([
+        :attempt_id,
+        :cleanup_scope,
+        :operation_id,
+        :remote_cleanup_conformance,
+        :run_id,
+        :thread_id,
+        :turn_id
+      ])
       |> maybe_put_codex_pid(metadata)
 
     case worker_host do
@@ -317,6 +339,25 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_put_codex_pid(metadata, _connection_metadata), do: metadata
+
+  defp correlation_metadata(opts) do
+    correlation =
+      case Keyword.get(opts, :correlation, %{}) do
+        value when is_map(value) -> value
+        _value -> %{}
+      end
+
+    correlation
+    |> Map.take([:attempt_id, :run_id])
+    |> Enum.reduce(%{}, fn {key, value}, public ->
+      if canonical_uuid4?(value), do: Map.put(public, key, value), else: public
+    end)
+  end
+
+  defp canonical_uuid4?(value) when is_binary(value),
+    do: value == String.downcase(value) and Identity.valid_uuid4?(value)
+
+  defp canonical_uuid4?(_value), do: false
 
   defp send_initialize(connection) do
     params = %{
@@ -415,10 +456,13 @@ defmodule SymphonyElixir.Codex.AppServer do
       operation:
         Map.take(request_metadata, [
           :attempt,
+          :attempt_id,
           :classification,
           :method,
+          :operation_id,
           :request_hash,
           :request_id,
+          :run_id,
           :send_state
         ]),
       reconciliation_required: true,
@@ -846,7 +890,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     case Connection.respond_until(connection, id, response, deadline_ms) do
       :ok ->
-        emit_tool_result(on_message, metadata, payload, tool_name, result)
+        emit_tool_result(on_message, metadata, payload, tool_name, result, operation)
         :approved
 
       {:error, reason} ->
@@ -859,13 +903,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp emit_tool_result(on_message, metadata, payload, tool_name, result) do
+  defp emit_tool_result(on_message, metadata, payload, tool_name, result, operation) do
     event = tool_result_event(result, supported_dynamic_tool?(tool_name))
 
     event_details =
       payload
       |> public_request_metadata()
       |> Map.put(:tool_kind, public_tool_kind(tool_name))
+      |> Map.put(:operation_id, operation[:operation_id])
 
     emit_message(on_message, event, event_details, metadata)
   end
@@ -1010,6 +1055,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
+  @doc false
+  @spec emit_message_for_test((map() -> term()), atom(), map(), map()) :: :ok
+  def emit_message_for_test(on_message, event, details, metadata) do
+    emit_message(on_message, event, details, metadata)
+  end
+
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
     message =
       metadata
@@ -1018,7 +1069,20 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> Map.put(:event, event)
       |> Map.put(:timestamp, DateTime.utc_now())
 
-    on_message.(message)
+    safe_message_callback(on_message, message)
+  end
+
+  defp safe_message_callback(on_message, message) do
+    _result = on_message.(message)
+    :ok
+  rescue
+    _error ->
+      Logger.warning("Codex event callback failed failure_kind=exception")
+      :ok
+  catch
+    _kind, _reason ->
+      Logger.warning("Codex event callback failed failure_kind=throw")
+      :ok
   end
 
   defp maybe_emit_uncertain_outcome(
@@ -1026,15 +1090,33 @@ defmodule SymphonyElixir.Codex.AppServer do
          %TransportError{kind: :uncertain_external_outcome} = reason,
          metadata
        ) do
+    operation = reason.details[:operation]
+
     emit_message(
       on_message,
       :uncertain_external_outcome,
-      %{reason: public_error(reason), operation: reason.details[:operation]},
-      metadata
+      %{reason: public_error(reason), operation: operation},
+      uncertainty_metadata(metadata, operation)
     )
   end
 
   defp maybe_emit_uncertain_outcome(_on_message, _reason, _metadata), do: :ok
+
+  defp uncertainty_metadata(metadata, operation) when is_map(metadata) and is_map(operation) do
+    case Map.get(operation, :operation_id) || Map.get(operation, "operation_id") do
+      operation_id when is_binary(operation_id) ->
+        if Identity.valid_uuid4?(operation_id),
+          do: Map.put(metadata, :operation_id, operation_id),
+          else: Map.delete(metadata, :operation_id)
+
+      _missing ->
+        Map.delete(metadata, :operation_id)
+    end
+  end
+
+  defp uncertainty_metadata(metadata, _operation) when is_map(metadata) do
+    Map.delete(metadata, :operation_id)
+  end
 
   defp terminal_error(connection, method, kind) do
     case Connection.ack_terminal(connection, method) do
@@ -1239,13 +1321,16 @@ defmodule SymphonyElixir.Codex.AppServer do
       {worker, monitor_ref} =
         spawn_monitor(fn ->
           operation = %{
+            attempt_id: diagnostics[:attempt_id],
             classification: :conservative,
             method: "item/tool/call",
+            operation_id: Identity.uuid4(),
             request_hash:
               RequestPolicy.canonical_hash("item/tool/call", %{
                 "arguments" => arguments,
                 "tool" => tool_name
               }),
+            run_id: diagnostics[:run_id],
             send_state: :prepared
           }
 

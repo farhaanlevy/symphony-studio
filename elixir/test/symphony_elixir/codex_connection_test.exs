@@ -1,5 +1,7 @@
 # Copyright 2026 Symphony Studio contributors
 # SPDX-License-Identifier: Apache-2.0
+# Downstream modification notice (2026-07-16): Symphony Studio verifies stable
+# operation correlation across transport retries, responses, and uncertainty.
 
 defmodule SymphonyElixir.Codex.ConnectionTest do
   use ExUnit.Case, async: false
@@ -883,6 +885,10 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
   end
 
   test "retries overload only for an idempotent request within the original deadline", %{root: root} do
+    run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    attempt_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    test_pid = self()
+
     fixture =
       FakeCodex.create!(root, [
         FakeCodex.expect(%{"id" => 1, "method" => "account/read", "params" => %{}}),
@@ -895,6 +901,8 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     connection =
       start_connection!(fixture,
         jitter_fn: fn _cap -> 0 end,
+        metadata: %{run_id: run_id, attempt_id: attempt_id},
+        on_request: fn metadata -> send(test_pid, {:wire_request, metadata}) end,
         overload_backoff_base_ms: 1,
         overload_backoff_max_ms: 1,
         overload_max_attempts: 2
@@ -906,6 +914,39 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     assert metadata.attempt == 2
     assert metadata.request_id == 2
     assert metadata.classification == :idempotent
+    assert metadata.run_id == run_id
+    assert metadata.attempt_id == attempt_id
+    assert SymphonyElixir.Identity.valid_uuid4?(metadata.operation_id)
+
+    assert_receive {:wire_request, %{request_id: 1} = first_wire}
+    assert_receive {:wire_request, %{request_id: 2} = second_wire}
+    assert first_wire.operation_id == second_wire.operation_id
+    assert second_wire.operation_id == metadata.operation_id
+    assert first_wire.request_hash == second_wire.request_hash
+  end
+
+  test "assigns distinct operation IDs to intentionally separate identical requests", %{root: root} do
+    fixture =
+      FakeCodex.create!(root, [
+        FakeCodex.expect(%{"id" => 1, "method" => "account/read", "params" => %{}}),
+        FakeCodex.response(1, %{"account" => nil}),
+        FakeCodex.expect(%{"id" => 2, "method" => "account/read", "params" => %{}}),
+        FakeCodex.response(2, %{"account" => nil}),
+        FakeCodex.barrier("hold", timeout_ms: 30_000)
+      ])
+
+    connection = start_connection!(fixture)
+
+    assert {:ok, %{"account" => nil}, first} =
+             Connection.request(connection, "account/read", %{}, 2_000)
+
+    assert {:ok, %{"account" => nil}, second} =
+             Connection.request(connection, "account/read", %{}, 2_000)
+
+    assert first.request_hash == second.request_hash
+    assert first.operation_id != second.operation_id
+    assert SymphonyElixir.Identity.valid_uuid4?(first.operation_id)
+    assert SymphonyElixir.Identity.valid_uuid4?(second.operation_id)
   end
 
   test "never transmits an overload retry after the original absolute deadline", %{root: root} do
@@ -974,6 +1015,8 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
 
   test "marks a sent side effect uncertain without retaining request parameters", %{root: root} do
     secret_prompt = "prompt-must-not-appear-in-diagnostics"
+    run_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    attempt_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
     fixture =
       FakeCodex.create!(root, [
@@ -981,7 +1024,8 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
         FakeCodex.raw_stdout("transport broke\n")
       ])
 
-    connection = start_connection!(fixture)
+    connection =
+      start_connection!(fixture, metadata: %{run_id: run_id, attempt_id: attempt_id})
 
     assert {:error,
             %TransportError{
@@ -1000,7 +1044,11 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
 
     assert operation.method == "turn/start"
     assert operation.send_state == :sent
+    assert operation.run_id == run_id
+    assert operation.attempt_id == attempt_id
+    assert SymphonyElixir.Identity.valid_uuid4?(operation.operation_id)
     assert is_binary(operation.request_hash)
+    refute Map.has_key?(operation, :params)
     refute inspect(details) =~ secret_prompt
   end
 

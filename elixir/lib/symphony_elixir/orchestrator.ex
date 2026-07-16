@@ -1,6 +1,6 @@
-# Downstream modification notice (2026-07-15): Symphony Studio preserves typed
-# App Server blockers across worker exit and gates dispatch through a durable,
-# identity-bound protocol compatibility circuit.
+# Downstream modification notice (2026-07-16): Symphony Studio adds stable
+# run/attempt event correlation while preserving typed App Server blockers and
+# the identity-bound protocol compatibility circuit.
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
   Polls Linear and dispatches repository copies to Codex-backed workers.
@@ -10,7 +10,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, Event, EventSink, Identity, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Codex.{CompatibilityCircuit, TransportError}
   alias SymphonyElixir.Linear.Issue
 
@@ -56,6 +56,9 @@ defmodule SymphonyElixir.Orchestrator do
       :compatibility_manifest_path,
       :compatibility_schema_version,
       :compatibility_circuit,
+      :event_sink,
+      :event_clock,
+      :id_generator,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -88,7 +91,10 @@ defmodule SymphonyElixir.Orchestrator do
       codex_rate_limits: nil,
       compatibility_manifest_path: Keyword.get(opts, :compatibility_manifest_path),
       compatibility_schema_version: Keyword.get(opts, :compatibility_schema_version),
-      compatibility_circuit: nil
+      compatibility_circuit: nil,
+      event_sink: Keyword.get(opts, :event_sink, EventSink.default_target()),
+      event_clock: Keyword.get(opts, :event_clock, &DateTime.utc_now/0),
+      id_generator: Keyword.get(opts, :id_generator, &Identity.uuid4/0)
     }
 
     state = refresh_compatibility_circuit(state)
@@ -154,6 +160,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       issue_id ->
+        state = append_attempt_exit_event(state, issue_id, Map.fetch!(running, issue_id), reason)
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
@@ -176,13 +183,17 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
-        updated_running_entry =
-          running_entry
-          |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
-          |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
+        if correlation_matches?(running_entry, runtime_info) do
+          updated_running_entry =
+            running_entry
+            |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
+            |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
-        notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+          notify_dashboard()
+          {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        else
+          {:noreply, state}
+        end
     end
   end
 
@@ -190,25 +201,40 @@ defmodule SymphonyElixir.Orchestrator do
         {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
         %State{} = state
       ) do
-    state = maybe_trip_compatibility_circuit(state, update)
-    running = state.running
+    case record_codex_event(state, issue_id, update) do
+      {:appended, state, event_update, :running} ->
+        state = maybe_trip_compatibility_circuit(state, event_update)
+        running = state.running
 
-    case Map.get(running, issue_id) do
-      nil ->
-        next_state = integrate_late_transport_blocker(state, issue_id, update)
+        case Map.get(running, issue_id) do
+          nil ->
+            notify_dashboard()
+            {:noreply, integrate_late_transport_blocker(state, issue_id, event_update)}
+
+          running_entry ->
+            {updated_running_entry, token_delta} =
+              integrate_codex_update(running_entry, event_update)
+
+            state =
+              state
+              |> apply_codex_token_delta(token_delta)
+              |> apply_codex_rate_limits(event_update)
+
+            notify_dashboard()
+            {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        end
+
+      {:appended, state, event_update, :late} ->
+        state = maybe_trip_compatibility_circuit(state, event_update)
+        next_state = integrate_late_transport_blocker(state, issue_id, event_update)
         notify_dashboard()
         {:noreply, next_state}
 
-      running_entry ->
-        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+      {:duplicate, state} ->
+        {:noreply, state}
 
-        state =
-          state
-          |> apply_codex_token_delta(token_delta)
-          |> apply_codex_rate_limits(update)
-
-        notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+      {:rejected, state} ->
+        {:noreply, state}
     end
   end
 
@@ -247,7 +273,12 @@ defmodule SymphonyElixir.Orchestrator do
         issue_url: running_entry.issue.url,
         delay_type: :continuation,
         worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
+        workspace_path: Map.get(running_entry, :workspace_path),
+        run_id: Map.get(running_entry, :run_id),
+        attempt_id: Map.get(running_entry, :attempt_id),
+        event_sequence: Map.get(running_entry, :event_sequence, 0),
+        last_event_id: Map.get(running_entry, :last_event_id),
+        last_event_type: Map.get(running_entry, :last_event_type)
       })
     end
   end
@@ -300,7 +331,12 @@ defmodule SymphonyElixir.Orchestrator do
       issue_url: running_entry.issue.url,
       error: "agent exited: #{exit_category}",
       worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
+      workspace_path: Map.get(running_entry, :workspace_path),
+      run_id: Map.get(running_entry, :run_id),
+      attempt_id: Map.get(running_entry, :attempt_id),
+      event_sequence: Map.get(running_entry, :event_sequence, 0),
+      last_event_id: Map.get(running_entry, :last_event_id),
+      last_event_type: Map.get(running_entry, :last_event_type)
     })
   end
 
@@ -742,7 +778,14 @@ defmodule SymphonyElixir.Orchestrator do
     |> schedule_issue_retry(issue_id, next_attempt, %{
       identifier: identifier,
       issue_url: running_entry.issue.url,
-      error: "stalled for #{elapsed_ms}ms without codex activity"
+      error: "stalled for #{elapsed_ms}ms without codex activity",
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      run_id: Map.get(running_entry, :run_id),
+      attempt_id: Map.get(running_entry, :attempt_id),
+      event_sequence: Map.get(running_entry, :event_sequence, 0),
+      last_event_id: Map.get(running_entry, :last_event_id),
+      last_event_type: Map.get(running_entry, :last_event_type)
     })
   end
 
@@ -893,6 +936,11 @@ defmodule SymphonyElixir.Orchestrator do
       last_codex_message: Map.get(running_entry, :last_codex_message),
       last_codex_event: Map.get(running_entry, :last_codex_event),
       last_codex_timestamp: Map.get(running_entry, :last_codex_timestamp),
+      run_id: Map.get(running_entry, :run_id),
+      attempt_id: Map.get(running_entry, :attempt_id),
+      event_sequence: Map.get(running_entry, :event_sequence, 0),
+      last_event_id: Map.get(running_entry, :last_event_id),
+      last_event_type: Map.get(running_entry, :last_event_type),
       compatibility_circuit_block?: Map.get(running_entry, :compatibility_circuit_block?, false)
     }
 
@@ -912,14 +960,16 @@ defmodule SymphonyElixir.Orchestrator do
       {%{} = blocked_entry, _retry_entry} ->
         error = codex_event_blocker_error(event) || Map.get(blocked_entry, :error)
 
-        updated_entry = %{
-          blocked_entry
-          | error: error,
+        updated_entry =
+          Map.merge(blocked_entry, %{
+            error: error,
             last_codex_event: event,
             last_codex_timestamp: update.timestamp,
             last_codex_message: summarize_codex_update(update),
+            last_event_id: Map.get(update, :studio_event_id),
+            last_event_type: Map.get(update, :studio_event_type),
             compatibility_circuit_block?: false
-        }
+          })
 
         %{state | blocked: Map.put(state.blocked, issue_id, updated_entry)}
 
@@ -972,6 +1022,11 @@ defmodule SymphonyElixir.Orchestrator do
       last_codex_message: last_message,
       last_codex_event: event,
       last_codex_timestamp: timestamp,
+      run_id: Map.get(retry_entry, :run_id),
+      attempt_id: Map.get(retry_entry, :attempt_id),
+      event_sequence: Map.get(retry_entry, :event_sequence, 0),
+      last_event_id: Map.get(retry_entry, :last_event_id),
+      last_event_type: Map.get(retry_entry, :last_event_type),
       compatibility_circuit_block?: compatibility_circuit_block?
     }
 
@@ -989,7 +1044,12 @@ defmodule SymphonyElixir.Orchestrator do
       identifier: metadata[:identifier],
       issue_url: metadata[:issue_url],
       worker_host: metadata[:worker_host],
-      workspace_path: metadata[:workspace_path]
+      workspace_path: metadata[:workspace_path],
+      run_id: metadata[:run_id],
+      attempt_id: metadata[:attempt_id],
+      event_sequence: metadata[:event_sequence],
+      last_event_id: metadata[:last_event_id],
+      last_event_type: metadata[:last_event_type]
     }
 
     block_retry_entry(
@@ -1288,10 +1348,16 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  defp dispatch_issue(
+         %State{} = state,
+         issue,
+         attempt \\ nil,
+         preferred_worker_host \\ nil,
+         run_metadata \\ %{}
+       ) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, run_metadata)
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -1308,7 +1374,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, run_metadata) do
     state = refresh_compatibility_circuit(state)
     recipient = self()
 
@@ -1321,13 +1387,35 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {false, worker_host} ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(
+          state,
+          issue,
+          attempt,
+          recipient,
+          worker_host,
+          run_metadata
+        )
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(
+         %State{} = state,
+         issue,
+         attempt,
+         recipient,
+         worker_host,
+         run_metadata
+       ) do
+    run_id = valid_id_or_new(state, Map.get(run_metadata, :run_id))
+    attempt_id = new_identity(state)
+    event_sequence = non_negative_sequence(Map.get(run_metadata, :event_sequence))
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             correlation: %{run_id: run_id, attempt_id: attempt_id}
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1355,15 +1443,32 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
+            run_id: run_id,
+            attempt_id: attempt_id,
+            event_sequence: event_sequence,
+            last_event_id: Map.get(run_metadata, :last_event_id),
+            last_event_type: Map.get(run_metadata, :last_event_type),
             started_at: DateTime.utc_now()
           })
 
-        %{
+        state = %{
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
         }
+
+        append_internal_event(
+          state,
+          issue.id,
+          :running,
+          "worker.attempt.started",
+          "info",
+          %{
+            "retry_attempt" => normalize_retry_attempt(attempt),
+            "worker_kind" => if(is_nil(worker_host), do: "local", else: "remote")
+          }
+        )
 
       {:error, reason} ->
         failure_category = task_start_failure_category(reason)
@@ -1375,7 +1480,11 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: issue.identifier,
           issue_url: issue.url,
           error: "failed to spawn agent: #{failure_category}",
-          worker_host: worker_host
+          worker_host: worker_host,
+          run_id: run_id,
+          event_sequence: event_sequence,
+          last_event_id: Map.get(run_metadata, :last_event_id),
+          last_event_type: Map.get(run_metadata, :last_event_type)
         })
     end
   end
@@ -1429,6 +1538,17 @@ defmodule SymphonyElixir.Orchestrator do
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    run_id = pick_retry_value(previous_retry, metadata, :run_id)
+    attempt_id = pick_retry_value(previous_retry, metadata, :attempt_id)
+
+    event_sequence =
+      max(
+        non_negative_sequence(Map.get(previous_retry, :event_sequence)),
+        non_negative_sequence(Map.get(metadata, :event_sequence))
+      )
+
+    last_event_id = pick_retry_value(previous_retry, metadata, :last_event_id)
+    last_event_type = pick_retry_value(previous_retry, metadata, :last_event_type)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1440,7 +1560,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
 
-    %{
+    next_state = %{
       state
       | retry_attempts:
           Map.put(state.retry_attempts, issue_id, %{
@@ -1452,9 +1572,20 @@ defmodule SymphonyElixir.Orchestrator do
             issue_url: issue_url,
             error: error,
             worker_host: worker_host,
-            workspace_path: workspace_path
+            workspace_path: workspace_path,
+            run_id: run_id,
+            attempt_id: attempt_id,
+            event_sequence: event_sequence,
+            last_event_id: last_event_id,
+            last_event_type: last_event_type
           })
     }
+
+    if canonical_uuid4?(run_id) do
+      %{next_state | claimed: MapSet.put(next_state.claimed, issue_id)}
+    else
+      next_state
+    end
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
@@ -1465,7 +1596,12 @@ defmodule SymphonyElixir.Orchestrator do
           issue_url: Map.get(retry_entry, :issue_url),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
-          workspace_path: Map.get(retry_entry, :workspace_path)
+          workspace_path: Map.get(retry_entry, :workspace_path),
+          run_id: Map.get(retry_entry, :run_id),
+          attempt_id: Map.get(retry_entry, :attempt_id),
+          event_sequence: Map.get(retry_entry, :event_sequence, 0),
+          last_event_id: Map.get(retry_entry, :last_event_id),
+          last_event_type: Map.get(retry_entry, :last_event_type)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1605,7 +1741,7 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host], metadata)}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
@@ -1672,6 +1808,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_workspace_path(previous_retry, metadata) do
     metadata[:workspace_path] || Map.get(previous_retry, :workspace_path)
+  end
+
+  defp pick_retry_value(previous_retry, metadata, key) do
+    Map.get(metadata, key) || Map.get(previous_retry, key)
   end
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
@@ -1849,6 +1989,8 @@ defmodule SymphonyElixir.Orchestrator do
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
+          run_id: Map.get(metadata, :run_id),
+          attempt_id: Map.get(metadata, :attempt_id),
           session_id: metadata.session_id,
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
@@ -1859,6 +2001,9 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
+          last_event_id: Map.get(metadata, :last_event_id),
+          last_event_sequence: Map.get(metadata, :event_sequence, 0),
+          last_event_type: Map.get(metadata, :last_event_type),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
       end)
@@ -1874,7 +2019,12 @@ defmodule SymphonyElixir.Orchestrator do
           issue_url: Map.get(retry, :issue_url),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
-          workspace_path: Map.get(retry, :workspace_path)
+          workspace_path: Map.get(retry, :workspace_path),
+          run_id: Map.get(retry, :run_id),
+          attempt_id: Map.get(retry, :attempt_id),
+          last_event_id: Map.get(retry, :last_event_id),
+          last_event_sequence: Map.get(retry, :event_sequence, 0),
+          last_event_type: Map.get(retry, :last_event_type)
         }
       end)
 
@@ -1888,12 +2038,17 @@ defmodule SymphonyElixir.Orchestrator do
           state: blocked_issue_state(metadata),
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
+          run_id: Map.get(metadata, :run_id),
+          attempt_id: Map.get(metadata, :attempt_id),
           session_id: Map.get(metadata, :session_id),
           error: Map.get(metadata, :error),
           blocked_at: Map.get(metadata, :blocked_at),
           last_codex_timestamp: Map.get(metadata, :last_codex_timestamp),
           last_codex_message: Map.get(metadata, :last_codex_message),
-          last_codex_event: Map.get(metadata, :last_codex_event)
+          last_codex_event: Map.get(metadata, :last_codex_event),
+          last_event_id: Map.get(metadata, :last_event_id),
+          last_event_sequence: Map.get(metadata, :event_sequence, 0),
+          last_event_type: Map.get(metadata, :last_event_type)
         }
       end)
 
@@ -1946,6 +2101,539 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp record_codex_event(%State{} = state, issue_id, update) do
+    with {:ok, location, metadata, state, run_id, attempt_id, projection} <-
+           event_context(state, issue_id, update),
+         type <- normalized_event_type(update[:event]),
+         sequence <- Map.get(metadata, :event_sequence, 0) + 1,
+         attrs <-
+           event_attrs(
+             state,
+             issue_id,
+             metadata,
+             update,
+             %{run_id: run_id, attempt_id: attempt_id, sequence: sequence},
+             type,
+             event_severity(update[:event]),
+             public_event_payload(update)
+           ),
+         {:ok, event} <- Event.new(attrs) do
+      case append_to_event_sink(state, event) do
+        :appended ->
+          state = put_event_cursor(state, location, issue_id, metadata, event)
+
+          event_update =
+            Map.merge(update, %{
+              run_id: run_id,
+              attempt_id: attempt_id,
+              studio_event_id: event.event_id,
+              studio_event_sequence: event.sequence,
+              studio_event_type: event.type
+            })
+
+          {:appended, state, event_update, projection}
+
+        :duplicate ->
+          {:duplicate, state}
+
+        :rejected ->
+          {:rejected, state}
+      end
+    else
+      {:error, reason} ->
+        Logger.warning("Rejected structured codex event #{structured_event_log_context(state, issue_id, update)} failure_kind=#{event_failure_category(reason)}")
+
+        {:rejected, state}
+    end
+  end
+
+  defp append_internal_event(
+         %State{} = state,
+         issue_id,
+         location,
+         type,
+         severity,
+         payload
+       ) do
+    case event_metadata(state, location, issue_id) do
+      nil ->
+        state
+
+      metadata ->
+        run_id = valid_id_or_new(state, Map.get(metadata, :run_id))
+        attempt_id = valid_id_or_new(state, Map.get(metadata, :attempt_id))
+        sequence = non_negative_sequence(Map.get(metadata, :event_sequence)) + 1
+        metadata = Map.merge(metadata, %{run_id: run_id, attempt_id: attempt_id})
+        state = put_event_metadata(state, location, issue_id, metadata)
+
+        attrs =
+          event_attrs(
+            state,
+            issue_id,
+            metadata,
+            %{timestamp: event_now(state)},
+            %{run_id: run_id, attempt_id: attempt_id, sequence: sequence},
+            type,
+            severity,
+            payload
+          )
+
+        with {:ok, event} <- Event.new(attrs),
+             :appended <- append_to_event_sink(state, event) do
+          put_event_cursor(state, location, issue_id, metadata, event)
+        else
+          :duplicate -> state
+          _error -> state
+        end
+    end
+  end
+
+  defp append_attempt_exit_event(state, issue_id, _running_entry, reason) do
+    append_internal_event(
+      state,
+      issue_id,
+      :running,
+      "worker.attempt.exited",
+      if(reason == :normal, do: "info", else: "error"),
+      %{"exit_category" => reason |> agent_exit_category() |> Atom.to_string()}
+    )
+  end
+
+  defp event_context(%State{} = state, issue_id, update) do
+    case locate_event_metadata(state, issue_id) do
+      {location, metadata} ->
+        resolve_event_context(state, issue_id, update, location, metadata)
+
+      nil ->
+        {:error, :missing_run_context}
+    end
+  end
+
+  defp resolve_event_context(state, issue_id, update, location, metadata) do
+    stored_run_id = Map.get(metadata, :run_id)
+    stored_attempt_id = Map.get(metadata, :attempt_id)
+
+    with {:ok, incoming_run_id} <- incoming_identity(update, :run_id),
+         {:ok, incoming_attempt_id} <- incoming_identity(update, :attempt_id),
+         :ok <- require_matching_run_id(stored_run_id, incoming_run_id) do
+      build_event_context(
+        state,
+        issue_id,
+        location,
+        metadata,
+        stored_run_id,
+        incoming_run_id,
+        stored_attempt_id,
+        incoming_attempt_id
+      )
+    end
+  end
+
+  defp build_event_context(
+         state,
+         issue_id,
+         location,
+         metadata,
+         stored_run_id,
+         incoming_run_id,
+         stored_attempt_id,
+         incoming_attempt_id
+       ) do
+    run_id = canonical_identity_or_new(state, stored_run_id, incoming_run_id)
+    current_attempt_id = canonical_identity_or_new(state, stored_attempt_id, incoming_attempt_id)
+    event_attempt_id = incoming_attempt_id || current_attempt_id
+
+    metadata =
+      Map.merge(metadata, %{
+        run_id: run_id,
+        attempt_id: current_attempt_id,
+        event_sequence: non_negative_sequence(Map.get(metadata, :event_sequence))
+      })
+
+    state = put_event_metadata(state, location, issue_id, metadata)
+
+    projection =
+      if location == :running and
+           identity_absent_or_equal?(incoming_attempt_id, current_attempt_id) do
+        :running
+      else
+        :late
+      end
+
+    {:ok, location, metadata, state, run_id, event_attempt_id, projection}
+  end
+
+  defp locate_event_metadata(state, issue_id) do
+    cond do
+      is_map(Map.get(state.running, issue_id)) -> {:running, Map.fetch!(state.running, issue_id)}
+      is_map(Map.get(state.retry_attempts, issue_id)) -> {:retrying, Map.fetch!(state.retry_attempts, issue_id)}
+      is_map(Map.get(state.blocked, issue_id)) -> {:blocked, Map.fetch!(state.blocked, issue_id)}
+      true -> nil
+    end
+  end
+
+  defp event_metadata(state, :running, issue_id), do: Map.get(state.running, issue_id)
+
+  defp put_event_metadata(state, :running, issue_id, metadata) do
+    %{state | running: Map.put(state.running, issue_id, metadata)}
+  end
+
+  defp put_event_metadata(state, :retrying, issue_id, metadata) do
+    %{state | retry_attempts: Map.put(state.retry_attempts, issue_id, metadata)}
+  end
+
+  defp put_event_metadata(state, :blocked, issue_id, metadata) do
+    %{state | blocked: Map.put(state.blocked, issue_id, metadata)}
+  end
+
+  defp put_event_cursor(state, location, issue_id, metadata, event) do
+    put_event_metadata(
+      state,
+      location,
+      issue_id,
+      Map.merge(metadata, %{
+        event_sequence: event.sequence,
+        last_event_id: event.event_id,
+        last_event_type: event.type
+      })
+    )
+  end
+
+  defp event_attrs(
+         state,
+         issue_id,
+         metadata,
+         update,
+         %{run_id: run_id, attempt_id: attempt_id, sequence: sequence},
+         type,
+         severity,
+         payload
+       ) do
+    operation_id = operation_id_from_update(update)
+
+    %{
+      schema_version: 1,
+      sequence: sequence,
+      occurred_at: event_timestamp(state, update[:timestamp]),
+      issue_id: issue_id,
+      issue_identifier: event_issue_identifier(metadata, issue_id),
+      run_id: run_id,
+      attempt_id: attempt_id,
+      thread_id: safe_identifier(update[:thread_id]),
+      turn_id: safe_identifier(update[:turn_id]),
+      type: type,
+      severity: severity,
+      payload: payload,
+      redacted: true
+    }
+    |> maybe_put_event_operation_id(operation_id)
+  end
+
+  defp append_to_event_sink(%State{} = state, event) do
+    case EventSink.append(state.event_sink || EventSink.Noop, event) do
+      {:ok, result} when result in [:appended, :accepted] -> :appended
+      {:ok, :duplicate} -> :duplicate
+      {:error, reason} -> handle_event_sink_error(reason, event)
+    end
+  rescue
+    _error ->
+      Logger.warning("Structured event sink failed #{structured_event_log_context(event)} failure_kind=exception; continuing without persistence")
+
+      :appended
+  catch
+    :exit, _reason ->
+      Logger.warning("Structured event sink failed #{structured_event_log_context(event)} failure_kind=exit; continuing without persistence")
+
+      :appended
+  end
+
+  defp handle_event_sink_error(reason, event) do
+    context = structured_event_log_context(event)
+
+    if event_sink_contract_error?(reason) do
+      Logger.error("Structured event sink rejected producer event #{context} failure_kind=#{event_failure_category(reason)}")
+
+      :rejected
+    else
+      Logger.warning("Structured event sink unavailable #{context} failure_kind=#{event_failure_category(reason)}; continuing without persistence")
+
+      :appended
+    end
+  end
+
+  defp event_sink_contract_error?(reason) do
+    match?({:event_conflict, _}, reason) or
+      match?({:invalid_event, _}, reason)
+  end
+
+  defp event_issue_identifier(%{identifier: identifier}, _issue_id) when is_binary(identifier),
+    do: identifier
+
+  defp event_issue_identifier(_metadata, issue_id), do: issue_id
+
+  defp structured_event_log_context(%Event{} = event) do
+    structured_event_log_context(%{
+      issue_id: event.issue_id,
+      issue_identifier: event.issue_identifier,
+      run_id: event.run_id,
+      attempt_id: event.attempt_id,
+      operation_id: event.operation_id,
+      event_type: event.type
+    })
+  end
+
+  defp structured_event_log_context(fields) when is_map(fields) do
+    "issue_id=#{event_log_token(fields[:issue_id])} " <>
+      "issue_identifier=#{event_log_token(fields[:issue_identifier])} " <>
+      "run_id=#{event_log_token(fields[:run_id])} " <>
+      "attempt_id=#{event_log_token(fields[:attempt_id])} " <>
+      "operation_id=#{event_log_token(fields[:operation_id])} " <>
+      "event_type=#{event_log_token(fields[:event_type])}"
+  end
+
+  defp structured_event_log_context(%State{} = state, issue_id, update) do
+    {trusted_issue_id, issue_identifier, stored_run_id, stored_attempt_id} =
+      case locate_event_metadata(state, issue_id) do
+        {_location, metadata} ->
+          {
+            issue_id,
+            event_issue_identifier(metadata, issue_id),
+            Map.get(metadata, :run_id),
+            Map.get(metadata, :attempt_id)
+          }
+
+        nil ->
+          {nil, nil, nil, nil}
+      end
+
+    structured_event_log_context(%{
+      issue_id: trusted_issue_id,
+      issue_identifier: issue_identifier,
+      run_id: canonical_event_log_identity(stored_run_id, update[:run_id]),
+      attempt_id: canonical_event_log_identity(stored_attempt_id, update[:attempt_id]),
+      operation_id: operation_id_from_update(update),
+      event_type: :unvalidated
+    })
+  end
+
+  defp canonical_event_log_identity(stored, incoming) do
+    cond do
+      canonical_uuid4?(stored) -> stored
+      canonical_uuid4?(incoming) -> incoming
+      true -> nil
+    end
+  end
+
+  defp event_log_token(nil), do: "n/a"
+  defp event_log_token(value) when is_atom(value), do: value |> Atom.to_string() |> event_log_token()
+
+  defp event_log_token(value) when is_binary(value) and byte_size(value) <= 512 do
+    if String.valid?(value) do
+      value
+      |> String.replace(~r/[^\p{L}\p{N}._:@\/-]+/u, "_")
+      |> String.trim("_")
+      |> case do
+        "" -> "n/a"
+        token -> token
+      end
+    else
+      "n/a"
+    end
+  end
+
+  defp event_log_token(_value), do: "n/a"
+
+  defp normalized_event_type(event) when is_atom(event) do
+    "codex." <> normalize_event_type_segment(Atom.to_string(event))
+  end
+
+  defp normalized_event_type(event) when is_binary(event) do
+    if String.valid?(event) and byte_size(event) <= 512 do
+      normalized = normalize_event_type_segment(event)
+
+      if String.starts_with?(normalized, ["codex.", "worker.", "run.", "operation."]) do
+        normalized
+      else
+        "codex." <> normalized
+      end
+    else
+      event
+    end
+  end
+
+  defp normalized_event_type(event), do: event
+
+  defp normalize_event_type_segment(value) do
+    value
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/u, ".")
+    |> String.trim(".")
+    |> case do
+      "" -> "notification"
+      normalized -> normalized
+    end
+  end
+
+  defp event_severity(event)
+       when event in [
+              :app_server_protocol_failure,
+              :process_cleanup_failed,
+              :uncertain_external_outcome
+            ],
+       do: "error"
+
+  defp event_severity(event) when event in [:approval_required, :turn_input_required],
+    do: "warning"
+
+  defp event_severity(_event), do: "info"
+
+  defp public_event_payload(update) do
+    %{}
+    |> maybe_put_public_value("decision", update[:decision])
+    |> maybe_put_public_value("method_category", update[:method_category])
+    |> maybe_put_public_value("operation_id", operation_id_from_update(update))
+    |> maybe_put_public_value("request_id_type", update[:request_id_type])
+    |> maybe_put_public_value("request_kind", update[:request_kind])
+    |> maybe_put_public_value("session_id", update[:session_id])
+    |> maybe_put_public_value("terminal", update[:terminal])
+    |> maybe_put_public_value("tool_kind", update[:tool_kind])
+    |> maybe_put_public_value("failure_kind", public_failure_kind(update[:reason]))
+    |> maybe_put_public_value("usage", public_usage(update))
+  end
+
+  defp public_usage(update) do
+    usage = extract_token_usage(update)
+
+    %{}
+    |> maybe_put_public_value("input_tokens", get_token_usage(usage, :input))
+    |> maybe_put_public_value("output_tokens", get_token_usage(usage, :output))
+    |> maybe_put_public_value("total_tokens", get_token_usage(usage, :total))
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      public -> public
+    end
+  end
+
+  defp public_failure_kind(%TransportError{kind: kind}), do: Atom.to_string(kind)
+  defp public_failure_kind(%{kind: kind}) when is_atom(kind), do: Atom.to_string(kind)
+  defp public_failure_kind(%{kind: kind}) when is_binary(kind), do: kind
+  defp public_failure_kind(_reason), do: nil
+
+  defp maybe_put_public_value(map, _key, nil), do: map
+  defp maybe_put_public_value(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+  defp maybe_put_public_value(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
+  defp maybe_put_public_value(map, key, value) when is_number(value), do: Map.put(map, key, value)
+  defp maybe_put_public_value(map, key, value) when is_atom(value), do: Map.put(map, key, Atom.to_string(value))
+  defp maybe_put_public_value(map, key, value) when is_map(value), do: Map.put(map, key, value)
+  defp maybe_put_public_value(map, _key, _value), do: map
+
+  defp operation_id_from_update(update) do
+    operation = if is_map(update[:operation]), do: update[:operation], else: %{}
+
+    candidate =
+      update[:operation_id] || Map.get(operation, :operation_id) || Map.get(operation, "operation_id")
+
+    if canonical_uuid4?(candidate), do: candidate, else: nil
+  end
+
+  defp maybe_put_event_operation_id(attrs, nil), do: attrs
+  defp maybe_put_event_operation_id(attrs, operation_id), do: Map.put(attrs, :operation_id, operation_id)
+
+  defp event_timestamp(_state, %DateTime{} = timestamp) do
+    timestamp
+    |> DateTime.to_unix(:microsecond)
+    |> DateTime.from_unix!(:microsecond)
+  rescue
+    _error -> timestamp
+  end
+
+  defp event_timestamp(state, _timestamp), do: event_now(state)
+
+  defp event_now(%State{event_clock: clock}) when is_function(clock, 0), do: clock.()
+  defp event_now(_state), do: DateTime.utc_now()
+
+  defp valid_id_or_new(state, candidate) do
+    if canonical_uuid4?(candidate), do: candidate, else: new_identity(state)
+  end
+
+  defp new_identity(%State{id_generator: generator}) when is_function(generator, 0) do
+    case generator.() do
+      generated when is_binary(generated) ->
+        if canonical_uuid4?(generated), do: generated, else: Identity.uuid4()
+
+      _other ->
+        Identity.uuid4()
+    end
+  end
+
+  defp new_identity(_state), do: Identity.uuid4()
+
+  defp incoming_identity(update, key) when is_map(update) and is_atom(key) do
+    case Map.fetch(update, key) do
+      :error -> {:ok, nil}
+      {:ok, candidate} -> validate_incoming_identity(candidate, key)
+    end
+  end
+
+  defp validate_incoming_identity(candidate, _key) when is_binary(candidate) do
+    if canonical_uuid4?(candidate), do: {:ok, candidate}, else: {:error, :invalid_correlation_id}
+  end
+
+  defp validate_incoming_identity(_candidate, _key), do: {:error, :invalid_correlation_id}
+
+  defp require_matching_run_id(stored, incoming)
+       when is_binary(stored) and is_binary(incoming) do
+    if canonical_uuid4?(stored) and stored != incoming,
+      do: {:error, :run_id_mismatch},
+      else: :ok
+  end
+
+  defp require_matching_run_id(_stored, _incoming), do: :ok
+
+  defp canonical_identity_or_new(state, stored, incoming) do
+    cond do
+      canonical_uuid4?(stored) -> stored
+      canonical_uuid4?(incoming) -> incoming
+      true -> new_identity(state)
+    end
+  end
+
+  defp identity_absent_or_equal?(nil, _current), do: true
+  defp identity_absent_or_equal?(incoming, current), do: incoming == current
+
+  defp canonical_uuid4?(value) when is_binary(value),
+    do: value == String.downcase(value) and Identity.valid_uuid4?(value)
+
+  defp canonical_uuid4?(_value), do: false
+
+  defp non_negative_sequence(sequence) when is_integer(sequence) and sequence >= 0, do: sequence
+  defp non_negative_sequence(_sequence), do: 0
+
+  defp correlation_matches?(metadata, incoming) do
+    correlation_field_matches?(metadata, incoming, :run_id) and
+      correlation_field_matches?(metadata, incoming, :attempt_id)
+  end
+
+  defp correlation_field_matches?(metadata, incoming, key) do
+    stored = Map.get(metadata, key)
+
+    case {canonical_uuid4?(stored), Map.fetch(incoming, key)} do
+      {true, {:ok, ^stored}} -> true
+      {true, _missing_or_mismatch} -> false
+      {false, :error} -> true
+      {false, {:ok, candidate}} -> canonical_uuid4?(candidate)
+    end
+  end
+
+  defp safe_identifier(value) when is_binary(value) and byte_size(value) <= 512, do: value
+  defp safe_identifier(_value), do: nil
+
+  defp safe_binary_or_existing(_existing, incoming) when is_binary(incoming), do: incoming
+  defp safe_binary_or_existing(existing, _incoming), do: existing
+
+  defp event_failure_category(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp event_failure_category({kind, _details}) when is_atom(kind), do: Atom.to_string(kind)
+
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
@@ -1963,6 +2651,10 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
+        last_event_id: Map.get(update, :studio_event_id),
+        last_event_type: Map.get(update, :studio_event_type),
+        thread_id: safe_binary_or_existing(Map.get(running_entry, :thread_id), update[:thread_id]),
+        turn_id: safe_binary_or_existing(Map.get(running_entry, :turn_id), update[:turn_id]),
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
@@ -2020,12 +2712,15 @@ defmodule SymphonyElixir.Orchestrator do
           :decision,
           :method_category,
           :operation,
+          :operation_id,
           :reason,
           :request_id_type,
           :request_kind,
           :session_id,
           :terminal,
+          :thread_id,
           :tool_kind,
+          :turn_id,
           :usage
         ]),
       timestamp: update[:timestamp]

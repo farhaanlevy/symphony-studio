@@ -1,9 +1,11 @@
-# Modified for Symphony Studio on 2026-07-14: make retry scheduling and App
-# Server policy compatibility tests hermetic and deterministic.
+# Modified for Symphony Studio on 2026-07-16: keep scheduler/App Server tests
+# hermetic while verifying stable run, attempt, and operation correlation.
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.TransportError
+  alias SymphonyElixir.EventSink.Memory
+  alias SymphonyElixir.Identity
 
   test "config defaults and validation checks" do
     with_default_orchestrator_stopped(fn ->
@@ -683,9 +685,117 @@ defmodule SymphonyElixir.CoreTest do
              AgentRunner.continue_with_issue_for_test(issue, fetcher)
   end
 
+  test "retry deferrals preserve identity while actual attempts and re-admissions rotate it" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_command: "/bin/false app-server"
+    )
+
+    issue = %Issue{
+      id: "issue-identity-lifecycle",
+      identifier: "MT-566",
+      title: "Preserve run identity across retry scheduling",
+      state: "In Progress",
+      labels: []
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    run_id = Identity.uuid4()
+    prior_attempt_id = Identity.uuid4()
+    {:ok, sink_pid} = Memory.start_link()
+    sink = {Memory, sink_pid}
+
+    on_exit(fn ->
+      if Process.alive?(sink_pid), do: GenServer.stop(sink_pid)
+    end)
+
+    base_state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      claimed: MapSet.new([issue.id]),
+      event_sink: sink
+    }
+
+    metadata = %{
+      identifier: issue.identifier,
+      run_id: run_id,
+      attempt_id: prior_attempt_id,
+      event_sequence: 0
+    }
+
+    deferred_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        %{base_state | max_concurrent_agents: 0},
+        issue.id,
+        2,
+        metadata
+      )
+
+    assert %{
+             attempt: 3,
+             run_id: ^run_id,
+             attempt_id: ^prior_attempt_id,
+             event_sequence: 0
+           } = deferred_state.retry_attempts[issue.id]
+
+    Process.cancel_timer(deferred_state.retry_attempts[issue.id].timer_ref)
+
+    dispatched_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        base_state,
+        issue.id,
+        2,
+        metadata
+      )
+
+    dispatched_entry = dispatched_state.running[issue.id]
+    assert dispatched_entry.run_id == run_id
+    assert Identity.valid_uuid4?(dispatched_entry.attempt_id)
+    refute dispatched_entry.attempt_id == prior_attempt_id
+    assert dispatched_entry.event_sequence == 1
+
+    assert {:ok, %{events: [started_event]}} =
+             SymphonyElixir.EventSink.replay(sink, run_id, 0, 10)
+
+    assert started_event.type == "worker.attempt.started"
+    assert started_event.run_id == run_id
+    assert started_event.attempt_id == dispatched_entry.attempt_id
+
+    terminate_test_worker(dispatched_entry)
+
+    readmitted_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        %{base_state | claimed: MapSet.new()},
+        issue.id,
+        1,
+        %{identifier: issue.identifier}
+      )
+
+    readmitted_entry = readmitted_state.running[issue.id]
+    assert Identity.valid_uuid4?(readmitted_entry.run_id)
+    refute readmitted_entry.run_id == run_id
+    assert Identity.valid_uuid4?(readmitted_entry.attempt_id)
+    refute readmitted_entry.attempt_id == dispatched_entry.attempt_id
+    assert readmitted_entry.event_sequence == 1
+
+    assert {:ok, %{events: [readmitted_event]}} =
+             SymphonyElixir.EventSink.replay(sink, readmitted_entry.run_id, 0, 10)
+
+    assert readmitted_event.type == "worker.attempt.started"
+    assert readmitted_event.run_id == readmitted_entry.run_id
+    assert readmitted_event.attempt_id == readmitted_entry.attempt_id
+
+    terminate_test_worker(readmitted_entry)
+  end
+
   test "normal worker exit schedules active-state continuation retry" do
     issue_id = "issue-resume"
     ref = make_ref()
+    run_id = Identity.uuid4()
+    attempt_id = Identity.uuid4()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -703,6 +813,9 @@ defmodule SymphonyElixir.CoreTest do
       ref: ref,
       identifier: "MT-558",
       issue: %Issue{id: issue_id, identifier: "MT-558", state: "In Progress"},
+      run_id: run_id,
+      attempt_id: attempt_id,
+      event_sequence: 0,
       started_at: DateTime.utc_now()
     }
 
@@ -720,7 +833,18 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
-    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+
+    assert %{
+             attempt: 1,
+             due_at_ms: due_at_ms,
+             run_id: ^run_id,
+             attempt_id: ^attempt_id,
+             event_sequence: 1,
+             last_event_id: last_event_id,
+             last_event_type: "worker.attempt.exited"
+           } = state.retry_attempts[issue_id]
+
+    assert Identity.valid_uuid5?(last_event_id)
     assert is_integer(due_at_ms)
     assert_retry_scheduled_between(due_at_ms, 1_000, sent_at_ms, observed_at_ms)
   end
@@ -728,6 +852,8 @@ defmodule SymphonyElixir.CoreTest do
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
+    run_id = Identity.uuid4()
+    attempt_id = Identity.uuid4()
     orchestrator_name = Module.concat(__MODULE__, :CrashRetryOrchestrator)
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -746,6 +872,9 @@ defmodule SymphonyElixir.CoreTest do
       identifier: "MT-559",
       retry_attempt: 2,
       issue: %Issue{id: issue_id, identifier: "MT-559", state: "In Progress"},
+      run_id: run_id,
+      attempt_id: attempt_id,
+      event_sequence: 4,
       started_at: DateTime.utc_now()
     }
 
@@ -765,10 +894,16 @@ defmodule SymphonyElixir.CoreTest do
              attempt: 3,
              due_at_ms: due_at_ms,
              identifier: "MT-559",
-             error: "agent exited: worker_failure"
+             error: "agent exited: worker_failure",
+             run_id: ^run_id,
+             attempt_id: ^attempt_id,
+             event_sequence: 5,
+             last_event_id: last_event_id,
+             last_event_type: "worker.attempt.exited"
            } =
              state.retry_attempts[issue_id]
 
+    assert Identity.valid_uuid5?(last_event_id)
     assert_retry_scheduled_between(due_at_ms, 40_000, sent_at_ms, observed_at_ms)
   end
 
@@ -949,6 +1084,15 @@ defmodule SymphonyElixir.CoreTest do
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
+
+  defp terminate_test_worker(%{pid: pid, ref: ref}) do
+    if Process.alive?(pid) do
+      :ok = Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid)
+    end
+
+    Process.demonitor(ref, [:flush])
+    :ok
+  end
 
   test "fetch issues by states with empty state set is a no-op" do
     assert {:ok, []} = Client.fetch_issues_by_states([])
@@ -1375,14 +1519,22 @@ defmodule SymphonyElixir.CoreTest do
 
       assert_receive {:codex_worker_update, "issue-live-updates",
                       %{
+                        attempt_id: attempt_id,
                         event: :session_started,
+                        operation_id: operation_id,
+                        run_id: run_id,
                         timestamp: %DateTime{},
-                        session_id: session_id
+                        session_id: session_id,
+                        thread_id: "thread-live",
+                        turn_id: "turn-live"
                       }},
                      500
 
       assert String.starts_with?(session_id, "session-")
       assert byte_size(session_id) == byte_size("session-") + 24
+      assert Identity.valid_uuid4?(run_id)
+      assert Identity.valid_uuid4?(attempt_id)
+      assert Identity.valid_uuid4?(operation_id)
     after
       File.rm_rf(test_root)
     end

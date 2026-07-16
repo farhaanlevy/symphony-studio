@@ -1,5 +1,5 @@
-# Downstream modification notice (2026-07-15): Symphony Studio propagates
-# typed App Server uncertainty and process-cleanup failures as worker blockers.
+# Downstream modification notice (2026-07-16): Symphony Studio propagates
+# stable run/attempt correlation together with typed App Server blockers.
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
   Executes a single Linear issue in its workspace with Codex.
@@ -7,7 +7,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.{AppServer, TransportError}
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Identity, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @remote_workers_error {:unsupported_release_feature, :remote_workers, :release_5}
   @protocol_failure_kinds [
@@ -39,6 +39,7 @@ defmodule SymphonyElixir.AgentRunner do
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
     worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    opts = Keyword.put(opts, :correlation, correlation_context(opts))
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
@@ -63,7 +64,13 @@ defmodule SymphonyElixir.AgentRunner do
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+        send_worker_runtime_info(
+          codex_update_recipient,
+          issue,
+          worker_host,
+          workspace,
+          correlation_from_opts(opts)
+        )
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
@@ -78,50 +85,69 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
+  defp codex_message_handler(recipient, issue, correlation) do
     fn message ->
-      send_codex_update(recipient, issue, message)
+      send_codex_update(recipient, issue, message, correlation)
     end
   end
 
-  defp send_codex_update(recipient, %Issue{id: issue_id}, message)
-       when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:codex_worker_update, issue_id, message})
+  defp send_codex_update(recipient, %Issue{id: issue_id}, message, correlation)
+       when is_binary(issue_id) and is_pid(recipient) and is_map(message) and is_map(correlation) do
+    send(recipient, {:codex_worker_update, issue_id, Map.merge(message, correlation)})
     :ok
   end
 
-  defp send_codex_update(_recipient, _issue, _message), do: :ok
+  defp send_codex_update(_recipient, _issue, _message, _correlation), do: :ok
 
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
-       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
+  defp send_worker_runtime_info(
+         recipient,
+         %Issue{id: issue_id},
+         worker_host,
+         workspace,
+         correlation
+       )
+       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) and
+              is_map(correlation) do
     send(
       recipient,
       {:worker_runtime_info, issue_id,
-       %{
-         worker_host: worker_host,
-         workspace_path: workspace
-       }}
+       Map.merge(
+         %{
+           worker_host: worker_host,
+           workspace_path: workspace
+         },
+         correlation
+       )}
     )
 
     :ok
   end
 
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+  defp send_worker_runtime_info(
+         _recipient,
+         _issue,
+         _worker_host,
+         _workspace,
+         _correlation
+       ),
+       do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    correlation = correlation_from_opts(opts)
 
     on_transport_failure = fn reason ->
-      maybe_send_transport_blocker(codex_update_recipient, issue, reason)
+      maybe_send_transport_blocker(codex_update_recipient, issue, reason, correlation)
     end
 
     case AppServer.start_session(workspace,
            worker_host: worker_host,
+           correlation: correlation,
            on_transport_failure: on_transport_failure
          ) do
       {:ok, session} ->
-        send_app_server_session_ready(codex_update_recipient, issue, session)
+        send_app_server_session_ready(codex_update_recipient, issue, session, correlation)
 
         run_codex_session(
           session,
@@ -134,7 +160,7 @@ defmodule SymphonyElixir.AgentRunner do
         )
 
       {:error, reason} ->
-        maybe_send_transport_blocker(codex_update_recipient, issue, reason)
+        maybe_send_transport_blocker(codex_update_recipient, issue, reason, correlation)
         {:error, reason}
     end
   end
@@ -148,6 +174,8 @@ defmodule SymphonyElixir.AgentRunner do
          issue_state_fetcher,
          max_turns
        ) do
+    correlation = correlation_from_opts(opts)
+
     result =
       do_run_codex_turns(
         session,
@@ -165,7 +193,7 @@ defmodule SymphonyElixir.AgentRunner do
         result
 
       {:error, reason} ->
-        maybe_send_transport_blocker(codex_update_recipient, issue, reason)
+        maybe_send_transport_blocker(codex_update_recipient, issue, reason, correlation)
         {:error, reason}
     end
   catch
@@ -175,15 +203,21 @@ defmodule SymphonyElixir.AgentRunner do
           :erlang.raise(kind, reason, __STACKTRACE__)
 
         {:error, cleanup_reason} ->
-          maybe_send_transport_blocker(codex_update_recipient, issue, cleanup_reason)
+          maybe_send_transport_blocker(
+            codex_update_recipient,
+            issue,
+            cleanup_reason,
+            correlation_from_opts(opts)
+          )
+
           {:error, cleanup_reason}
       end
   end
 
-  defp maybe_send_transport_blocker(recipient, issue, reason) do
+  defp maybe_send_transport_blocker(recipient, issue, reason, correlation) do
     case transport_blocker_update(reason) do
       nil -> :ok
-      update -> send_codex_update(recipient, issue, update)
+      update -> send_codex_update(recipient, issue, update, correlation)
     end
   end
 
@@ -231,15 +265,20 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp transport_blocker_update(_reason), do: nil
 
-  defp send_app_server_session_ready(recipient, issue, session) do
+  defp send_app_server_session_ready(recipient, issue, session, correlation) do
     metadata = Map.get(session, :metadata, %{})
 
-    send_codex_update(recipient, issue, %{
-      codex_app_server_pid: metadata[:codex_app_server_pid],
-      event: :app_server_session_ready,
-      thread_id: Map.get(session, :thread_id),
-      timestamp: DateTime.utc_now()
-    })
+    send_codex_update(
+      recipient,
+      issue,
+      %{
+        codex_app_server_pid: metadata[:codex_app_server_pid],
+        event: :app_server_session_ready,
+        thread_id: Map.get(session, :thread_id),
+        timestamp: DateTime.utc_now()
+      },
+      correlation
+    )
   end
 
   defp validate_release_worker(nil), do: :ok
@@ -252,7 +291,13 @@ defmodule SymphonyElixir.AgentRunner do
            app_session,
            prompt,
            issue,
-           on_message: codex_message_handler(codex_update_recipient, issue)
+           correlation: correlation_from_opts(opts),
+           on_message:
+             codex_message_handler(
+               codex_update_recipient,
+               issue,
+               correlation_from_opts(opts)
+             )
          ) do
       {:ok, turn_session} ->
         Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
@@ -285,10 +330,37 @@ defmodule SymphonyElixir.AgentRunner do
         end
 
       {:error, reason} ->
-        maybe_send_transport_blocker(codex_update_recipient, issue, reason)
+        maybe_send_transport_blocker(
+          codex_update_recipient,
+          issue,
+          reason,
+          correlation_from_opts(opts)
+        )
+
         {:error, reason}
     end
   end
+
+  defp correlation_context(opts) when is_list(opts) do
+    correlation = Keyword.get(opts, :correlation, %{})
+
+    %{
+      run_id: valid_or_new_id(Map.get(correlation, :run_id) || Keyword.get(opts, :run_id)),
+      attempt_id: valid_or_new_id(Map.get(correlation, :attempt_id) || Keyword.get(opts, :attempt_id))
+    }
+  end
+
+  defp correlation_from_opts(opts) when is_list(opts) do
+    Keyword.fetch!(opts, :correlation)
+  end
+
+  defp valid_or_new_id(value) when is_binary(value) do
+    if value == String.downcase(value) and Identity.valid_uuid4?(value),
+      do: value,
+      else: Identity.uuid4()
+  end
+
+  defp valid_or_new_id(_value), do: Identity.uuid4()
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 

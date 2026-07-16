@@ -512,9 +512,13 @@ FIXTURE_TEST_FILES = (
     "test/symphony_elixir/codex_request_policy_test.exs",
     "test/symphony_elixir/codex_stderr_diagnostics_test.exs",
     "test/symphony_elixir/dynamic_tool_test.exs",
+    "test/symphony_elixir/event_sink_test.exs",
+    "test/symphony_elixir/event_test.exs",
     "test/symphony_elixir/fake_codex_app_server_test.exs",
     "test/symphony_elixir/fake_linear_test.exs",
+    "test/symphony_elixir/identity_test.exs",
     "test/symphony_elixir/network_hermeticity_test.exs",
+    "test/symphony_elixir/orchestrator_event_test.exs",
     "test/symphony_elixir/orchestrator_status_test.exs",
     "test/symphony_elixir/workspace_and_config_test.exs",
 )
@@ -548,7 +552,7 @@ ERLEXEC_PATH_ENV = "SYMPHONY_ERLEXEC_PATH"
 FIXTURE_TEST_COMMAND = ("mise", "exec", "--", "mix", "test", *FIXTURE_TEST_FILES, "--seed", "0")
 FIXTURE_DEPENDENCY_COMMAND = ("mise", "exec", "--", "mix", "deps.get", "--check-locked")
 FIXTURE_DEPENDENCY_COMPILE_COMMAND = ("mise", "exec", "--", "mix", "deps.compile")
-FIXTURE_EXPECTED_TEST_COUNT = 276
+FIXTURE_EXPECTED_TEST_COUNT = 308
 TEST_MANIFEST_ENV = "SYMPHONY_CODEX_SCHEMA_TEST_MANIFEST"
 RESERVED_MANIFEST_PATTERNS = (".manifest.*",)
 LF_NORMALIZED_SUFFIXES = {

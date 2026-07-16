@@ -1,5 +1,5 @@
-# Modified for Symphony Studio on 2026-07-14: restore supervised workflow
-# runtime ownership after exercising manual WorkflowStore lifecycle paths.
+# Modified for Symphony Studio on 2026-07-16: restore supervised workflow
+# ownership and verify additive runtime/event correlation projections.
 defmodule SymphonyElixir.ExtensionsTest do
   use SymphonyElixir.TestSupport
 
@@ -10,6 +10,15 @@ defmodule SymphonyElixir.ExtensionsTest do
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
+  @running_run_id "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  @running_attempt_id "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  @running_event_id "cccccccc-cccc-5ccc-8ccc-cccccccccccc"
+  @retry_run_id "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  @retry_attempt_id "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+  @retry_event_id "ffffffff-ffff-5fff-8fff-ffffffffffff"
+  @blocked_run_id "11111111-1111-4111-8111-111111111111"
+  @blocked_attempt_id "22222222-2222-4222-8222-222222222222"
+  @blocked_event_id "33333333-3333-5333-8333-333333333333"
 
   defmodule FakeLinearClient do
     def fetch_candidate_issues do
@@ -350,9 +359,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "state" => "In Progress",
                  "worker_host" => nil,
                  "workspace_path" => nil,
+                 "run_id" => @running_run_id,
+                 "attempt_id" => @running_attempt_id,
                  "session_id" => "thread-http",
                  "turn_count" => 7,
                  "last_event" => "notification",
+                 "last_event_id" => @running_event_id,
+                 "last_event_sequence" => 7,
+                 "last_event_type" => "codex.notification",
                  "last_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
@@ -368,7 +382,12 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
                  "worker_host" => nil,
-                 "workspace_path" => nil
+                 "workspace_path" => nil,
+                 "run_id" => @retry_run_id,
+                 "attempt_id" => @retry_attempt_id,
+                 "last_event_id" => @retry_event_id,
+                 "last_event_sequence" => 2,
+                 "last_event_type" => "worker.attempt.exited"
                }
              ],
              "blocked" => [
@@ -380,9 +399,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "error" => "codex turn requires operator input",
                  "worker_host" => "dm-dev2",
                  "workspace_path" => "/workspaces/MT-BLOCKED",
+                 "run_id" => @blocked_run_id,
+                 "attempt_id" => @blocked_attempt_id,
                  "session_id" => "thread-blocked",
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
                  "last_event" => "turn_input_required",
+                 "last_event_id" => @blocked_event_id,
+                 "last_event_sequence" => 4,
+                 "last_event_type" => "codex.turn.input.required",
                  "last_message" => "turn blocked: waiting for user input",
                  "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
                }
@@ -411,11 +435,16 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => %{
                "worker_host" => nil,
                "workspace_path" => nil,
+               "run_id" => @running_run_id,
+               "attempt_id" => @running_attempt_id,
                "session_id" => "thread-http",
                "turn_count" => 7,
                "state" => "In Progress",
                "started_at" => issue_payload["running"]["started_at"],
                "last_event" => "notification",
+               "last_event_id" => @running_event_id,
+               "last_event_sequence" => 7,
+               "last_event_type" => "codex.notification",
                "last_message" => "rendered",
                "last_event_at" => nil,
                "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
@@ -491,6 +520,43 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "legacy recent events do not splice in a different structured stream cursor" do
+    timestamp = ~U[2026-07-16 12:00:00Z]
+
+    running =
+      static_snapshot()
+      |> Map.fetch!(:running)
+      |> hd()
+      |> Map.merge(%{
+        last_codex_event: :notification,
+        last_codex_message: %{event: :notification, message: %{method_category: :turn}},
+        last_codex_timestamp: timestamp,
+        last_event_id: "99999999-9999-5999-8999-999999999999",
+        last_event_sequence: 8,
+        last_event_type: "codex.turn.completed"
+      })
+
+    snapshot = %{static_snapshot() | running: [running]}
+    orchestrator = Module.concat(__MODULE__, :StaleCursorOrchestrator)
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator, snapshot: snapshot)
+
+    assert {:ok, payload} =
+             SymphonyElixirWeb.Presenter.issue_payload("MT-HTTP", orchestrator, 1_000)
+
+    assert payload.running.last_event_id == "99999999-9999-5999-8999-999999999999"
+    assert payload.running.last_event_sequence == 8
+    assert payload.running.last_event_type == "codex.turn.completed"
+
+    assert [legacy_event] = payload.recent_events
+    assert legacy_event.event == :notification
+    assert legacy_event.run_id == @running_run_id
+    assert legacy_event.attempt_id == @running_attempt_id
+    refute Map.has_key?(legacy_event, :event_id)
+    refute Map.has_key?(legacy_event, :sequence)
+    refute Map.has_key?(legacy_event, :type)
   end
 
   test "phoenix observability api preserves snapshot timeout behavior" do
@@ -608,6 +674,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_url: "javascript:alert('nope')",
           state: "In Progress",
           session_id: "thread-http",
+          run_id: @running_run_id,
+          attempt_id: @running_attempt_id,
+          last_event_id: @running_event_id,
+          last_event_sequence: 7,
+          last_event_type: "codex.notification",
           turn_count: 8,
           last_codex_event: :notification,
           last_codex_message: %{
@@ -740,6 +811,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_url: "https://example.org/issues/MT-HTTP",
           state: "In Progress",
           session_id: "thread-http",
+          run_id: @running_run_id,
+          attempt_id: @running_attempt_id,
+          last_event_id: @running_event_id,
+          last_event_sequence: 7,
+          last_event_type: "codex.notification",
           turn_count: 7,
           codex_app_server_pid: nil,
           last_codex_message: "rendered",
@@ -757,6 +833,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           identifier: "MT-RETRY",
           issue_url: "https://example.org/issues/MT-RETRY",
           attempt: 2,
+          run_id: @retry_run_id,
+          attempt_id: @retry_attempt_id,
+          last_event_id: @retry_event_id,
+          last_event_sequence: 2,
+          last_event_type: "worker.attempt.exited",
           due_in_ms: 2_000,
           error: "boom"
         }
@@ -771,6 +852,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           worker_host: "dm-dev2",
           workspace_path: "/workspaces/MT-BLOCKED",
           session_id: "thread-blocked",
+          run_id: @blocked_run_id,
+          attempt_id: @blocked_attempt_id,
+          last_event_id: @blocked_event_id,
+          last_event_sequence: 4,
+          last_event_type: "codex.turn.input.required",
           blocked_at: DateTime.utc_now(),
           last_codex_event: :turn_input_required,
           last_codex_message: %{

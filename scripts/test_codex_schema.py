@@ -33,9 +33,13 @@ FOCUSED_TEST_FILES = (
     "test/symphony_elixir/codex_request_policy_test.exs",
     "test/symphony_elixir/codex_stderr_diagnostics_test.exs",
     "test/symphony_elixir/dynamic_tool_test.exs",
+    "test/symphony_elixir/event_sink_test.exs",
+    "test/symphony_elixir/event_test.exs",
     "test/symphony_elixir/fake_codex_app_server_test.exs",
     "test/symphony_elixir/fake_linear_test.exs",
+    "test/symphony_elixir/identity_test.exs",
     "test/symphony_elixir/network_hermeticity_test.exs",
+    "test/symphony_elixir/orchestrator_event_test.exs",
     "test/symphony_elixir/orchestrator_status_test.exs",
     "test/symphony_elixir/workspace_and_config_test.exs",
 )

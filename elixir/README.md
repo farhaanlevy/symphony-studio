@@ -1,5 +1,6 @@
-<!-- Downstream modification notice (2026-07-14): Symphony Studio documents
-its pinned Codex 0.144.3 approval-policy compatibility behavior. -->
+<!-- Downstream modification notice (2026-07-16): Symphony Studio documents
+its pinned Codex contract, hardened process boundary, and additive runtime,
+event, and operation correlation behavior. -->
 
 # Symphony Elixir
 
@@ -33,6 +34,28 @@ If Codex reports that operator input, approval, or MCP elicitation is required, 
 issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
 entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
 Linear issue can become a dispatch candidate again after restart.
+
+### Runtime correlation and the Release 0 event boundary
+
+Symphony assigns a `run_id` when an issue is admitted. That ID remains stable
+across continuation and failure retries while the issue claim is retained. An
+`attempt_id` is assigned only when a worker process is actually launched;
+tracker, configuration, capacity, and timer deferrals do not create attempts.
+Releasing the claim and later admitting the issue starts a new run.
+
+Each prepared App Server or dynamic-tool operation receives a distinct logical
+`operation_id` before transport. This is separate from the JSON-RPC request ID:
+the logical ID remains stable when a bounded idempotent read receives a new wire
+request ID, and it follows an uncertain outcome for reconciliation. Two
+intentional calls receive different logical IDs even when their method and
+parameters are identical.
+
+Release 0 exposes an injectable normalized-event boundary. The default sink
+retains nothing, preserving the ability to run the Symphony engine without
+Studio persistence. The optional memory adapter is bounded and process-local;
+it supports ordered cursor replay for tests and in-process consumers but is not
+durable and does not survive restart. Durable persistence, restart replay, and
+browser reconnect replay begin in Release 1.
 
 ## How to use it
 
@@ -214,8 +237,11 @@ Notes:
   reconciliation blocker, not a retryable worker failure.
 - Overload code `-32001` is retried only for classified idempotent reads, using bounded exponential
   jitter controlled by `overload_max_attempts`, `overload_backoff_base_ms`, and
-  `overload_backoff_max_ms`. Side-effecting `thread/start` and `turn/start` operations are never
-  blindly retried; a post-send transport failure is surfaced as an uncertain external outcome.
+  `overload_backoff_max_ms`. The logical `operation_id` is retained when the
+  JSON-RPC request ID changes. Side-effecting `thread/start` and `turn/start`
+  operations are never blindly retried; a post-send transport failure is
+  surfaced as an uncertain external outcome with content-free operation
+  correlation.
 - Remote App Server workers are outside the supported Release 0/1 profile. A configured SSH worker
   or `worker_host` is rejected before launch and remains gated until Release 5.
 
@@ -242,6 +268,9 @@ codex:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  Existing response fields remain intact. Runtime entries add `run_id`,
+  `attempt_id`, and the normalized stream-head event ID, sequence, and type;
+  these are observability cursors and do not make the Release 0 sink durable.
 
 ## Web dashboard
 

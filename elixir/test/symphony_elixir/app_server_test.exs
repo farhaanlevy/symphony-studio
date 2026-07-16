@@ -1,9 +1,27 @@
-# Downstream modification notice (2026-07-14): Symphony Studio proves exact
-# pinned sandbox, dynamic-tool, and fail-closed App Server wire behavior.
+# Downstream modification notice (2026-07-16): Symphony Studio proves exact
+# pinned wire behavior, operation correlation, and isolated event callbacks.
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.{DynamicTool, TransportError}
+
+  test "event callback failures are isolated without logging callback content" do
+    canary = "PRIVATE-CALLBACK-FAILURE-CANARY"
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok =
+                 AppServer.emit_message_for_test(
+                   fn _message -> raise canary end,
+                   :notification,
+                   %{method_category: :turn},
+                   %{}
+                 )
+      end)
+
+    assert log =~ "failure_kind=exception"
+    refute log =~ canary
+  end
 
   test "stop_session preserves a typed cleanup failure when the connection is already dead" do
     connection = spawn(fn -> :ok end)
@@ -2093,7 +2111,13 @@ defmodule SymphonyElixir.AppServerTest do
         %{"success" => true, "contentItems" => []}
       end
 
-      assert {:ok, session} = AppServer.start_session(workspace)
+      run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      attempt_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+      assert {:ok, session} =
+               AppServer.start_session(workspace,
+                 correlation: %{run_id: run_id, attempt_id: attempt_id}
+               )
 
       connection_state = :sys.get_state(session.connection)
       target_pid = connection_state.adapter.target_identity.pid
@@ -2125,10 +2149,18 @@ defmodule SymphonyElixir.AppServerTest do
       assert %TransportError{
                kind: :uncertain_external_outcome,
                details: %{
-                 operation: %{method: "item/tool/call", send_state: :sent},
+                 operation: %{
+                   method: "item/tool/call",
+                   send_state: :sent,
+                   run_id: ^run_id,
+                   attempt_id: ^attempt_id,
+                   operation_id: operation_id
+                 },
                  reconciliation_required: true
                }
              } = error
+
+      assert SymphonyElixir.Identity.valid_uuid4?(operation_id)
 
       assert elapsed_ms < 500
       refute log =~ canary
@@ -2332,23 +2364,36 @@ defmodule SymphonyElixir.AppServerTest do
                kind: :uncertain_external_outcome,
                details: %{
                  cause: %{kind: :response_error},
-                 operation: %{method: "item/tool/call", send_state: :sent},
+                 operation: %{
+                   method: "item/tool/call",
+                   operation_id: tool_operation_id,
+                   send_state: :sent
+                 },
                  reconciliation_required: true
                }
              } = error
 
+      assert SymphonyElixir.Identity.valid_uuid4?(tool_operation_id)
       assert elapsed_ms < 500
       refute inspect(error) =~ canary
       refute log =~ canary
       refute Enum.any?(FakeCodex.received!(fixture), &(&1["id"] == 105))
 
+      assert_received {:tool_exception_message, %{event: :session_started, operation_id: turn_operation_id}}
+
       assert_received {:tool_exception_message,
                        event = %{
                          event: :uncertain_external_outcome,
-                         operation: %{method: "item/tool/call"},
+                         operation_id: ^tool_operation_id,
+                         operation: %{
+                           method: "item/tool/call",
+                           operation_id: ^tool_operation_id
+                         },
                          reason: %{kind: :uncertain_external_outcome}
                        }}
 
+      assert SymphonyElixir.Identity.valid_uuid4?(turn_operation_id)
+      refute turn_operation_id == tool_operation_id
       refute inspect(event) =~ canary
 
       assert {:error, %TransportError{kind: :uncertain_external_outcome}} =

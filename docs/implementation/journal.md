@@ -325,3 +325,89 @@
   remain R0-05 through R0-07.
 - The durable App Server operation ledger and post-crash reconciliation reducer
   remain R1-07 work, exactly as assigned by the package DAG.
+
+## 2026-07-16 — R0-04 implementation and acceptance
+
+### Decisions
+
+- Create a run ID when an issue is first admitted and preserve it through
+  continuation, failure, stall, and retry while the claim remains held. Create
+  an attempt ID only for an actual worker launch; timer, tracker, configuration,
+  and capacity deferrals retain the prior attempt correlation.
+- Assign a distinct logical operation ID before every prepared App Server or
+  dynamic-tool operation. Keep it separate from the JSON-RPC request ID and
+  stable through bounded idempotent-read wire retries and uncertainty.
+- Derive immutable UUIDv5 event IDs from run ID, sequence, and normalized type.
+  Sequence is positive and monotonic per run; exact redelivery converges while
+  conflicting content and future replay cursors return typed errors.
+- Offer normalized events to the sink before applying the live projection. A
+  successful append to an available sink precedes projection; unavailable or
+  lost process-local history emits a sanitized diagnostic and remains
+  fail-open. Journal a stale attempt without regressing the current attempt's
+  legacy state, and keep the structured stream-head cursor separate from
+  legacy `recent_events`.
+- Keep the sink observational. Noop is the retaining-nothing default; Memory
+  has bounded per-run FIFO event retention and deterministic run eviction by
+  oldest successful new-event append. Replay and duplicate access do not
+  refresh that order. Sink unavailability or process-local history loss cannot
+  block scheduler or input-safety projection.
+- Normalize only allowlisted public metadata. Prompt and issue bodies, raw
+  provider frames, raw stderr, credentials, and private reasoning never enter
+  the event payload.
+
+### Accepted validation
+
+- The final compatibility seal binds 122 source files and 308 tests at seed 0
+  to source SHA-256
+  `11493f93547f4648f1031742c72296f1ab8dc3aee9189a146880dd4b074292ad`.
+  The exact suite passes again at seed 42 with zero failures in 159.0 seconds.
+  Manifest SHA-256 is
+  `43aeb985bbbed5900fd7c982fca324171c5caa901590e6c2b14e2f05d68c90d1`;
+  fixtures and transport conformance pass while live runtime capabilities
+  truthfully remain `not_run` and overall remains `pending_r0_06`.
+- Installed Codex 0.144.3 verification, the 1,873-file schema proof, and clean
+  regeneration pass. The uninterrupted schema-tool harness passes 73 tests in
+  330.091 seconds.
+- The complete `make all` gate passes: strict Credo covers 88 source files and
+  2,619 modules/functions; ExUnit reports 432 tests, zero failures, and two
+  intentional opt-in skips in 172.4 seconds at seed `803675`; every measured
+  module reports 100.00% coverage; and Dialyzer reports zero errors or skipped
+  warnings without suppression.
+- The pinned real App Server completes only `initialize` / `initialized`,
+  returns the expected 0.144.3 platform metadata, and closes with distinct
+  wrapper, namespace-root, and target identities verified absent afterward.
+  The outbound request set is exactly `initialize`; no thread, turn, or model
+  quota is used.
+- Package hygiene and provenance checks pass. Fresh independent runtime,
+  event-sink, documentation/security, and Dialyzer-repair reviews all return
+  **GO** with no remaining P0, P1, or P2 finding.
+
+### Failed approaches and adaptations
+
+- Initial Orchestrator correlation matching treated malformed IDs as missing
+  and could manufacture a replacement. Present-invalid IDs in worker updates
+  now fail closed; runtime metadata requires exact canonical correlation for
+  identified attempts. Direct AgentRunner options remain an internal
+  normalization boundary and mint fresh canonical IDs for malformed input.
+- The first sink-gap classification treated process-local history loss as a
+  producer failure and could suppress input-safety projection. Because the
+  sink is optional observability rather than scheduler authority, history loss
+  is now fail-open with a sanitized diagnostic; true conflicts remain
+  fail-closed.
+- Event validation initially relied on Enumerable and DateTime helpers that can
+  raise on forged Erlang terms. Improper lists, malformed DateTime structs,
+  invalid UTF-8 event names, adapter exits, invalid replay IDs, and future
+  cursors now produce typed rejection without crashing or reflecting private
+  input.
+- A dynamic-tool uncertainty callback initially retained the surrounding
+  `turn/start` operation ID. It now takes the canonical ID from the actual
+  uncertain tool operation, and a regression proves the two IDs differ.
+
+### Remaining package boundary
+
+- R0-05 owns cancellation, workspace, retry, and managed-tracker hardening;
+  R0-06 owns live capability, model, quota, service-tier, identity, and
+  multi-agent discovery.
+- SQLite and durable normalized event persistence/replay remain R1-01/R1-02.
+  The durable operation ledger, issue claims, crash reconciliation, and tracker
+  outbox remain R1-07.

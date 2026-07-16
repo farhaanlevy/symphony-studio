@@ -41,8 +41,21 @@ PID-namespace containment, and fail-closed remote release gating. R0-03 passed
 its 113-file/276-test source seal, clean regeneration, 73-test schema harness,
 full 398-test gate with 100% of measured modules covered, zero-error Dialyzer
 analysis, real no-model App Server smoke, and independent adversarial review on
-2026-07-16. Runtime
-capability discovery, durable Studio state, the operator UI, and submission
+2026-07-16.
+
+R0-04 adds an injectable normalized-event seam, deterministic
+event identity, stable run/attempt/operation correlation, bounded process-local
+replay, stale-attempt isolation, and allowlisted redacted payloads while
+preserving existing Symphony callbacks and `/api/v1/*` fields. Its default sink
+retains nothing, and loss of optional sink history cannot block scheduler or
+input-safety projection. It passed its 122-file/308-test source seal, installed
+pin and clean regeneration, 73-test schema harness, full 432-test gate with
+100% of measured modules covered, zero-error Dialyzer analysis, real
+initialize-only App Server smoke, hygiene audit, and independent adversarial
+review on 2026-07-16. R0-04 is an accepted downstream package.
+
+Runtime capability discovery, durable event history, restart/browser replay,
+the durable operation ledger, Studio state, the operator UI, and submission
 hardening remain unclaimed until their later packages pass.
 
 ## Build Week execution configuration
