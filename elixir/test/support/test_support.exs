@@ -1,5 +1,6 @@
-# Downstream modification notice (2026-07-14): Symphony Studio makes ordinary
-# tests network-hermetic and exposes loopback fake-Linear workflow setup.
+# Downstream modification notice (2026-07-17): Symphony Studio makes ordinary
+# tests network-hermetic and routes fake Linear through an injected loopback
+# transport while retaining the canonical configured endpoint.
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "You are an agent for this repository."
   @network_hermetic_workflow_path Path.expand("network_hermetic_workflow.md", __DIR__)
@@ -159,7 +160,7 @@ defmodule SymphonyElixir.TestSupport do
       Keyword.merge(
         [
           tracker_kind: "memory",
-          tracker_endpoint: "http://127.0.0.1:0/graphql",
+          tracker_endpoint: "https://api.linear.app/graphql",
           tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_assignee: nil,

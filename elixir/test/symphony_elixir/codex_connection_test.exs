@@ -1,14 +1,17 @@
 # Copyright 2026 Symphony Studio contributors
 # SPDX-License-Identifier: Apache-2.0
-# Downstream modification notice (2026-07-16): Symphony Studio verifies stable
-# operation correlation across transport retries, responses, and uncertainty.
+# Downstream modification notice (2026-07-16, updated 2026-07-18): Symphony
+# Studio verifies stable operation correlation across transport retries,
+# responses, uncertainty, and exact omitted-params requests.
 
 defmodule SymphonyElixir.Codex.ConnectionTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.AgentRunner
-  alias SymphonyElixir.Codex.{CleanupGuardian, Connection, TransportError}
+  alias SymphonyElixir.Codex.{CleanupGuardian, Connection, RequestPolicy, TransportError}
   alias SymphonyElixir.TestSupport.FakeCodexAppServer, as: FakeCodex
+
+  @fixture_round_trip_timeout_ms 5_000
 
   defmodule FailFirstStopAdapter do
     @moduledoc false
@@ -811,6 +814,81 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     refute inspect(diagnostics) =~ secret
   end
 
+  test "sends an exact paramless idempotent request and retains its correlation", %{root: root} do
+    fixture =
+      FakeCodex.create!(root, [
+        FakeCodex.expect(%{"id" => 1, "method" => "account/rateLimits/read"}),
+        FakeCodex.response(1, %{"rateLimits" => %{}}),
+        FakeCodex.barrier("hold", timeout_ms: 30_000)
+      ])
+
+    connection = start_connection!(fixture)
+
+    assert {:ok, %{"rateLimits" => %{}}, metadata} =
+             Connection.request(connection, "account/rateLimits/read", :omitted, 2_000)
+
+    assert metadata.classification == :idempotent
+    assert metadata.method == "account/rateLimits/read"
+
+    assert metadata.request_hash == RequestPolicy.canonical_hash("account/rateLimits/read", :omitted)
+
+    assert [%{"id" => 1, "method" => "account/rateLimits/read"}] =
+             FakeCodex.received!(fixture)
+  end
+
+  test "retries an exact paramless rate-limit read after overload with stable logical identity", %{
+    root: root
+  } do
+    run_id = "11111111-1111-4111-8111-111111111111"
+    studio_attempt_id = "22222222-2222-4222-8222-222222222222"
+    test_pid = self()
+
+    fixture =
+      FakeCodex.create!(root, [
+        FakeCodex.expect(%{"id" => 1, "method" => "account/rateLimits/read"}),
+        FakeCodex.response_error(1, -32_001, "busy"),
+        FakeCodex.expect(%{"id" => 2, "method" => "account/rateLimits/read"}),
+        FakeCodex.response(2, %{"rateLimits" => %{}}),
+        FakeCodex.barrier("hold", timeout_ms: 30_000)
+      ])
+
+    connection =
+      start_connection!(fixture,
+        jitter_fn: fn _cap -> 0 end,
+        metadata: %{run_id: run_id, attempt_id: studio_attempt_id},
+        on_request: fn metadata -> send(test_pid, {:paramless_wire_request, metadata}) end,
+        overload_backoff_base_ms: 1,
+        overload_backoff_max_ms: 1,
+        overload_max_attempts: 2
+      )
+
+    assert {:ok, %{"rateLimits" => %{}}, metadata} =
+             Connection.request(connection, "account/rateLimits/read", :omitted, 10_000)
+
+    expected_hash = RequestPolicy.canonical_hash("account/rateLimits/read", :omitted)
+
+    assert_receive {:paramless_wire_request, %{request_id: 1} = first_wire}
+    assert_receive {:paramless_wire_request, %{request_id: 2} = second_wire}
+
+    assert first_wire.attempt == 1
+    assert second_wire.attempt == 2
+    assert first_wire.request_id != second_wire.request_id
+    assert first_wire.operation_id == second_wire.operation_id
+    assert second_wire.operation_id == metadata.operation_id
+    assert first_wire.request_hash == expected_hash
+    assert second_wire.request_hash == expected_hash
+    assert metadata.request_hash == expected_hash
+    assert first_wire.attempt_id == studio_attempt_id
+    assert second_wire.attempt_id == studio_attempt_id
+    assert metadata.attempt_id == studio_attempt_id
+
+    assert [first_request, second_request] = FakeCodex.received!(fixture)
+    assert first_request == %{"id" => 1, "method" => "account/rateLimits/read"}
+    assert second_request == %{"id" => 2, "method" => "account/rateLimits/read"}
+    refute Map.has_key?(first_request, "params")
+    refute Map.has_key?(second_request, "params")
+  end
+
   test "never exposes arbitrary stderr or JSON-RPC error messages", %{root: root} do
     canary = "CONFIDENTIAL-PROMPT-CANARY-#{System.unique_integer([:positive])}"
 
@@ -1051,7 +1129,12 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     unexpected_connection = start_connection!(unexpected)
 
     assert {:error, %TransportError{kind: :unexpected_response_id}} =
-             Connection.request(unexpected_connection, "account/read", %{}, 2_000)
+             Connection.request(
+               unexpected_connection,
+               "account/read",
+               %{},
+               @fixture_round_trip_timeout_ms
+             )
 
     first = Jason.encode!(%{"id" => 1, "result" => %{"ok" => true}})
 
@@ -1062,7 +1145,14 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
       ])
 
     duplicate_connection = start_connection!(duplicate)
-    result = Connection.request(duplicate_connection, "account/read", %{}, 2_000)
+
+    result =
+      Connection.request(
+        duplicate_connection,
+        "account/read",
+        %{},
+        @fixture_round_trip_timeout_ms
+      )
 
     error =
       case result do
@@ -1672,6 +1762,115 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
     assert :ok = Connection.close(connection)
   end
 
+  test "suppresses and records subagent terminal notifications without corrupting the root turn", %{
+    root: root
+  } do
+    child_terminal = %{
+      "method" => "turn/completed",
+      "params" => %{
+        "threadId" => "thread-child",
+        "turn" => %{"id" => "turn-child"}
+      }
+    }
+
+    root_terminal = %{
+      "method" => "turn/completed",
+      "params" => %{
+        "threadId" => "thread-root",
+        "turn" => %{"id" => "turn-root"}
+      }
+    }
+
+    fixture =
+      FakeCodex.create!(root, [
+        FakeCodex.expect(%{"id" => 1, "method" => "turn/start"}, match: :subset),
+        FakeCodex.response(1, %{"turn" => %{"id" => "turn-root"}}),
+        FakeCodex.raw_send_json(child_terminal),
+        FakeCodex.raw_send_json(root_terminal),
+        FakeCodex.barrier("hold", timeout_ms: 30_000)
+      ])
+
+    connection = start_connection!(fixture)
+
+    assert {:ok, %{"turn" => %{"id" => "turn-root"}}, _metadata} =
+             Connection.request(
+               connection,
+               "turn/start",
+               %{"threadId" => "thread-root", "input" => []},
+               2_000
+             )
+
+    assert {:ok, %{payload: ^root_terminal}} = Connection.next_message(connection, 2_000)
+    assert :ok = Connection.ack_terminal(connection, "turn/completed")
+
+    assert :sys.get_state(connection).completed_terminal_turns |> MapSet.size() == 2
+    assert :ok = Connection.close(connection)
+  end
+
+  test "retains only fixed-size digests for large completed terminal identities", %{
+    root: root
+  } do
+    thread_id = "thread-" <> String.duplicate("t", 131_072)
+    turn_id = "turn-" <> String.duplicate("u", 131_072)
+
+    terminal = %{
+      "method" => "turn/completed",
+      "params" => %{
+        "threadId" => thread_id,
+        "turn" => %{"id" => turn_id}
+      }
+    }
+
+    fixture =
+      FakeCodex.create!(root, [
+        FakeCodex.raw_send_json(terminal),
+        FakeCodex.raw_send_json(%{"method" => "test/notice", "params" => %{}}),
+        FakeCodex.barrier("hold", timeout_ms: 30_000)
+      ])
+
+    connection = start_connection!(fixture)
+
+    assert {:ok, %{payload: %{"method" => "test/notice"}}} =
+             Connection.next_message(connection, 2_000)
+
+    assert [retained_identity] =
+             connection
+             |> :sys.get_state()
+             |> Map.fetch!(:completed_terminal_turns)
+             |> MapSet.to_list()
+
+    assert is_binary(retained_identity)
+    assert byte_size(retained_identity) == 32
+    refute retained_identity == thread_id
+    refute retained_identity == turn_id
+    assert :ok = Connection.close(connection)
+  end
+
+  test "rejects a duplicate subagent terminal notification", %{root: root} do
+    child_terminal = %{
+      "method" => "turn/completed",
+      "params" => %{
+        "threadId" => "thread-duplicate-child",
+        "turn" => %{"id" => "turn-duplicate-child"}
+      }
+    }
+
+    fixture =
+      FakeCodex.create!(root, [
+        FakeCodex.raw_send_json(child_terminal),
+        FakeCodex.raw_send_json(child_terminal),
+        FakeCodex.barrier("hold", timeout_ms: 30_000)
+      ])
+
+    connection = start_connection!(fixture)
+
+    assert {:error,
+            %TransportError{
+              kind: :invalid_json_rpc_frame,
+              details: %{reason: :duplicate_terminal_notification}
+            }} = Connection.next_message(connection, 2_000)
+  end
+
   test "allows terminal acknowledgement after an immediate normal child exit", %{root: root} do
     terminal =
       %{
@@ -1898,7 +2097,8 @@ defmodule SymphonyElixir.Codex.ConnectionTest do
 
     connection = start_connection!(fixture, max_server_request_bytes: limit)
 
-    assert {:ok, %{payload: ^request}} = Connection.next_message(connection, 2_000)
+    assert {:ok, %{payload: ^request}} =
+             Connection.next_message(connection, @fixture_round_trip_timeout_ms)
 
     assert {:error,
             %TransportError{

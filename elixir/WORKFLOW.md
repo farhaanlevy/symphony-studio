@@ -1,7 +1,12 @@
 ---
+# Copyright 2026 Symphony Studio contributors
+# SPDX-License-Identifier: Apache-2.0
+# Downstream modification notice (2026-07-20): Symphony Studio replaces the
+# inaccessible upstream Linear project binding with the fork owner's dedicated
+# validation project while preserving the upstream workflow contract.
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  project_slug: "symphony-studio-build-week-3f2698765546"
   required_labels: []
   active_states:
     - Todo

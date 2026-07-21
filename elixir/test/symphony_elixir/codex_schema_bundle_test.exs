@@ -57,10 +57,17 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
     assert get_in(manifest, ["artifacts", "typescript", "fileCount"]) == 598
     assert get_in(manifest, ["artifacts", "experimentalJson", "fileCount"]) == 337
     assert get_in(manifest, ["artifacts", "experimentalTypescript", "fileCount"]) == 671
-    assert get_in(manifest, ["compatibility", "overall"]) == "pending_r0_06"
-
     assert compatibility = manifest["compatibility"]
     assert compatibility["schemaContract"] == "pass"
+
+    expected_overall = %{
+      "not_run" => "pending_r0_06",
+      "blocked" => "blocked_r0_06",
+      "pass" => "pass"
+    }
+
+    assert Map.fetch!(expected_overall, compatibility["runtimeCapabilities"]) ==
+             compatibility["overall"]
 
     expected_fixture_status =
       if System.get_env(@test_manifest_env), do: "under_test", else: "pass"
@@ -70,7 +77,7 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
     expected_test_count =
       case {compatibility["fixtures"], compatibility["transportConformance"]} do
         {"pass", "not_run"} -> 55
-        {status, status} when status in ["under_test", "pass"] -> 411
+        {status, status} when status in ["under_test", "pass"] -> 549
         statuses -> flunk("unexpected fixture/transport transition state: #{inspect(statuses)}")
       end
 
@@ -115,7 +122,32 @@ defmodule SymphonyElixir.CodexSchemaBundleTest do
     assert evidence["artifactBundleSha256"] =~ @sha256_regex
     assert evidence["schemaBundleSha256"] =~ @sha256_regex
     assert evidence["matrixSha256"] =~ @sha256_regex
-    assert compatibility["runtimeCapabilities"] == "not_run"
+
+    case compatibility["runtimeCapabilities"] do
+      "not_run" ->
+        refute Map.has_key?(compatibility, "runtimeEvidence")
+
+      status when status in ["blocked", "pass"] ->
+        assert runtime_evidence = compatibility["runtimeEvidence"]
+
+        assert MapSet.new(Map.keys(runtime_evidence)) ==
+                 MapSet.new([
+                   "hashAlgorithm",
+                   "readinessManifestSha256",
+                   "schemaManifestBasisSha256",
+                   "sourceSha256"
+                 ])
+
+        assert runtime_evidence["hashAlgorithm"] == "sha256-canonical-json-v1"
+
+        for key <- [
+              "readinessManifestSha256",
+              "schemaManifestBasisSha256",
+              "sourceSha256"
+            ] do
+          assert runtime_evidence[key] =~ @sha256_regex
+        end
+    end
 
     assert {:ok, matrix} = SchemaBundle.matrix()
     assert matrix["r002Status"] == "schema_only"

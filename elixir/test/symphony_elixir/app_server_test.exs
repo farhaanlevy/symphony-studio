@@ -51,6 +51,61 @@ defmodule SymphonyElixir.AppServerTest do
     assert_receive {:DOWN, ^connection_ref, :process, ^connection, _reason}, 1_000
   end
 
+  test "subagent terminal notifications cannot complete the root turn" do
+    alias SymphonyElixir.TestSupport.FakeCodexAppServer, as: FakeCodex
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-child-terminal-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-CHILD-TERMINAL")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    fixture =
+      FakeCodex.create!(
+        test_root,
+        FakeCodex.session_prelude(
+          thread_id: "thread-root",
+          turn_id: "turn-root",
+          cwd: workspace
+        ) ++
+          [
+            FakeCodex.turn_completed_notification("thread-child", "turn-child"),
+            FakeCodex.turn_completed_notification("thread-root", "turn-root"),
+            FakeCodex.exit(0)
+          ]
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: fixture.command
+    )
+
+    issue = %Issue{
+      id: "issue-child-terminal",
+      identifier: "MT-CHILD-TERMINAL",
+      title: "Keep the root completion authoritative",
+      description: "A child terminal is not the root terminal",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-CHILD-TERMINAL",
+      labels: ["runtime"]
+    }
+
+    parent = self()
+    on_message = fn message -> send(parent, {:child_terminal_message, message}) end
+
+    assert {:ok, _result} =
+             AppServer.run(workspace, "Wait for the correlated root terminal", issue, on_message: on_message)
+
+    assert_receive {:child_terminal_message, %{event: :turn_completed}}, 1_000
+    refute_receive {:child_terminal_message, %{event: :turn_completed}}, 100
+    assert :ok = FakeCodex.assert_complete!(fixture)
+  end
+
   test "event callback failures are isolated without logging callback content" do
     canary = "PRIVATE-CALLBACK-FAILURE-CANARY"
 

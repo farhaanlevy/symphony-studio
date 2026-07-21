@@ -39,5 +39,6 @@ Application.put_env(:symphony_elixir, :test_startup_network_guard, %{
 ExUnit.start()
 Code.require_file("support/snapshot_support.exs", __DIR__)
 Code.require_file("support/fake_codex_app_server.exs", __DIR__)
+Code.require_file("support/fake_responses.exs", __DIR__)
 Code.require_file("support/fake_linear.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)

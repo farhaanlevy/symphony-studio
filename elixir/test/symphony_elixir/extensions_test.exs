@@ -327,6 +327,74 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "linear adapter rejects partial GraphQL envelopes before trusting mutation data" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+    graphql_canary = "PRIVATE-LINEAR-ADAPTER-PARTIAL-CANARY"
+    graphql_errors = [%{"extensions" => %{"token" => graphql_canary}}]
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{"commentCreate" => %{"success" => true}},
+         "errors" => graphql_errors
+       }}
+    )
+
+    assert {:error, :linear_graphql_failed} =
+             Adapter.create_comment("issue-1", "must not accept partial success")
+
+    assert_receive {:graphql_called, create_comment_query, %{body: "must not accept partial success", issueId: "issue-1"}}
+
+    assert create_comment_query =~ "commentCreate"
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-1"}]}}}
+           },
+           "errors" => graphql_errors
+         }}
+      ]
+    )
+
+    assert {:error, :linear_graphql_failed} =
+             Adapter.update_issue_state("issue-1", "Partially resolved")
+
+    assert_receive {:graphql_called, state_lookup_query, %{issueId: "issue-1", stateName: "Partially resolved"}}
+
+    assert state_lookup_query =~ "states"
+    refute_received {:graphql_called, _update_query, %{stateId: _state_id}}
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-1"}]}}}
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{"issueUpdate" => %{"success" => true}},
+           "errors" => graphql_errors
+         }}
+      ]
+    )
+
+    assert {:error, :linear_graphql_failed} =
+             Adapter.update_issue_state("issue-1", "Partially updated")
+
+    assert_receive {:graphql_called, _lookup_query, %{issueId: "issue-1", stateName: "Partially updated"}}
+
+    assert_receive {:graphql_called, update_query, %{issueId: "issue-1", stateId: "state-1"}}
+    assert update_query =~ "issueUpdate"
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)

@@ -108,7 +108,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          {:ok, session_policies} <- session_policies(settings, expanded_workspace, opts),
          {:ok, command_argv} <- Config.codex_command_argv(settings.codex.command),
          {:ok, connection} <-
-           start_connection(expanded_workspace, command_argv, settings.codex, opts) do
+           open_connection(expanded_workspace, command_argv, settings.codex, opts) do
       metadata = connection_metadata(connection, worker_host)
 
       case do_start_session(connection, expanded_workspace, session_policies) do
@@ -311,7 +311,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_connection(workspace, command_argv, codex, opts) do
+  @doc false
+  @spec open_connection(Path.t(), [String.t()], map(), keyword()) :: GenServer.on_start()
+  def open_connection(workspace, command_argv, codex, opts \\ [])
+      when is_binary(workspace) and is_list(command_argv) and is_map(codex) and is_list(opts) do
     notify_connection_lifecycle(opts, :on_connection_starting, [])
 
     case Connection.start(command_argv, connection_options(workspace, codex, opts)) do
@@ -348,6 +351,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       overload_backoff_base_ms: codex.overload_backoff_base_ms,
       overload_backoff_max_ms: codex.overload_backoff_max_ms,
       overload_max_attempts: codex.overload_max_attempts,
+      on_request: Keyword.get(opts, :on_request, fn _metadata -> :ok end),
       on_started: Keyword.get(opts, :on_connection_started),
       on_transport_failure: Keyword.get(opts, :on_transport_failure, fn _error -> :ok end),
       process_adapter: Keyword.get(opts, :process_adapter, SymphonyElixir.Codex.ProcessAdapter),
@@ -418,7 +422,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp canonical_uuid4?(_value), do: false
 
-  defp send_initialize(connection) do
+  @doc false
+  @spec initialize_connection(pid()) :: {:ok, term()} | {:error, TransportError.t()}
+  def initialize_connection(connection) when is_pid(connection) do
     params = %{
       "capabilities" => %{
         "experimentalApi" => true
@@ -431,8 +437,21 @@ defmodule SymphonyElixir.Codex.AppServer do
     }
 
     case request(connection, "initialize", params) do
-      {:ok, _result, _metadata} -> Connection.notify(connection, "initialized")
-      other -> other
+      {:ok, result, _metadata} ->
+        case Connection.notify(connection, "initialized") do
+          :ok -> {:ok, result}
+          {:error, _reason} = error -> error
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp send_initialize(connection) do
+    case initialize_connection(connection) do
+      {:ok, _result} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 

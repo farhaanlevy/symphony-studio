@@ -46,6 +46,10 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @primary_key false
+    @trusted_linear_endpoints [
+      "https://api.linear.app/graphql",
+      "https://api.linear.app:443/graphql"
+    ]
 
     embedded_schema do
       field(:kind, :string)
@@ -71,6 +75,16 @@ defmodule SymphonyElixir.Config.Schema do
         |> Enum.map(&(String.trim(&1) |> String.downcase()))
         |> Enum.uniq()
       end)
+      |> validate_trusted_linear_endpoint()
+    end
+
+    defp validate_trusted_linear_endpoint(changeset) do
+      if get_field(changeset, :kind) == "linear" and
+           get_field(changeset, :endpoint) not in @trusted_linear_endpoints do
+        add_error(changeset, :endpoint, "must be the canonical Linear GraphQL endpoint")
+      else
+        changeset
+      end
     end
   end
 

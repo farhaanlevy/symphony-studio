@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-17): Symphony Studio bounds Linear
+# responses, pins the credential-bearing endpoint, and sanitizes tracker errors.
 defmodule SymphonyElixir.Linear.Client do
   @moduledoc """
   Thin Linear GraphQL client for polling candidate issues.
@@ -7,7 +9,31 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.{Config, Linear.Issue}
 
   @issue_page_size 50
-  @max_error_body_log_bytes 1_000
+  @default_max_graphql_response_bytes 2 * 1_024 * 1_024
+  @trusted_linear_endpoints [
+    "https://api.linear.app/graphql",
+    "https://api.linear.app:443/graphql"
+  ]
+  @max_linear_endpoint_bytes 2_048
+  @max_linear_api_key_bytes 4_096
+  @response_size_key :symphony_linear_response_size
+  @response_chunks_key :symphony_linear_response_chunks
+  @response_too_large_key :symphony_linear_response_too_large
+  @test_request_fun_key {__MODULE__, :request_fun_for_test}
+  @public_tracker_error_atoms [
+    :invalid_linear_response_body,
+    :invalid_linear_response_json,
+    :invalid_linear_response_limit,
+    :invalid_linear_tracker_snapshot,
+    :linear_missing_end_cursor,
+    :linear_response_encoding_unsupported,
+    :linear_response_too_large,
+    :linear_unknown_payload,
+    :missing_linear_api_token,
+    :missing_linear_project_slug,
+    :missing_linear_viewer_identity,
+    :untrusted_linear_endpoint
+  ]
 
   @query """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
@@ -108,30 +134,7 @@ defmodule SymphonyElixir.Linear.Client do
     tracker = Config.settings!().tracker
     project_slug = tracker.project_slug
 
-    cond do
-      is_nil(tracker.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      is_nil(project_slug) ->
-        {:error, :missing_linear_project_slug}
-
-      true ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
-        end
-    end
-  end
-
-  @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_states(state_names) when is_list(state_names) do
-    normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
-
-    if normalized_states == [] do
-      {:ok, []}
-    else
-      tracker = Config.settings!().tracker
-      project_slug = tracker.project_slug
-
+    result =
       cond do
         is_nil(tracker.api_key) ->
           {:error, :missing_linear_api_token}
@@ -140,47 +143,111 @@ defmodule SymphonyElixir.Linear.Client do
           {:error, :missing_linear_project_slug}
 
         true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
+          with {:ok, assignee_filter} <- routing_assignee_filter() do
+            do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
+          end
       end
-    end
+
+    sanitize_tracker_result(result)
+  end
+
+  @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(state_names) when is_list(state_names) do
+    normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
+
+    result =
+      if normalized_states == [] do
+        {:ok, []}
+      else
+        tracker = Config.settings!().tracker
+        project_slug = tracker.project_slug
+
+        cond do
+          is_nil(tracker.api_key) ->
+            {:error, :missing_linear_api_token}
+
+          is_nil(project_slug) ->
+            {:error, :missing_linear_project_slug}
+
+          true ->
+            do_fetch_by_states(project_slug, normalized_states, nil)
+        end
+      end
+
+    sanitize_tracker_result(result)
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
     ids = Enum.uniq(issue_ids)
 
-    case ids do
-      [] ->
-        {:ok, []}
+    result =
+      case ids do
+        [] ->
+          {:ok, []}
 
-      ids ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_issue_states(ids, assignee_filter)
-        end
-    end
+        ids ->
+          with {:ok, assignee_filter} <- routing_assignee_filter() do
+            do_fetch_issue_states(ids, assignee_filter)
+          end
+      end
+
+    sanitize_tracker_result(result)
   end
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
-    request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
+    max_response_bytes = Keyword.get(opts, :max_response_bytes, @default_max_graphql_response_bytes)
 
-    with {:ok, headers} <- graphql_headers(),
-         {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
-      {:ok, body}
+    with :ok <- validate_max_response_bytes(max_response_bytes),
+         {:ok, tracker} <- graphql_tracker_snapshot(opts),
+         :ok <- validate_trusted_linear_endpoint(tracker.endpoint),
+         {:ok, request_fun} <- graphql_request_fun(opts, tracker.endpoint, max_response_bytes),
+         {:ok, headers} <- graphql_headers(tracker.api_key),
+         {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers),
+         {:ok, decoded_body} <- decode_bounded_graphql_body(body, max_response_bytes) do
+      {:ok, decoded_body}
     else
-      {:ok, response} ->
-        Logger.error(
-          "Linear GraphQL request failed status=#{response.status}" <>
-            linear_error_context(payload, response)
-        )
+      {:ok, %{status: status}} ->
+        Logger.error("Linear GraphQL request failed class=api_status status=#{status}")
 
-        {:error, {:linear_api_status, response.status}}
+        {:error, {:linear_api_status, status}}
+
+      {:error, :untrusted_linear_endpoint} ->
+        Logger.error("Linear GraphQL request failed class=untrusted_endpoint")
+        {:error, :untrusted_linear_endpoint}
 
       {:error, reason} ->
-        Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+        Logger.error("Linear GraphQL request failed class=request_error")
         {:error, {:linear_api_request, reason}}
+    end
+  end
+
+  @doc false
+  @spec bounded_request_fun_for_test(String.t(), pos_integer()) :: (map(), list() -> term())
+  def bounded_request_fun_for_test(endpoint, max_response_bytes)
+      when is_binary(endpoint) and is_integer(max_response_bytes) and max_response_bytes > 0 do
+    fn payload, headers ->
+      post_graphql_request(payload, headers, endpoint, max_response_bytes)
+    end
+  end
+
+  @doc false
+  @spec with_request_fun_for_test((map(), list() -> term()), (-> result)) :: result when result: term()
+  def with_request_fun_for_test(request_fun, fun)
+      when is_function(request_fun, 2) and is_function(fun, 0) do
+    previous = Process.get(@test_request_fun_key)
+    Process.put(@test_request_fun_key, request_fun)
+
+    try do
+      fun.()
+    after
+      case previous do
+        value when is_function(value, 2) -> Process.put(@test_request_fun_key, value)
+        _unset -> Process.delete(@test_request_fun_key)
+      end
     end
   end
 
@@ -227,13 +294,16 @@ defmodule SymphonyElixir.Linear.Client do
       when is_list(issue_ids) and is_function(graphql_fun, 2) do
     ids = Enum.uniq(issue_ids)
 
-    case ids do
-      [] ->
-        {:ok, []}
+    result =
+      case ids do
+        [] ->
+          {:ok, []}
 
-      ids ->
-        do_fetch_issue_states(ids, nil, graphql_fun)
-    end
+        ids ->
+          do_fetch_issue_states(ids, nil, graphql_fun)
+      end
+
+    sanitize_tracker_result(result)
   end
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
@@ -343,66 +413,181 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp maybe_put_operation_name(payload, _operation_name), do: payload
 
-  defp linear_error_context(payload, response) when is_map(payload) do
-    operation_name =
-      case Map.get(payload, "operationName") do
-        name when is_binary(name) and name != "" -> " operation=#{name}"
-        _ -> ""
-      end
+  defp graphql_tracker_snapshot(opts) do
+    tracker = Keyword.get_lazy(opts, :tracker, fn -> Config.settings!().tracker end)
 
-    body =
-      response
-      |> Map.get(:body)
-      |> summarize_error_body()
-
-    operation_name <> " body=" <> body
-  end
-
-  defp summarize_error_body(body) when is_binary(body) do
-    body
-    |> String.replace(~r/\s+/, " ")
-    |> String.trim()
-    |> truncate_error_body()
-    |> inspect()
-  end
-
-  defp summarize_error_body(body) do
-    body
-    |> inspect(limit: 20, printable_limit: @max_error_body_log_bytes)
-    |> truncate_error_body()
-  end
-
-  defp truncate_error_body(body) when is_binary(body) do
-    if byte_size(body) > @max_error_body_log_bytes do
-      binary_part(body, 0, @max_error_body_log_bytes) <> "...<truncated>"
+    with %{api_key: api_key, endpoint: endpoint} <- tracker,
+         true <- bounded_present_binary?(api_key, @max_linear_api_key_bytes),
+         true <- bounded_present_binary?(endpoint, @max_linear_endpoint_bytes) do
+      {:ok, %{api_key: api_key, endpoint: endpoint}}
     else
-      body
+      _invalid -> {:error, :invalid_linear_tracker_snapshot}
+    end
+  rescue
+    _error -> {:error, :invalid_linear_tracker_snapshot}
+  catch
+    _kind, _reason -> {:error, :invalid_linear_tracker_snapshot}
+  end
+
+  defp graphql_request_fun(opts, endpoint, max_response_bytes) do
+    case Keyword.fetch(opts, :request_fun) do
+      {:ok, request_fun} when is_function(request_fun, 2) ->
+        {:ok, request_fun}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_linear_request_fun}
+
+      :error ->
+        case Process.get(@test_request_fun_key) do
+          request_fun when is_function(request_fun, 2) ->
+            {:ok, request_fun}
+
+          nil ->
+            {:ok,
+             fn payload, headers ->
+               post_graphql_request(payload, headers, endpoint, max_response_bytes)
+             end}
+
+          _invalid ->
+            {:error, :invalid_linear_request_fun}
+        end
     end
   end
 
-  defp graphql_headers do
-    case Config.settings!().tracker.api_key do
-      nil ->
-        {:error, :missing_linear_api_token}
+  defp validate_trusted_linear_endpoint(endpoint) when endpoint in @trusted_linear_endpoints,
+    do: :ok
 
-      token ->
-        {:ok,
-         [
-           {"Authorization", token},
-           {"Content-Type", "application/json"}
-         ]}
+  defp validate_trusted_linear_endpoint(_endpoint), do: {:error, :untrusted_linear_endpoint}
+
+  defp sanitize_tracker_result({:ok, _value} = result), do: result
+
+  defp sanitize_tracker_result({:error, reason}) do
+    {:error, sanitize_tracker_error(reason)}
+  end
+
+  defp sanitize_tracker_error({:linear_api_request, _private_reason}),
+    do: :linear_transport_failed
+
+  defp sanitize_tracker_error({:linear_graphql_errors, _private_errors}),
+    do: :linear_graphql_failed
+
+  defp sanitize_tracker_error({:linear_api_status, status})
+       when is_integer(status) and status >= 100 and status <= 599,
+       do: {:linear_api_status, status}
+
+  defp sanitize_tracker_error(reason) when reason in @public_tracker_error_atoms,
+    do: reason
+
+  defp sanitize_tracker_error(_private_reason), do: :linear_tracker_failed
+
+  defp graphql_headers(token) when is_binary(token) do
+    {:ok,
+     [
+       {"Authorization", token},
+       {"Content-Type", "application/json"}
+     ]}
+  end
+
+  defp post_graphql_request(payload, headers, endpoint, max_response_bytes) do
+    into = fn {:data, data}, {request, response} ->
+      collect_bounded_response(data, request, response, max_response_bytes)
+    end
+
+    case Req.post(endpoint,
+           headers: headers,
+           json: payload,
+           connect_options: [timeout: 30_000],
+           receive_timeout: 30_000,
+           redirect: false,
+           compressed: false,
+           raw: true,
+           into: into
+         ) do
+      {:ok, response} -> finalize_bounded_response(response)
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp post_graphql_request(payload, headers) do
-    Req.post(Config.settings!().tracker.endpoint,
-      headers: headers,
-      json: payload,
-      connect_options: [timeout: 30_000]
-    )
+  defp collect_bounded_response(data, request, response, max_response_bytes) when is_binary(data) do
+    current_size = Req.Response.get_private(response, @response_size_key, 0)
+    updated_size = current_size + byte_size(data)
+
+    if updated_size > max_response_bytes do
+      response =
+        response
+        |> Req.Response.put_private(@response_too_large_key, true)
+        |> Req.Response.put_private(@response_chunks_key, [])
+
+      {:halt, {request, response}}
+    else
+      response =
+        response
+        |> Req.Response.put_private(@response_size_key, updated_size)
+        |> Req.Response.update_private(@response_chunks_key, [data], &[data | &1])
+
+      {:cont, {request, response}}
+    end
   end
 
-  defp decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
+  defp finalize_bounded_response(response) do
+    cond do
+      Req.Response.get_private(response, @response_too_large_key, false) ->
+        {:error, :linear_response_too_large}
+
+      unsupported_content_encoding?(response) ->
+        {:error, :linear_response_encoding_unsupported}
+
+      true ->
+        chunks = Req.Response.get_private(response, @response_chunks_key, [])
+        {:ok, %{response | body: chunks |> Enum.reverse() |> IO.iodata_to_binary()}}
+    end
+  end
+
+  defp unsupported_content_encoding?(response) do
+    response
+    |> Req.Response.get_header("content-encoding")
+    |> Enum.any?(fn encoding -> String.downcase(String.trim(encoding)) not in ["", "identity"] end)
+  end
+
+  defp decode_bounded_graphql_body(body, _max_response_bytes) when is_map(body), do: {:ok, body}
+
+  defp decode_bounded_graphql_body(body, max_response_bytes) when is_binary(body) do
+    if byte_size(body) <= max_response_bytes do
+      case Jason.decode(body) do
+        {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
+        {:ok, _invalid} -> {:error, :invalid_linear_response_body}
+        {:error, _reason} -> {:error, :invalid_linear_response_json}
+      end
+    else
+      {:error, :linear_response_too_large}
+    end
+  end
+
+  defp decode_bounded_graphql_body(_body, _max_response_bytes),
+    do: {:error, :invalid_linear_response_body}
+
+  defp validate_max_response_bytes(value) when is_integer(value) and value > 0,
+    do: :ok
+
+  defp validate_max_response_bytes(_invalid), do: {:error, :invalid_linear_response_limit}
+
+  defp bounded_present_binary?(value, max_bytes) do
+    is_binary(value) and byte_size(value) > 0 and byte_size(value) <= max_bytes and
+      byte_size(String.trim(value)) > 0
+  end
+
+  defp decode_linear_response(response, assignee_filter) when is_map(response) do
+    with :ok <- reject_graphql_errors(response) do
+      decode_linear_data_response(response, assignee_filter)
+    end
+  end
+
+  defp decode_linear_response(_unknown, _assignee_filter) do
+    {:error, :linear_unknown_payload}
+  end
+
+  defp decode_linear_data_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter)
+       when is_list(nodes) do
     issues =
       nodes
       |> Enum.map(&normalize_issue(&1, assignee_filter))
@@ -411,15 +596,17 @@ defmodule SymphonyElixir.Linear.Client do
     {:ok, issues}
   end
 
-  defp decode_linear_response(%{"errors" => errors}, _assignee_filter) do
-    {:error, {:linear_graphql_errors, errors}}
-  end
-
-  defp decode_linear_response(_unknown, _assignee_filter) do
+  defp decode_linear_data_response(_unknown, _assignee_filter) do
     {:error, :linear_unknown_payload}
   end
 
-  defp decode_linear_page_response(
+  defp decode_linear_page_response(response, assignee_filter) do
+    with :ok <- reject_graphql_errors(response) do
+      decode_linear_page_data_response(response, assignee_filter)
+    end
+  end
+
+  defp decode_linear_page_data_response(
          %{
            "data" => %{
              "issues" => %{
@@ -429,13 +616,23 @@ defmodule SymphonyElixir.Linear.Client do
            }
          },
          assignee_filter
-       ) do
-    with {:ok, issues} <- decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
+       )
+       when is_list(nodes) do
+    with {:ok, issues} <-
+           decode_linear_data_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
       {:ok, issues, %{has_next_page: has_next_page == true, end_cursor: end_cursor}}
     end
   end
 
-  defp decode_linear_page_response(response, assignee_filter), do: decode_linear_response(response, assignee_filter)
+  defp decode_linear_page_data_response(_unknown, _assignee_filter) do
+    {:error, :linear_unknown_payload}
+  end
+
+  defp reject_graphql_errors(%{"errors" => errors}) do
+    {:error, {:linear_graphql_errors, errors}}
+  end
+
+  defp reject_graphql_errors(_response), do: :ok
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
        when is_binary(end_cursor) and byte_size(end_cursor) > 0 do
@@ -512,20 +709,22 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp resolve_viewer_assignee_filter do
     case graphql(@viewer_query, %{}) do
-      {:ok, %{"data" => %{"viewer" => viewer}}} when is_map(viewer) ->
-        case assignee_id(viewer) do
-          nil ->
-            {:error, :missing_linear_viewer_identity}
-
-          viewer_id ->
-            {:ok, %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}}
-        end
-
-      {:ok, _body} ->
-        {:error, :missing_linear_viewer_identity}
+      {:ok, body} ->
+        decode_viewer_assignee_filter(body)
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp decode_viewer_assignee_filter(body) do
+    with :ok <- reject_graphql_errors(body),
+         %{"data" => %{"viewer" => viewer}} when is_map(viewer) <- body,
+         viewer_id when is_binary(viewer_id) <- assignee_id(viewer) do
+      {:ok, %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}}
+    else
+      {:error, _reason} = error -> error
+      _invalid -> {:error, :missing_linear_viewer_identity}
     end
   end
 

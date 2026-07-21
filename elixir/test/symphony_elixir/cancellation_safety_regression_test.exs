@@ -439,7 +439,10 @@ defmodule SymphonyElixir.CancellationSafetyRegressionTest do
 
     on_exit(fn -> if Process.alive?(controller), do: Process.exit(controller, :kill) end)
 
-    assert_receive {:codex_worker_update, _, %{event: :process_cleanup_failed}}, 5_000
+    # This is a positive scheduling oracle, not a production cleanup deadline.
+    # The complete source-bound suite can legitimately spend several seconds
+    # retiring prior containment processes before this fail-closed event runs.
+    assert_receive {:codex_worker_update, _, %{event: :process_cleanup_failed}}, 15_000
     Process.sleep(100)
     assert Process.alive?(controller)
     assert File.dir?(Path.join(root, issue.identifier))

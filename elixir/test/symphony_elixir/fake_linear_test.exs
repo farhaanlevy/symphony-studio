@@ -38,14 +38,20 @@ defmodule SymphonyElixir.FakeLinearTest do
     on_exit(fn -> FakeLinear.stop(fixture) end)
     write_fake_linear_workflow!(Workflow.workflow_file_path(), fixture)
 
-    assert {:ok, candidates} = Client.fetch_candidate_issues()
-    assert Enum.map(candidates, & &1.id) == Enum.map(1..55, &"issue-#{&1}")
-    assert List.last(candidates).blocked_by == [%{id: "issue-1", identifier: "STU-1", state: "Todo"}]
-    assert List.first(candidates).labels == ["studio", "r0"]
+    Client.with_request_fun_for_test(FakeLinear.request_fun(fixture), fn ->
+      assert {:ok, candidates} = Client.fetch_candidate_issues()
+      assert Enum.map(candidates, & &1.id) == Enum.map(1..55, &"issue-#{&1}")
 
-    requested_ids = Enum.map(1..55, &"issue-#{&1}") |> Enum.reverse()
-    assert {:ok, reconciled} = Client.fetch_issue_states_by_ids(requested_ids)
-    assert Enum.map(reconciled, & &1.id) == requested_ids
+      assert List.last(candidates).blocked_by == [
+               %{id: "issue-1", identifier: "STU-1", state: "Todo"}
+             ]
+
+      assert List.first(candidates).labels == ["studio", "r0"]
+
+      requested_ids = Enum.map(1..55, &"issue-#{&1}") |> Enum.reverse()
+      assert {:ok, reconciled} = Client.fetch_issue_states_by_ids(requested_ids)
+      assert Enum.map(reconciled, & &1.id) == requested_ids
+    end)
 
     assert length(FakeLinear.requests(fixture, "SymphonyLinearPoll")) == 2
     assert length(FakeLinear.requests(fixture, "SymphonyLinearIssuesById")) == 2
@@ -58,41 +64,47 @@ defmodule SymphonyElixir.FakeLinearTest do
     on_exit(fn -> FakeLinear.stop(fixture) end)
     write_fake_linear_workflow!(Workflow.workflow_file_path(), fixture)
 
-    assert :ok = Adapter.create_comment("issue-1", "fixture comment")
-    assert FakeLinear.comments(fixture, "issue-1") == [%{"body" => "fixture comment", "id" => "comment-1"}]
+    Client.with_request_fun_for_test(FakeLinear.request_fun(fixture), fn ->
+      assert :ok = Adapter.create_comment("issue-1", "fixture comment")
+      assert FakeLinear.comments(fixture, "issue-1") == [%{"body" => "fixture comment", "id" => "comment-1"}]
 
-    assert :ok = Adapter.update_issue_state("issue-1", "Done")
-    assert FakeLinear.snapshot(fixture).issues["issue-1"].state == "Done"
-    assert FakeLinear.snapshot(fixture).issues["issue-1"].revision == 2
+      assert :ok = Adapter.update_issue_state("issue-1", "Done")
+      assert FakeLinear.snapshot(fixture).issues["issue-1"].state == "Done"
+      assert FakeLinear.snapshot(fixture).issues["issue-1"].revision == 2
 
-    assert :ok =
-             FakeLinear.script_next(
-               fixture,
-               "SymphonyCreateComment",
-               {:http_error, 503, %{"error" => "unavailable"}}
-             )
+      assert :ok =
+               FakeLinear.script_next(
+                 fixture,
+                 "SymphonyCreateComment",
+                 {:http_error, 503, %{"error" => "unavailable"}}
+               )
 
-    assert {:error, {:linear_api_status, 503}} = Adapter.create_comment("issue-1", "not committed")
-    assert length(FakeLinear.comments(fixture, "issue-1")) == 1
+      assert {:error, {:linear_api_status, 503}} =
+               Adapter.create_comment("issue-1", "not committed")
 
-    assert :ok =
-             FakeLinear.script_next(
-               fixture,
-               "SymphonyCreateComment",
-               {:after_commit, {:http_error, 503, %{"error" => "lost response"}}}
-             )
+      assert length(FakeLinear.comments(fixture, "issue-1")) == 1
 
-    assert {:error, {:linear_api_status, 503}} = Adapter.create_comment("issue-1", "committed once")
+      assert :ok =
+               FakeLinear.script_next(
+                 fixture,
+                 "SymphonyCreateComment",
+                 {:after_commit, {:http_error, 503, %{"error" => "lost response"}}}
+               )
 
-    assert Enum.map(FakeLinear.comments(fixture, "issue-1"), & &1["body"]) == [
-             "fixture comment",
-             "committed once"
-           ]
+      assert {:error, {:linear_api_status, 503}} =
+               Adapter.create_comment("issue-1", "committed once")
 
-    assert :ok = FakeLinear.patch_issue(fixture, "issue-1", %{title: "Externally changed"})
-    assert FakeLinear.snapshot(fixture).issues["issue-1"].revision == 3
-    assert :ok = FakeLinear.set_blockers(fixture, "issue-1", [])
-    assert FakeLinear.snapshot(fixture).issues["issue-1"].revision == 4
+      assert Enum.map(FakeLinear.comments(fixture, "issue-1"), & &1["body"]) == [
+               "fixture comment",
+               "committed once"
+             ]
+
+      assert :ok = FakeLinear.patch_issue(fixture, "issue-1", %{title: "Externally changed"})
+      assert FakeLinear.snapshot(fixture).issues["issue-1"].revision == 3
+      assert :ok = FakeLinear.set_blockers(fixture, "issue-1", [])
+      assert FakeLinear.snapshot(fixture).issues["issue-1"].revision == 4
+    end)
+
     assert :ok = FakeLinear.verify!(fixture)
   end
 
@@ -291,16 +303,19 @@ defmodule SymphonyElixir.FakeLinearTest do
     on_exit(fn -> FakeLinear.stop(fixture) end)
     write_fake_linear_workflow!(Workflow.workflow_file_path(), fixture)
 
-    assert {:ok, [candidate]} = Client.fetch_candidate_issues()
-    assert candidate.id == "issue-custom-project"
+    Client.with_request_fun_for_test(FakeLinear.request_fun(fixture), fn ->
+      assert {:ok, [candidate]} = Client.fetch_candidate_issues()
+      assert candidate.id == "issue-custom-project"
+    end)
+
     assert FakeLinear.workflow_overrides(fixture)[:tracker_project_slug] == "custom-project"
     assert :ok = FakeLinear.verify!(fixture)
   end
 
-  test "ordinary generated workflows cannot address the real Linear endpoint" do
+  test "ordinary generated workflows keep the memory adapter while using canonical endpoint syntax" do
     workflow = File.read!(Workflow.workflow_file_path())
     assert workflow =~ ~s(kind: "memory")
-    assert workflow =~ ~s(endpoint: "http://127.0.0.1:0/graphql")
-    refute workflow =~ "https://api.linear.app/graphql"
+    assert workflow =~ ~s(endpoint: "https://api.linear.app/graphql")
+    refute workflow =~ "127.0.0.1"
   end
 end

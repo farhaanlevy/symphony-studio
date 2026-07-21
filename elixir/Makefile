@@ -28,7 +28,7 @@ lint:
 
 schema:
 	$(PYTHON) ../scripts/run_codex_schema_tests.py
-	$(PYTHON) ../scripts/codex_schema.py verify
+	$(PYTHON) ../scripts/codex_schema.py verify-source-bound-prepublication
 	$(PYTHON) ../scripts/codex_schema.py regenerate-check --codex codex
 
 coverage:

@@ -418,8 +418,8 @@ defmodule SymphonyElixir.Orchestrator do
     state
   end
 
-  defp dispatch_failure(state, {:error, reason}) do
-    Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
+  defp dispatch_failure(state, {:error, _reason}) do
+    Logger.error("Failed to fetch from tracker failure_kind=tracker_fetch_failed")
     state
   end
 
@@ -440,8 +440,8 @@ defmodule SymphonyElixir.Orchestrator do
           )
           |> reconcile_missing_running_issue_ids(running_ids, issues)
 
-        {:error, reason} ->
-          Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
+        {:error, _reason} ->
+          Logger.debug("Failed to refresh running issue states failure_kind=tracker_refresh_failed; keeping active workers")
 
           state
       end
@@ -464,8 +464,8 @@ defmodule SymphonyElixir.Orchestrator do
           )
           |> reconcile_missing_blocked_issue_ids(blocked_ids, issues)
 
-        {:error, reason} ->
-          Logger.debug("Failed to refresh blocked issue states: #{inspect(reason)}; keeping blocked issues")
+        {:error, _reason} ->
+          Logger.debug("Failed to refresh blocked issue states failure_kind=tracker_refresh_failed; keeping blocked issues")
 
           state
       end
@@ -1606,8 +1606,8 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
 
-      {:error, reason} ->
-        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
+      {:error, _reason} ->
+        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)} failure_kind=tracker_refresh_failed")
         state
     end
   end
@@ -2019,8 +2019,8 @@ defmodule SymphonyElixir.Orchestrator do
             :ok
         end)
 
-      {:error, reason} ->
-        Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+      {:error, _reason} ->
+        Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues failure_kind=tracker_fetch_failed")
     end
   end
 

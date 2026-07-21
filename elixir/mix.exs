@@ -25,9 +25,11 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.CLI,
           SymphonyElixir.Codex.AppServer,
           SymphonyElixir.Codex.CleanupGuardian,
+          SymphonyElixir.Codex.CapabilityDiscovery,
           SymphonyElixir.Codex.CompatibilityCircuit,
           SymphonyElixir.Codex.Connection,
           SymphonyElixir.Codex.DynamicTool,
+          SymphonyElixir.Codex.IdentityBinding,
           SymphonyElixir.Codex.ProcessAdapter,
           SymphonyElixir.Codex.ProcessAdapter.IdentityTracker,
           SymphonyElixir.Codex.SchemaBundle,
@@ -36,6 +38,8 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
+          SymphonyElixir.Linear.CapabilityDiscovery,
+          SymphonyElixir.Linear.ReadOnlyBroker,
           SymphonyElixir.Workspace,
           SymphonyElixir.WorkspaceHookRunner,
           SymphonyElixirWeb.DashboardLive,
@@ -48,12 +52,16 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.StaticAssets,
           SymphonyElixirWeb.Router,
-          SymphonyElixirWeb.Router.Helpers
+          SymphonyElixirWeb.Router.Helpers,
+          Mix.Tasks.Studio.Capabilities,
+          Mix.Tasks.Studio.LinearCapabilities
         ]
       ],
       test_ignore_filters: [
         "test/support/fake_codex_app_server.exs",
         "test/support/fake_codex_app_server/runner.exs",
+        "test/support/codex_hook_fail_open_fixture.exs",
+        "test/support/fake_responses.exs",
         "test/support/fake_linear.exs",
         "test/support/snapshot_support.exs",
         "test/support/test_support.exs"

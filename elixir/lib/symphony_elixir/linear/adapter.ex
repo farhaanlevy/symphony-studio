@@ -1,3 +1,5 @@
+# Downstream modification notice (2026-07-17): Symphony Studio rejects partial
+# GraphQL mutation/query envelopes before trusting ordinary tracker results.
 defmodule SymphonyElixir.Linear.Adapter do
   @moduledoc """
   Linear-backed tracker adapter.
@@ -49,6 +51,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
     with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}),
+         :ok <- reject_graphql_errors(response),
          true <- get_in(response, ["data", "commentCreate", "success"]) == true do
       :ok
     else
@@ -64,6 +67,7 @@ defmodule SymphonyElixir.Linear.Adapter do
     with {:ok, state_id} <- resolve_state_id(issue_id, state_name),
          {:ok, response} <-
            client_module().graphql(@update_state_mutation, %{issueId: issue_id, stateId: state_id}),
+         :ok <- reject_graphql_errors(response),
          true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
       :ok
     else
@@ -80,6 +84,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp resolve_state_id(issue_id, state_name) do
     with {:ok, response} <-
            client_module().graphql(@state_lookup_query, %{issueId: issue_id, stateName: state_name}),
+         :ok <- reject_graphql_errors(response),
          state_id when is_binary(state_id) <-
            get_in(response, ["data", "issue", "team", "states", "nodes", Access.at(0), "id"]) do
       {:ok, state_id}
@@ -88,4 +93,7 @@ defmodule SymphonyElixir.Linear.Adapter do
       _ -> {:error, :state_not_found}
     end
   end
+
+  defp reject_graphql_errors(%{"errors" => _errors}), do: {:error, :linear_graphql_failed}
+  defp reject_graphql_errors(_response), do: :ok
 end

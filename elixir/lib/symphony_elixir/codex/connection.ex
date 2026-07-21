@@ -1,8 +1,9 @@
 # Copyright 2026 Symphony Studio contributors
 # SPDX-License-Identifier: Apache-2.0
-# Downstream modification notice (2026-07-16): Symphony Studio assigns stable
-# logical operation IDs before transport, preserves them across wire retries,
-# and registers process containment before initialization can complete.
+# Downstream modification notice (2026-07-16, updated 2026-07-17): Symphony
+# Studio assigns stable logical operation IDs before transport, preserves them
+# across wire retries, distinguishes omitted request params exactly, and
+# registers process containment before initialization can complete.
 
 defmodule SymphonyElixir.Codex.Connection do
   @moduledoc """
@@ -40,6 +41,7 @@ defmodule SymphonyElixir.Codex.Connection do
   @default_max_server_requests 256
   @default_max_server_request_bytes 16_777_216
   @default_max_completed_request_ids 4_096
+  @terminal_identity_domain "symphony-studio/terminal-identity/v1\0"
   @default_write_timeout_ms 5_000
   @cleanup_retry_interval_ms 250
   @supervisor SymphonyElixir.ConnectionSupervisor
@@ -57,6 +59,7 @@ defmodule SymphonyElixir.Codex.Connection do
         }
 
   @type message :: %{payload: map(), raw: binary()}
+  @type request_params :: map() | :omitted
 
   @spec start([String.t()], keyword()) :: GenServer.on_start()
   def start([executable | _args] = argv, opts \\ []) when is_binary(executable) do
@@ -90,19 +93,19 @@ defmodule SymphonyElixir.Codex.Connection do
     GenServer.start_link(__MODULE__, {owner, argv, opts})
   end
 
-  @spec request(pid(), String.t(), map(), pos_integer()) ::
+  @spec request(pid(), String.t(), request_params(), pos_integer()) ::
           {:ok, term(), request_metadata()} | {:error, TransportError.t()}
   def request(connection, method, params, timeout_ms)
-      when is_pid(connection) and is_binary(method) and is_map(params) and is_integer(timeout_ms) and
-             timeout_ms > 0 do
+      when is_pid(connection) and is_binary(method) and
+             (is_map(params) or params == :omitted) and is_integer(timeout_ms) and timeout_ms > 0 do
     request_until(connection, method, params, monotonic_ms() + timeout_ms)
   end
 
-  @spec request_until(pid(), String.t(), map(), integer()) ::
+  @spec request_until(pid(), String.t(), request_params(), integer()) ::
           {:ok, term(), request_metadata()} | {:error, TransportError.t()}
   def request_until(connection, method, params, deadline_ms)
-      when is_pid(connection) and is_binary(method) and is_map(params) and
-             is_integer(deadline_ms) do
+      when is_pid(connection) and is_binary(method) and
+             (is_map(params) or params == :omitted) and is_integer(deadline_ms) do
     GenServer.call(connection, {:request_until, method, params, deadline_ms}, :infinity)
   end
 
@@ -216,6 +219,7 @@ defmodule SymphonyElixir.Codex.Connection do
               cleanup_retry_deadline_ms: nil,
               cleanup_retry_ref: nil,
               completed_ids: MapSet.new(),
+              completed_terminal_turns: MapSet.new(),
               failure: nil,
               framer: JSONLFramer.new(Keyword.get(opts, :max_frame_bytes, @default_max_frame_bytes)),
               jitter_fn: Keyword.get(opts, :jitter_fn, &default_jitter/1),
@@ -411,14 +415,21 @@ defmodule SymphonyElixir.Codex.Connection do
 
   def handle_call({:ack_terminal, method}, _from, state) do
     case state.terminal_delivery do
-      %{method: ^method} ->
-        {:reply, :ok,
-         %{
-           state
-           | active_turn: nil,
-             side_effect_operation: nil,
-             terminal_delivery: nil
-         }}
+      %{method: ^method, thread_id: thread_id, turn_id: turn_id} ->
+        case remember_terminal_turn(state, {thread_id, turn_id}) do
+          {:ok, next_state} ->
+            {:reply, :ok,
+             %{
+               next_state
+               | active_turn: nil,
+                 side_effect_operation: nil,
+                 terminal_delivery: nil
+             }}
+
+          {:error, error} ->
+            failed_state = fail_connection(state, error, [])
+            {:reply, {:error, failed_state.failure}, failed_state}
+        end
 
       nil ->
         error =
@@ -911,6 +922,7 @@ defmodule SymphonyElixir.Codex.Connection do
       cleanup_guardian_active: is_pid(state.cleanup_guardian),
       cleanup_retry_pending: is_reference(state.cleanup_retry_ref),
       completed_request_count: MapSet.size(state.completed_ids),
+      completed_terminal_turn_count: MapSet.size(state.completed_terminal_turns),
       failure: redact_failure(state.failure),
       framer: JSONLFramer.public_summary(state.framer),
       metadata: :redacted,
@@ -922,7 +934,7 @@ defmodule SymphonyElixir.Codex.Connection do
       server_request_count: map_size(state.server_requests),
       side_effect_operation: state.side_effect_operation,
       stderr_diagnostics: StderrDiagnostics.public_summary(state.stderr_diagnostics),
-      terminal_delivery: state.terminal_delivery,
+      terminal_delivery: redact_terminal_delivery(state.terminal_delivery),
       waiter_active: not is_nil(state.waiter)
     }
   end
@@ -940,6 +952,9 @@ defmodule SymphonyElixir.Codex.Connection do
       turn_id: public_request_id(active_turn.turn_id)
     }
   end
+
+  defp redact_terminal_delivery(nil), do: nil
+  defp redact_terminal_delivery(%{method: method}), do: %{method: method}
 
   defp redact_adapter(nil), do: nil
   defp redact_adapter(adapter), do: %{os_pid: adapter_os_pid(adapter), present: true}
@@ -1225,8 +1240,11 @@ defmodule SymphonyElixir.Codex.Connection do
 
     if exact_keys?(payload, ["method", "params"]) and is_map(params) do
       case validate_terminal_message(method, payload, state) do
-        {:ok, next_state} ->
+        {:ok, next_state, :deliver} ->
           {:ok, next_state, [{:deliver, %{payload: payload, raw: raw}}]}
+
+        {:ok, next_state, :suppress} ->
+          {:ok, next_state, []}
 
         {:error, error} ->
           {:error, error, state}
@@ -1293,32 +1311,104 @@ defmodule SymphonyElixir.Codex.Connection do
 
   defp validate_terminal_message(method, payload, state)
        when method in ["turn/completed", "turn/failed", "turn/cancelled"] do
-    case {state.active_turn, state.terminal_delivery} do
-      {%{thread_id: thread_id, turn_id: turn_id}, nil} ->
-        actual_thread_id = get_in(payload, ["params", "threadId"])
-        actual_turn_id = get_in(payload, ["params", "turn", "id"])
+    with {:ok, terminal_key} <- terminal_turn_key(payload, state) do
+      cond do
+        MapSet.member?(
+          state.completed_terminal_turns,
+          terminal_turn_digest(terminal_key)
+        ) ->
+          {:error,
+           transport_error(state, :invalid_json_rpc_frame, %{
+             reason: :duplicate_terminal_notification
+           })}
 
-        if actual_thread_id == thread_id and actual_turn_id == turn_id do
-          {:ok, %{state | terminal_delivery: %{method: method}}}
-        else
+        is_nil(state.active_turn) ->
+          remember_suppressed_terminal(state, terminal_key)
+
+        elem(terminal_key, 0) != state.active_turn.thread_id ->
+          remember_suppressed_terminal(state, terminal_key)
+
+        elem(terminal_key, 1) != state.active_turn.turn_id ->
           {:error,
            transport_error(state, :invalid_json_rpc_frame, %{
              reason: :terminal_turn_mismatch
            })}
-        end
 
-      {nil, _terminal_delivery} ->
-        {:error, transport_error(state, :invalid_json_rpc_frame, %{reason: :terminal_without_active_turn})}
+        is_nil(state.terminal_delivery) ->
+          {thread_id, turn_id} = terminal_key
 
-      {%{}, %{}} ->
-        {:error,
-         transport_error(state, :invalid_json_rpc_frame, %{
-           reason: :terminal_delivery_unacknowledged
-         })}
+          {:ok,
+           %{
+             state
+             | terminal_delivery: %{
+                 method: method,
+                 thread_id: thread_id,
+                 turn_id: turn_id
+               }
+           }, :deliver}
+
+        true ->
+          {:error,
+           transport_error(state, :invalid_json_rpc_frame, %{
+             reason: :terminal_delivery_unacknowledged
+           })}
+      end
     end
   end
 
-  defp validate_terminal_message(_method, _payload, state), do: {:ok, state}
+  defp validate_terminal_message(_method, _payload, state), do: {:ok, state, :deliver}
+
+  defp remember_suppressed_terminal(state, terminal_key) do
+    with {:ok, next_state} <- remember_terminal_turn(state, terminal_key) do
+      {:ok, next_state, :suppress}
+    end
+  end
+
+  defp terminal_turn_key(payload, state) do
+    thread_id = get_in(payload, ["params", "threadId"])
+    turn_id = get_in(payload, ["params", "turn", "id"])
+
+    if is_binary(thread_id) and thread_id != "" and is_binary(turn_id) and turn_id != "" do
+      {:ok, {thread_id, turn_id}}
+    else
+      {:error,
+       transport_error(state, :invalid_json_rpc_frame, %{
+         reason: :invalid_terminal_identity
+       })}
+    end
+  end
+
+  defp remember_terminal_turn(state, terminal_key) do
+    if MapSet.size(state.completed_terminal_turns) >= state.max_completed_request_ids do
+      {:error,
+       inbound_overflow_error(state, :completed_terminal_turns, %{
+         limit: state.max_completed_request_ids
+       })}
+    else
+      {:ok,
+       %{
+         state
+         | completed_terminal_turns:
+             MapSet.put(
+               state.completed_terminal_turns,
+               terminal_turn_digest(terminal_key)
+             )
+       }}
+    end
+  end
+
+  defp terminal_turn_digest({thread_id, turn_id}) do
+    :crypto.hash(
+      :sha256,
+      [
+        @terminal_identity_domain,
+        <<byte_size(thread_id)::unsigned-big-64>>,
+        thread_id,
+        <<byte_size(turn_id)::unsigned-big-64>>,
+        turn_id
+      ]
+    )
+  end
 
   defp apply_actions(state, []), do: state
 
@@ -1387,7 +1477,7 @@ defmodule SymphonyElixir.Codex.Connection do
       {:error, request_timeout_error(state), state}
     else
       request_id = state.next_id
-      payload = %{"id" => request_id, "method" => pending.method, "params" => pending.params}
+      payload = request_payload(request_id, pending.method, pending.params)
 
       sending_pending =
         %{pending | id: request_id, send_state: :transmission_uncertain}
@@ -1406,6 +1496,14 @@ defmodule SymphonyElixir.Codex.Connection do
           {:error, error, sending_state}
       end
     end
+  end
+
+  defp request_payload(request_id, method, :omitted) do
+    %{"id" => request_id, "method" => method}
+  end
+
+  defp request_payload(request_id, method, %{} = params) do
+    %{"id" => request_id, "method" => method, "params" => params}
   end
 
   defp send_wire(%{adapter: nil} = state, _payload) do

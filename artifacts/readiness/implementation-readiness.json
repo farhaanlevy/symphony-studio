@@ -1,0 +1,2895 @@
+{
+  "capabilities": {
+    "auth": {
+      "identityBinding": {
+        "bindingId": "codex-binding-v1-d7944f06e752eeaaa5ee31a63d2a146ad4be95234e65aef02b5b17f6ad37ef9f",
+        "evidence": "keyed_account_metadata",
+        "generation": 1,
+        "status": "confirmed"
+      },
+      "mode": "chatgpt",
+      "referenceProfile": {
+        "chatgptAuthentication": true,
+        "identityBinding": true,
+        "solAvailable": true,
+        "solReviewEffort": true,
+        "solUltra": true,
+        "status": "pass",
+        "terraAvailable": true,
+        "terraHigh": true,
+        "terraMedium": true
+      }
+    },
+    "linear": {
+      "blockers": {
+        "status": "pass"
+      },
+      "comments": {
+        "status": "pass"
+      },
+      "configuredProjectBinding": "linear-project-v1-ac47aebfe6e2e4f0ead27428bfa0b3aed37e950b41411df6b678eae61d87d83f",
+      "connectivity": {
+        "status": "pass"
+      },
+      "labels": {
+        "status": "pass"
+      },
+      "mutations": {
+        "evidence": "schema_only",
+        "status": "pass"
+      },
+      "project": {
+        "status": "pass"
+      },
+      "states": {
+        "status": "pass"
+      }
+    },
+    "matrix": {
+      "fields": [
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.email",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.plan_type",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.requires_openai_auth",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.root",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "account.type.api_key",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.type.chatgpt",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.updated_auth_mode",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.updated_auth_mode.apikey",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.updated_auth_mode.chatgpt",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account.updated_plan_type",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "approval.command.approval_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.command.item_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.command.response_decision",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.command.thread_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.command.turn_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.file_change.item_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.file_change.response_decision",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.file_change.thread_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.file_change.turn_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.legacy_apply.call_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.legacy_apply.conversation_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.legacy_apply.response_decision",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "approval.legacy_exec.approval_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.legacy_exec.call_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.legacy_exec.conversation_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.legacy_exec.response_decision",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.mcp.response_action",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "approval.mcp.response_content",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.mcp.server_name",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.mcp.thread_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "approval.mcp.turn_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.permissions.item_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.permissions.request_permissions",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.permissions.response_permissions",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "approval.permissions.response_scope",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.permissions.thread_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.permissions.turn_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.tool_input.item_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.tool_input.questions",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.tool_input.response_answers",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.tool_input.thread_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "approval.tool_input.turn_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "collaboration.data",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "collaboration.mask_mode",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "collaboration.mask_model",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "collaboration.mask_name",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "collaboration.mask_reasoning_effort",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "diff_updated.diff",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "diff_updated.thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "diff_updated.turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.arguments",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.call_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.response_content_item_image_url",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.response_content_item_text",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.response_content_item_type",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.response_content_items",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.response_success",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.thread_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.tool",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool.turn_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.cursor",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.data",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.default_enabled",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.enabled",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.limit",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.name",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.next_cursor",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.stage",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "features.thread_id",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "goal_updated.goal",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "goal_updated.thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "goal_updated.turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialize.client_info",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialize.client_name",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialize.client_version",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "initialize.codex_home",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "initialize.experimental_api",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialize.platform_family",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialize.platform_os",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialize.user_agent",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.cursor",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "models.data",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "models.default_effort",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.default_service_tier",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "models.hidden",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "models.id",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.include_hidden",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.limit",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "models.model",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.next_cursor",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.service_tier_description",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.service_tier_id",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.service_tier_name",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "models.service_tiers",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "models.supported_efforts",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.error_error",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.error_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.error_turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.error_will_retry",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_agent_message_text",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "notifications.item_command_aggregated_output",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "notifications.item_command_exit_code",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_command_status",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_completed_at_ms",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_completed_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_completed_turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_context_compaction_type",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_file_changes",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_file_status",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_plan_text",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_started_at_ms",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_started_item",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_started_item_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_started_item_type",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_started_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_started_turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_subagent_kind",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_subagent_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.item_type",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.server_request_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.server_request_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.thread_status_status",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.thread_status_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_last",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_last_cached_input_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_last_input_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_last_output_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_last_reasoning_output_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_last_total_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "notifications.token_usage_model_context_window",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_total",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_total_cached_input_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_total_input_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_total_output_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_total_reasoning_output_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_total_total_tokens",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.token_usage_turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "notifications.turn_completed_at",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.turn_completed_status",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.turn_completed_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "notifications.turn_duration_ms",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "notifications.turn_error",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.turn_started_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.turn_started_status",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "notifications.turn_started_thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "plan_updated.plan",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "plan_updated.status",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "plan_updated.step",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "plan_updated.thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "plan_updated.turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_credits",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_credits_balance",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_credits_has_credits",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_credits_unlimited",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_limit_id",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_limit_name",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_plan_type",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_primary.resets_at",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_primary.used_percent",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_primary.window_duration",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_reached_type",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_secondary.resets_at",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_secondary.used_percent",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_secondary.window_duration",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_spend_control",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_spend_limit",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_spend_remaining_percent",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_spend_resets_at",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.bucket_spend_used",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.consume.credit_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.consume.idempotency_key",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.consume.outcome",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.consume.outcome_enum",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.credits",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.credits_balance",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.credits_has_credits",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.credits_unlimited",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "rate_limits.legacy_snapshot",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.limit_id",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.limit_name",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.multi_bucket",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.plan_type",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reached_type",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_available_count",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_description",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_expires_at",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_granted_at",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_id",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_status",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_title",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credit_type",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.reset_credits",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.secondary.resets_at",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.secondary.used_percent",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.secondary.window_duration",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.spend_control",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.spend_limit",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.spend_remaining_percent",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.spend_resets_at",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "rate_limits.spend_used",
+          "outcome": "absent",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "rate_limits.updated_snapshot",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "rate_limits.used_percent",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "rate_limits.window_duration",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "rate_limits.window_resets_at",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "review.detached_delivery",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "review.response_thread",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "review.response_turn",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "review.target",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "review.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "server_requests.envelope_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_compact.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_compacted.thread_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_compacted.turn_id",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_fork.last_turn_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_fork.response_thread",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_fork.response_thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_fork.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.objective",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.response_goal",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.response_objective",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.response_status",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.response_thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.response_token_budget",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.response_tokens_used",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.status",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal.token_budget",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_list.cursor",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_list.data",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_list.limit",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_list.next_cursor",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_read.include_turns",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_read.response_status",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_read.response_thread",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_read.response_thread_id",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_read.response_turns",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_read.thread_id",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_resume.service_tier",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_resume.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.approval_granular",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.approval_granular_mcp_elicitations",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_start.approval_granular_request_permissions",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.approval_granular_rules",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.approval_granular_sandbox",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_start.approval_granular_skill",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.approval_policy",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.approval_policy_enum",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.cwd",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_start.dynamic_tool_description",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_start.dynamic_tool_input_schema",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_start.dynamic_tool_name",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_start.dynamic_tool_type",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_start.dynamic_tools",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_start.model",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_start.multi_agent_mode",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.sandbox",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.sandbox_mode",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "thread_start.service_tier",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_interrupt.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_interrupt.turn_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.approval_policy",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_start.client_user_message_id",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_start.collaboration_mode",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.cwd",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.danger_full_access_type",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.effort",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.external_sandbox_network",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.external_sandbox_network_values",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.external_sandbox_type",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.input",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.model",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_start.multi_agent_mode",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.read_only_network",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.read_only_type",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.response_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.response_status",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.sandbox_policy",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "turn_start.service_tier",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.workspace_write_exclude_slash_tmp",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.workspace_write_exclude_tmpdir_env_var",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.workspace_write_network",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.workspace_write_roots",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start.workspace_write_type",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_steer.client_user_message_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_steer.expected_turn_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_steer.input",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_steer.response_turn_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_steer.thread_id",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.current_streak_days",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.daily_buckets",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.daily_start_date",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.daily_tokens",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.lifetime_tokens",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.longest_running_turn_sec",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.longest_streak_days",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.peak_daily_tokens",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "usage.summary",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        }
+      ],
+      "methods": [
+        {
+          "absentBehavior": "safe_block",
+          "id": "account_logout",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account_rate_limits_read",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account_rate_limits_updated",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account_read",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "account_updated",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "account_usage_read",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "collaboration_mode_list",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "command_approval",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "consume_reset_credit",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "dynamic_tool_call",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "error",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "hide",
+          "id": "experimental_feature_list",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "file_change_approval",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialize",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "initialized",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "item_completed",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "item_started",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "legacy_apply_patch_approval",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "legacy_exec_command_approval",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "mcp_elicitation",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "model_list",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "permissions_approval",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "review_start",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "server_request_resolved",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_compact",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_compacted",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_fork",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal_set",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "thread_goal_updated",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "optional"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_list",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "thread_read",
+          "outcome": "pass",
+          "probe": "read",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_resume",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_start",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_status_changed",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "thread_token_usage_updated",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "tool_user_input",
+          "outcome": "pass",
+          "probe": "conformance",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_completed",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "turn_diff_updated",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_interrupt",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "safe_block",
+          "id": "turn_plan_updated",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "supporting"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_start",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "block_managed_dispatch",
+          "id": "turn_started",
+          "outcome": "pass",
+          "probe": "observe",
+          "requirement": "required"
+        },
+        {
+          "absentBehavior": "studio_substitute",
+          "id": "turn_steer",
+          "outcome": "pass",
+          "probe": "invoke",
+          "requirement": "optional"
+        }
+      ],
+      "negativeCapabilities": [
+        {
+          "id": "collaboration.no_multi_agent_v2",
+          "outcome": "pass"
+        },
+        {
+          "id": "collaboration.no_per_session_concurrency_field",
+          "outcome": "pass"
+        },
+        {
+          "id": "dynamic_tool.no_legacy_output_response_field",
+          "outcome": "pass"
+        }
+      ]
+    },
+    "models": [
+      {
+        "defaultServiceTier": null,
+        "fastServiceTierId": null,
+        "id": "gpt-5.3-codex-spark",
+        "model": "gpt-5.3-codex-spark",
+        "reasoningEfforts": [
+          "high",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "serviceTierIds": []
+      },
+      {
+        "defaultServiceTier": null,
+        "fastServiceTierId": "priority",
+        "id": "gpt-5.4",
+        "model": "gpt-5.4",
+        "reasoningEfforts": [
+          "high",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "serviceTierIds": [
+          "priority"
+        ]
+      },
+      {
+        "defaultServiceTier": null,
+        "fastServiceTierId": null,
+        "id": "gpt-5.4-mini",
+        "model": "gpt-5.4-mini",
+        "reasoningEfforts": [
+          "high",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "serviceTierIds": []
+      },
+      {
+        "defaultServiceTier": null,
+        "fastServiceTierId": "priority",
+        "id": "gpt-5.5",
+        "model": "gpt-5.5",
+        "reasoningEfforts": [
+          "high",
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "serviceTierIds": [
+          "priority"
+        ]
+      },
+      {
+        "defaultServiceTier": null,
+        "fastServiceTierId": "priority",
+        "id": "gpt-5.6-luna",
+        "model": "gpt-5.6-luna",
+        "reasoningEfforts": [
+          "high",
+          "low",
+          "max",
+          "medium",
+          "xhigh"
+        ],
+        "serviceTierIds": [
+          "priority"
+        ]
+      },
+      {
+        "defaultServiceTier": null,
+        "fastServiceTierId": "priority",
+        "id": "gpt-5.6-sol",
+        "model": "gpt-5.6-sol",
+        "reasoningEfforts": [
+          "high",
+          "low",
+          "max",
+          "medium",
+          "ultra",
+          "xhigh"
+        ],
+        "serviceTierIds": [
+          "priority"
+        ]
+      },
+      {
+        "defaultServiceTier": null,
+        "fastServiceTierId": "priority",
+        "id": "gpt-5.6-terra",
+        "model": "gpt-5.6-terra",
+        "reasoningEfforts": [
+          "high",
+          "low",
+          "max",
+          "medium",
+          "ultra",
+          "xhigh"
+        ],
+        "serviceTierIds": [
+          "priority"
+        ]
+      }
+    ],
+    "quota": {
+      "fullRead": "pass",
+      "multiBucket": "pass",
+      "sparseUpdate": "pass",
+      "usage": "pass"
+    },
+    "subagents": {
+      "hookFailureClassification": "fail_open",
+      "implementation": "multi_agent_v2",
+      "nativeDepthEnforcement": false,
+      "rawToOptionalChildren": [
+        {
+          "optionalChildren": 0,
+          "raw": 1
+        },
+        {
+          "optionalChildren": 1,
+          "raw": 2
+        },
+        {
+          "optionalChildren": 2,
+          "raw": 3
+        }
+      ],
+      "rootCountsTowardLimit": true,
+      "studioDepthGuardRequired": true,
+      "trustedGuardStatus": "pass"
+    }
+  },
+  "checkout": {
+    "headCommit": "4ef89f73025519102781d7134352b4575b55704c",
+    "headSemantics": "generation-head-with-staged-index-v1",
+    "patchLedgerRevision": 66,
+    "source": {
+      "algorithm": "sha256-git-index-mode-oid-path-synthetic-schema-v1",
+      "fileCount": 2109,
+      "gitObjectFormat": "sha1",
+      "readinessPathExcluded": true,
+      "schemaManifestBasisSha256": "f58eaf3b0f9ba946b67c24807dc80e1a2e4f79d094b1329b2b117ac89f578be5",
+      "schemaManifestPath": "elixir/priv/codex_schema/0.144.3/manifest.json",
+      "sha256": "37a622802e1616ba2e2db53076156e0120c513689679e3fe22a9cf6ed1e37d66"
+    },
+    "upstreamBaseCommit": "4cbe3a9699a73b862466c0b157ceca0c1985d6d7",
+    "upstreamCommit": "4cbe3a9699a73b862466c0b157ceca0c1985d6d7"
+  },
+  "codex": {
+    "artifactBundleSha256": "d96f8d427cf68655b5658ebea0e9e2332986e8b4b9c1f0ff078957e2ceb70d69",
+    "launcherSha256": "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+    "matrixSha256": "f102c992bc99faaa7442f1bc22b6f41cce70e0f1a5d2ba56e99a8dabafdd8b25",
+    "nativeSha256": "37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b",
+    "schemaBundleSha256": "5044e15b8aa187e7deec44ee16b0848a4f9a20aa25e6ec66f10c1d5bcc40141a",
+    "schemaManifestBasisSha256": "f58eaf3b0f9ba946b67c24807dc80e1a2e4f79d094b1329b2b117ac89f578be5",
+    "target": "x86_64-unknown-linux-musl",
+    "version": "0.144.3",
+    "versionOutput": "codex-cli 0.144.3"
+  },
+  "conformance": [
+    {
+      "command": [
+        "mise",
+        "exec",
+        "-C",
+        "elixir",
+        "--",
+        "mix",
+        "test",
+        "test/symphony_elixir/codex_capability_error_test.exs",
+        "test/symphony_elixir/codex_capability_decoder_test.exs",
+        "test/symphony_elixir/codex_capability_discovery_test.exs",
+        "test/symphony_elixir/codex_capability_report_test.exs",
+        "test/symphony_elixir/codex_identity_binding_test.exs",
+        "test/symphony_elixir/codex_quota_shape_test.exs",
+        "test/mix/tasks/studio_capabilities_test.exs",
+        "--seed",
+        "0"
+      ],
+      "id": "capability_fake_conformance",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "mise",
+        "exec",
+        "-C",
+        "elixir",
+        "--",
+        "mix",
+        "test",
+        "test/symphony_elixir/codex_depth_guard_test.exs",
+        "--seed",
+        "0"
+      ],
+      "id": "depth_guard_conformance",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/codex_schema.py",
+        "verify-source-bound-prepublication",
+        "--codex",
+        "codex"
+      ],
+      "id": "installed_codex_verify",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "mise",
+        "exec",
+        "-C",
+        "elixir",
+        "--",
+        "mix",
+        "test",
+        "test/symphony_elixir/fake_linear_test.exs",
+        "test/symphony_elixir/dynamic_tool_test.exs",
+        "test/symphony_elixir/linear_capability_discovery_test.exs",
+        "test/symphony_elixir/linear_error_boundary_test.exs",
+        "test/symphony_elixir/linear_read_only_broker_test.exs",
+        "test/symphony_elixir/extensions_test.exs",
+        "test/mix/tasks/studio_linear_capabilities_test.exs",
+        "--seed",
+        "0"
+      ],
+      "id": "linear_fake_conformance",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/studio_readiness.py",
+        "probe-linear",
+        "--repo-root",
+        ".",
+        "--mise",
+        "mise"
+      ],
+      "id": "linear_live_discovery",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/studio_readiness.py",
+        "probe-codex",
+        "--repo-root",
+        ".",
+        "--codex",
+        "codex",
+        "--mise",
+        "mise"
+      ],
+      "id": "no_model_live_discovery",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/test_studio_readiness.py"
+      ],
+      "id": "readiness_harness",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/run_codex_schema_tests.py"
+      ],
+      "id": "schema_harness",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/codex_schema.py",
+        "regenerate-check",
+        "--codex",
+        "codex"
+      ],
+      "id": "schema_regeneration",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/studio_readiness.py",
+        "probe-source-archive",
+        "--repo-root",
+        "."
+      ],
+      "id": "source_archive_rehearsal",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "mise",
+        "exec",
+        "-C",
+        "elixir",
+        "--",
+        "mix",
+        "test",
+        "test/symphony_elixir/codex_schema_bundle_test.exs",
+        "test/symphony_elixir/app_server_test.exs",
+        "test/symphony_elixir/codex_compatibility_circuit_test.exs",
+        "test/symphony_elixir/codex_connection_test.exs",
+        "test/symphony_elixir/codex_jsonl_framer_test.exs",
+        "test/symphony_elixir/codex_process_adapter_test.exs",
+        "test/symphony_elixir/codex_request_policy_test.exs",
+        "test/symphony_elixir/codex_stderr_diagnostics_test.exs",
+        "test/symphony_elixir/dynamic_tool_test.exs",
+        "test/symphony_elixir/extensions_test.exs",
+        "test/symphony_elixir/event_sink_test.exs",
+        "test/symphony_elixir/event_test.exs",
+        "test/symphony_elixir/fake_codex_app_server_test.exs",
+        "test/symphony_elixir/fake_linear_test.exs",
+        "test/symphony_elixir/identity_test.exs",
+        "test/symphony_elixir/network_hermeticity_test.exs",
+        "test/symphony_elixir/orchestrator_event_test.exs",
+        "test/symphony_elixir/orchestrator_status_test.exs",
+        "test/symphony_elixir/workspace_and_config_test.exs",
+        "test/symphony_elixir/cancellation_lifecycle_test.exs",
+        "test/symphony_elixir/cancellation_safety_regression_test.exs",
+        "test/symphony_elixir/hook_cancellation_containment_test.exs",
+        "test/symphony_elixir/runtime_supervisor_test.exs",
+        "test/symphony_elixir/tracker_outbox_test.exs",
+        "test/symphony_elixir/codex_capability_error_test.exs",
+        "test/symphony_elixir/codex_capability_decoder_test.exs",
+        "test/symphony_elixir/codex_capability_discovery_test.exs",
+        "test/symphony_elixir/codex_capability_report_test.exs",
+        "test/symphony_elixir/codex_depth_guard_test.exs",
+        "test/symphony_elixir/codex_identity_binding_test.exs",
+        "test/symphony_elixir/codex_quota_shape_test.exs",
+        "test/symphony_elixir/fake_responses_test.exs",
+        "test/symphony_elixir/codex_v2_cap_hook_conformance_test.exs",
+        "test/mix/tasks/studio_capabilities_test.exs",
+        "test/symphony_elixir/linear_capability_discovery_test.exs",
+        "test/symphony_elixir/linear_error_boundary_test.exs",
+        "test/symphony_elixir/linear_read_only_broker_test.exs",
+        "test/mix/tasks/studio_linear_capabilities_test.exs",
+        "--seed",
+        "0"
+      ],
+      "id": "source_bound_fixture_replay",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "mise",
+        "exec",
+        "-C",
+        "elixir",
+        "--",
+        "mix",
+        "test",
+        "test/symphony_elixir/codex_v2_cap_hook_conformance_test.exs",
+        "--seed",
+        "0"
+      ],
+      "id": "subagent_cap_conformance",
+      "outcome": "pass",
+      "required": true
+    },
+    {
+      "command": [
+        "mise",
+        "exec",
+        "-C",
+        "elixir",
+        "--",
+        "make",
+        "all"
+      ],
+      "id": "upstream_make_all",
+      "outcome": "pass",
+      "required": true
+    }
+  ],
+  "manifestVersion": 1,
+  "platform": {
+    "architecture": "x86_64",
+    "os": "linux",
+    "osStatus": "pass",
+    "package": "source-archive",
+    "packageStatus": "pass"
+  },
+  "profile": "build-week-chatgpt-reference",
+  "runtime": {
+    "blockers": [],
+    "capabilities": "pass",
+    "overall": "pass"
+  }
+}

@@ -11,12 +11,18 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
   @unexpected_eof_exit 66
   @barrier_timeout_exit 67
   @wait_poll_interval_ms 5
+  @final_response_flush_ms 25
   @max_generated_bytes 64 * 1024 * 1024
   @client_params_schemas %{
+    "account/read" => "json/v2/GetAccountParams.json",
+    "collaborationMode/list" => "experimental/json/v2/CollaborationModeListParams.json",
+    "experimentalFeature/list" => "json/v2/ExperimentalFeatureListParams.json",
     "initialize" => "json/v1/InitializeParams.json",
+    "model/list" => "json/v2/ModelListParams.json",
     "thread/start" => "experimental/json/v2/ThreadStartParams.json",
-    "turn/start" => "experimental/json/v2/TurnStartParams.json"
+    "turn/start" => "json/v2/TurnStartParams.json"
   }
+  @client_paramless_methods ~w(account/rateLimits/read account/usage/read)
   @step_keys %{
     "expect" => {~w(type expected absent match), ["validation"]},
     "send_json" => {~w(type payload fragments delayMs), []},
@@ -195,7 +201,12 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
   end
 
   defp expected_validation_contract(%{"method" => "initialized"}) do
-    schema_contract("client_notification", "experimental/json/ClientNotification.json")
+    schema_contract("client_notification", "json/ClientNotification.json")
+  end
+
+  defp expected_validation_contract(%{"method" => method}) when method in @client_paramless_methods do
+    schema_contract("client_request_paramless", client_request_schema(method))
+    |> Map.put("method", method)
   end
 
   defp expected_validation_contract(%{"method" => method})
@@ -229,6 +240,11 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
     do: "json/ExecCommandApprovalResponse.json"
 
   defp callback_response_schema(_result), do: nil
+
+  defp client_request_schema(method) when method in ~w(collaborationMode/list thread/start),
+    do: "experimental/json/ClientRequest.json"
+
+  defp client_request_schema(_method), do: "json/ClientRequest.json"
 
   defp schema_contract(kind, schema_path) do
     {:ok, schema} = SchemaBundle.schema(schema_path)
@@ -332,6 +348,7 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
     |> trace("complete", %{})
 
     write_stdout(bytes, step)
+    Process.sleep(@final_response_flush_ms)
     System.halt(0)
   end
 
@@ -521,6 +538,23 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
   defp validate_known_payload(
          payload,
          %{
+           "kind" => "client_request_paramless",
+           "method" => method,
+           "schema" => schema,
+           "schemaPath" => schema_path
+         }
+       ) do
+    with :ok <- required_keys(payload, ["id", "method"], "paramless client request envelope"),
+         :ok <- exact_keys(payload, ["id", "method"], "paramless client request envelope"),
+         :ok <- request_id(payload["id"]),
+         :ok <- exact_method(payload["method"], method) do
+      validate_schema(payload, schema, schema_path)
+    end
+  end
+
+  defp validate_known_payload(
+         payload,
+         %{
            "kind" => "client_request",
            "method" => method,
            "schema" => schema,
@@ -586,6 +620,10 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer.Runner do
   defp exact_schema_properties(payload, %{"properties" => properties}, label)
        when is_map(payload) and is_map(properties) do
     exact_keys(payload, Map.keys(properties), label)
+  end
+
+  defp exact_schema_properties(payload, %{"type" => "object"}, label) when is_map(payload) do
+    exact_keys(payload, [], label)
   end
 
   defp exact_schema_properties(_payload, _schema, label) do

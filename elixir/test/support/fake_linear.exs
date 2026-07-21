@@ -11,6 +11,7 @@ defmodule SymphonyElixir.TestSupport.FakeLinear do
 
   import ExUnit.Assertions
 
+  alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.TestSupport.FakeLinear.{Plug, State}
 
   @default_states %{
@@ -18,6 +19,7 @@ defmodule SymphonyElixir.TestSupport.FakeLinear do
     "In Progress" => "state-in-progress",
     "Done" => "state-done"
   }
+  @trusted_linear_endpoint "https://api.linear.app/graphql"
 
   @type fixture :: %{
           endpoint: String.t(),
@@ -67,10 +69,15 @@ defmodule SymphonyElixir.TestSupport.FakeLinear do
   def workflow_overrides(fixture) do
     [
       tracker_kind: "linear",
-      tracker_endpoint: fixture.endpoint,
+      tracker_endpoint: @trusted_linear_endpoint,
       tracker_api_token: fixture.token,
       tracker_project_slug: fixture.project_slug
     ]
+  end
+
+  @spec request_fun(fixture()) :: (map(), list() -> {:ok, map()} | {:error, term()})
+  def request_fun(fixture) do
+    Client.bounded_request_fun_for_test(fixture.endpoint, 2 * 1_024 * 1_024)
   end
 
   @spec issue(keyword()) :: map()

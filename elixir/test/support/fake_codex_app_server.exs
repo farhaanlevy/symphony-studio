@@ -22,9 +22,22 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
   @wait_poll_interval_ms 5
   @max_generated_bytes 64 * 1024 * 1024
   @client_params_schemas %{
+    "account/read" => "json/v2/GetAccountParams.json",
+    "collaborationMode/list" => "experimental/json/v2/CollaborationModeListParams.json",
+    "experimentalFeature/list" => "json/v2/ExperimentalFeatureListParams.json",
     "initialize" => "json/v1/InitializeParams.json",
+    "model/list" => "json/v2/ModelListParams.json",
     "thread/start" => "experimental/json/v2/ThreadStartParams.json",
-    "turn/start" => "experimental/json/v2/TurnStartParams.json"
+    "turn/start" => "json/v2/TurnStartParams.json"
+  }
+  @client_paramless_methods ~w(account/rateLimits/read account/usage/read)
+  @response_schemas %{
+    "account/rateLimits/read" => "json/v2/GetAccountRateLimitsResponse.json",
+    "account/read" => "json/v2/GetAccountResponse.json",
+    "account/usage/read" => "json/v2/GetAccountTokenUsageResponse.json",
+    "collaborationMode/list" => "experimental/json/v2/CollaborationModeListResponse.json",
+    "experimentalFeature/list" => "json/v2/ExperimentalFeatureListResponse.json",
+    "model/list" => "json/v2/ModelListResponse.json"
   }
 
   @type fixture :: %{
@@ -169,17 +182,24 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
 
   @spec assert_client_message_valid!(map()) :: :ok
   def assert_client_message_valid!(%{"method" => "initialized"} = payload) do
-    _validated = validate_schema!(payload, "experimental/json/ClientNotification.json")
+    _validated = validate_schema!(payload, "json/ClientNotification.json")
     assert Enum.sort(Map.keys(payload)) == ["method"]
+    :ok
+  end
+
+  def assert_client_message_valid!(%{"id" => _id, "method" => method} = payload)
+      when method in @client_paramless_methods do
+    _validated = validate_schema!(payload, client_request_schema(method))
+    assert Enum.sort(Map.keys(payload)) == ["id", "method"]
     :ok
   end
 
   def assert_client_message_valid!(%{"id" => _id, "method" => method, "params" => params} = payload)
       when is_map(params) do
     params_schema = Map.fetch!(@client_params_schemas, method)
-    _validated = validate_schema!(payload, "experimental/json/ClientRequest.json")
+    _validated = validate_schema!(payload, client_request_schema(method))
     schema = load_schema!(params_schema)
-    allowed_params = schema |> Map.fetch!("properties") |> Map.keys()
+    allowed_params = schema |> Map.get("properties", %{}) |> Map.keys()
 
     assert Map.keys(payload) -- ["id", "method", "params"] == [],
            "client request contains unadvertised envelope fields"
@@ -235,6 +255,14 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
     _validated = validate_schema!(payload, "json/JSONRPCResponse.json")
     assert_exact_keys!(payload, ~w(id result), "server response envelope")
     send_json(payload, opts)
+  end
+
+  @spec response_for(integer() | String.t(), String.t(), map(), keyword()) :: map()
+  def response_for(id, method, result, opts \\ [])
+      when is_binary(method) and is_map(result) and is_list(opts) do
+    schema_path = Map.fetch!(@response_schemas, method)
+    _validated = validate_schema!(result, schema_path)
+    response(id, result, opts)
   end
 
   @spec response_error(integer() | String.t(), integer(), String.t(), term(), keyword()) :: map()
@@ -622,7 +650,12 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
   end
 
   defp validation_contract(%{"method" => "initialized"}) do
-    schema_contract("client_notification", "experimental/json/ClientNotification.json")
+    schema_contract("client_notification", "json/ClientNotification.json")
+  end
+
+  defp validation_contract(%{"method" => method}) when method in @client_paramless_methods do
+    schema_contract("client_request_paramless", client_request_schema(method))
+    |> Map.put("method", method)
   end
 
   defp validation_contract(%{"method" => method}) when is_map_key(@client_params_schemas, method) do
@@ -655,6 +688,11 @@ defmodule SymphonyElixir.TestSupport.FakeCodexAppServer do
     do: "json/ExecCommandApprovalResponse.json"
 
   defp callback_response_schema(_result), do: nil
+
+  defp client_request_schema(method) when method in ~w(collaborationMode/list thread/start),
+    do: "experimental/json/ClientRequest.json"
+
+  defp client_request_schema(_method), do: "json/ClientRequest.json"
 
   defp schema_contract(kind, relative_path) do
     %{

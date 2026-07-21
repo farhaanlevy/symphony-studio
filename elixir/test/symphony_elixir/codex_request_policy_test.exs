@@ -15,6 +15,7 @@ defmodule SymphonyElixir.Codex.RequestPolicyTest do
           "account/usage/read",
           "collaborationMode/list",
           "experimentalFeature/list",
+          "hooks/list",
           "model/list",
           "thread/list",
           "thread/read"
@@ -26,8 +27,10 @@ defmodule SymphonyElixir.Codex.RequestPolicyTest do
 
     for method <- [
           "account/rateLimitResetCredit/consume",
+          "config/batchWrite",
           "review/start",
           "thread/start",
+          "turn/interrupt",
           "turn/start"
         ] do
       assert RequestPolicy.classify(method) == :side_effecting
@@ -61,6 +64,16 @@ defmodule SymphonyElixir.Codex.RequestPolicyTest do
     assert left_hash =~ ~r/\A[0-9a-f]{64}\z/
     refute left_hash == RequestPolicy.canonical_hash("thread/read", Map.put(right, "extra", true))
     refute left_hash == RequestPolicy.canonical_hash("thread/list", right)
+  end
+
+  test "canonical request hashes preserve omitted params as a distinct wire contract" do
+    omitted_hash = RequestPolicy.canonical_hash("account/rateLimits/read", :omitted)
+    object_hash = RequestPolicy.canonical_hash("account/rateLimits/read", %{})
+
+    assert byte_size(omitted_hash) == 64
+    assert omitted_hash =~ ~r/\A[0-9a-f]{64}\z/
+    refute omitted_hash == object_hash
+    assert omitted_hash == RequestPolicy.canonical_hash("account/rateLimits/read", :omitted)
   end
 
   test "transport errors have stable operator-safe messages for every typed kind" do

@@ -688,33 +688,303 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
   end
 
-  test "linear client logs response bodies for non-200 graphql responses" do
-    log =
+  test "linear client logs only content-free failure metadata" do
+    status_body_canary = "private-linear-response-body-canary"
+    operation_canary = "PrivateLinearOperationCanary"
+    tracker = %{api_key: "private-linear-api-key-canary", endpoint: "https://api.linear.app/graphql"}
+
+    status_log =
       ExUnit.CaptureLog.capture_log(fn ->
         assert {:error, {:linear_api_status, 400}} =
                  Client.graphql(
                    "query Viewer { viewer { id } }",
                    %{},
+                   operation_name: operation_canary,
+                   tracker: tracker,
                    request_fun: fn _payload, _headers ->
-                     {:ok,
-                      %{
-                        status: 400,
-                        body: %{
-                          "errors" => [
-                            %{
-                              "message" => "Variable \"$ids\" got invalid value",
-                              "extensions" => %{"code" => "BAD_USER_INPUT"}
-                            }
-                          ]
-                        }
-                      }}
+                     {:ok, %{status: 400, body: %{"errors" => [status_body_canary]}}}
                    end
                  )
       end)
 
-    assert log =~ "Linear GraphQL request failed status=400"
-    assert log =~ ~s(body=%{"errors" => [%{"extensions" => %{"code" => "BAD_USER_INPUT"})
-    assert log =~ "Variable \\\"$ids\\\" got invalid value"
+    assert status_log =~ "Linear GraphQL request failed class=api_status status=400"
+    refute status_log =~ status_body_canary
+    refute status_log =~ operation_canary
+
+    request_reason = {:private_transport_reason, "private-linear-request-reason-canary"}
+
+    request_log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:linear_api_request, ^request_reason}} =
+                 Client.graphql(
+                   "query Viewer { viewer { id } }",
+                   %{},
+                   tracker: tracker,
+                   request_fun: fn _payload, _headers -> {:error, request_reason} end
+                 )
+      end)
+
+    assert request_log =~ "Linear GraphQL request failed class=request_error"
+    refute request_log =~ "private-linear-request-reason-canary"
+    refute request_log =~ "private_transport_reason"
+  end
+
+  test "linear endpoint trust policy rejects workflow-controlled credential sinks before authorization" do
+    api_key = "PRIVATE-LINEAR-ENDPOINT-KEY-CANARY"
+
+    untrusted_endpoints = [
+      "http://api.linear.app/graphql",
+      "https://attacker.invalid/graphql",
+      "https://api.linear.app.attacker.invalid/graphql",
+      "https://user@api.linear.app/graphql",
+      "https://api.linear.app:444/graphql",
+      "https://api.linear.app/graphql?redirect=attacker",
+      "https://api.linear.app/graphql#fragment",
+      "https://api.linear.app/not-graphql",
+      "not a url"
+    ]
+
+    for endpoint <- untrusted_endpoints do
+      assert {:error, {:invalid_workflow_config, message}} =
+               Schema.parse(%{
+                 tracker: %{
+                   api_key: api_key,
+                   endpoint: endpoint,
+                   kind: "linear",
+                   project_slug: "project"
+                 }
+               })
+
+      assert message == "tracker.endpoint must be the canonical Linear GraphQL endpoint"
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :untrusted_linear_endpoint} =
+                   Client.graphql("query Viewer { viewer { id } }", %{},
+                     tracker: %{api_key: api_key, endpoint: endpoint},
+                     request_fun: fn _payload, _headers ->
+                       send(self(), {:untrusted_endpoint_requested, endpoint})
+                       {:ok, %{status: 200, body: %{"data" => %{}}}}
+                     end
+                   )
+        end)
+
+      refute_received {:untrusted_endpoint_requested, ^endpoint}
+      refute log =~ api_key
+      refute log =~ endpoint
+    end
+
+    for endpoint <- ["https://api.linear.app/graphql", "https://api.linear.app:443/graphql"] do
+      assert {:ok, settings} =
+               Schema.parse(%{
+                 tracker: %{
+                   api_key: api_key,
+                   endpoint: endpoint,
+                   kind: "linear",
+                   project_slug: "project"
+                 }
+               })
+
+      assert settings.tracker.endpoint == endpoint
+
+      assert {:ok, %{"data" => %{"viewer" => %{"id" => "viewer"}}}} =
+               Client.graphql("query Viewer { viewer { id } }", %{},
+                 tracker: %{api_key: api_key, endpoint: endpoint},
+                 request_fun: fn _payload, headers ->
+                   send(self(), {:trusted_endpoint_requested, endpoint, headers})
+                   {:ok, %{status: 200, body: %{"data" => %{"viewer" => %{"id" => "viewer"}}}}}
+                 end
+               )
+
+      assert_received {:trusted_endpoint_requested, ^endpoint, headers}
+      assert {"Authorization", api_key} in headers
+    end
+  end
+
+  test "ordinary Linear tracker reads sanitize private transport and GraphQL errors" do
+    transport_canary = "PRIVATE-LINEAR-TRANSPORT-CANARY"
+    graphql_canary = "PRIVATE-LINEAR-GRAPHQL-CANARY"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_endpoint: "https://api.linear.app/graphql",
+      tracker_api_token: "private-linear-api-key-canary",
+      tracker_project_slug: "project",
+      tracker_assignee: nil
+    )
+
+    transport_log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Client.with_request_fun_for_test(
+          fn _payload, _headers ->
+            {:error, {:private_transport, transport_canary}}
+          end,
+          fn ->
+            assert {:error, :linear_transport_failed} = Client.fetch_candidate_issues()
+            assert {:error, :linear_transport_failed} = Client.fetch_issues_by_states(["Todo"])
+            assert {:error, :linear_transport_failed} = Client.fetch_issue_states_by_ids(["issue-1"])
+          end
+        )
+      end)
+
+    refute transport_log =~ transport_canary
+    refute transport_log =~ "private_transport"
+
+    graphql_log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Client.with_request_fun_for_test(
+          fn _payload, _headers ->
+            {:ok,
+             %{
+               status: 200,
+               body: %{"errors" => [%{"extensions" => %{"token" => graphql_canary}}]}
+             }}
+          end,
+          fn ->
+            assert {:error, :linear_graphql_failed} = Client.fetch_candidate_issues()
+            assert {:error, :linear_graphql_failed} = Client.fetch_issues_by_states(["Todo"])
+            assert {:error, :linear_graphql_failed} = Client.fetch_issue_states_by_ids(["issue-1"])
+
+            assert {:ok, %{"errors" => [%{"extensions" => %{"token" => ^graphql_canary}}]}} =
+                     Client.graphql("query RawTool { viewer { id } }", %{})
+          end
+        )
+      end)
+
+    refute graphql_log =~ graphql_canary
+
+    assert {:error, :linear_tracker_failed} =
+             Client.fetch_issue_states_by_ids_for_test(["issue-1"], fn _query, _variables ->
+               {:error, {:private_adapter_error, transport_canary}}
+             end)
+  end
+
+  test "candidate pagination rejects partial GraphQL data with top-level errors" do
+    graphql_canary = "PRIVATE-LINEAR-PARTIAL-CANDIDATE-CANARY"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_endpoint: "https://api.linear.app/graphql",
+      tracker_api_token: "private-linear-api-key-canary",
+      tracker_project_slug: "project",
+      tracker_assignee: nil
+    )
+
+    partial_body = %{
+      "data" => %{
+        "issues" => %{
+          "nodes" => [linear_issue_payload("candidate-partial")],
+          "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+        }
+      },
+      "errors" => [%{"extensions" => %{"token" => graphql_canary}}]
+    }
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Client.with_request_fun_for_test(
+          fn payload, _headers ->
+            send(self(), {:partial_candidate_request, payload})
+            {:ok, %{status: 200, body: partial_body}}
+          end,
+          fn ->
+            assert {:error, :linear_graphql_failed} = Client.fetch_candidate_issues()
+          end
+        )
+      end)
+
+    assert_received {:partial_candidate_request, %{"query" => query}}
+    assert query =~ "SymphonyLinearPoll"
+    refute log =~ graphql_canary
+  end
+
+  test "issue state refresh rejects partial GraphQL data and preserves raw tool responses" do
+    graphql_canary = "PRIVATE-LINEAR-PARTIAL-REFRESH-CANARY"
+
+    partial_body = %{
+      "data" => %{"issues" => %{"nodes" => [linear_issue_payload("refresh-partial")]}},
+      "errors" => [%{"extensions" => %{"token" => graphql_canary}}]
+    }
+
+    assert {:error, :linear_graphql_failed} =
+             Client.fetch_issue_states_by_ids_for_test(["refresh-partial"], fn query, variables ->
+               assert query =~ "SymphonyLinearIssuesById"
+               assert variables.ids == ["refresh-partial"]
+               {:ok, partial_body}
+             end)
+
+    assert {:ok, ^partial_body} =
+             Client.graphql("query RawTool { viewer { id } }", %{},
+               tracker: %{
+                 api_key: "private-linear-api-key-canary",
+                 endpoint: "https://api.linear.app/graphql"
+               },
+               request_fun: fn _payload, _headers ->
+                 {:ok, %{status: 200, body: partial_body}}
+               end
+             )
+  end
+
+  test "viewer assignee resolution rejects partial GraphQL data before polling issues" do
+    graphql_canary = "PRIVATE-LINEAR-PARTIAL-VIEWER-CANARY"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_endpoint: "https://api.linear.app/graphql",
+      tracker_api_token: "private-linear-api-key-canary",
+      tracker_project_slug: "project",
+      tracker_assignee: "me"
+    )
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Client.with_request_fun_for_test(
+          fn payload, _headers ->
+            send(self(), {:partial_viewer_request, payload})
+
+            {:ok,
+             %{
+               status: 200,
+               body: %{
+                 "data" => %{"viewer" => %{"id" => "viewer-1"}},
+                 "errors" => [%{"extensions" => %{"token" => graphql_canary}}]
+               }
+             }}
+          end,
+          fn ->
+            assert {:error, :linear_graphql_failed} = Client.fetch_candidate_issues()
+          end
+        )
+      end)
+
+    assert_received {:partial_viewer_request, %{"query" => query}}
+    assert query =~ "SymphonyLinearViewer"
+    refute_received {:partial_viewer_request, _second_payload}
+    refute log =~ graphql_canary
+  end
+
+  test "dispatch revalidation propagates a sanitized partial GraphQL failure" do
+    stale_issue = %Issue{
+      id: "dispatch-partial",
+      identifier: "MT-PARTIAL",
+      title: "Must not dispatch from partial data",
+      state: "Todo",
+      blocked_by: []
+    }
+
+    partial_body = %{
+      "data" => %{"issues" => %{"nodes" => [linear_issue_payload("dispatch-partial")]}},
+      "errors" => [%{"message" => "PRIVATE-LINEAR-PARTIAL-DISPATCH-CANARY"}]
+    }
+
+    fetcher = fn ["dispatch-partial"] ->
+      Client.fetch_issue_states_by_ids_for_test(["dispatch-partial"], fn _query, _variables ->
+        {:ok, partial_body}
+      end)
+    end
+
+    assert {:error, :linear_graphql_failed} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
   end
 
   test "orchestrator sorts dispatch by priority then oldest created_at" do
@@ -2429,6 +2699,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   defp wait_for_path(path, timeout_ms) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     wait_for_path_until(path, deadline_ms)
+  end
+
+  defp linear_issue_payload(issue_id) do
+    %{
+      "id" => issue_id,
+      "identifier" => "MT-PARTIAL",
+      "title" => "Partial GraphQL issue",
+      "description" => "Must be rejected when top-level errors are present",
+      "priority" => 1,
+      "state" => %{"name" => "Todo"},
+      "labels" => %{"nodes" => [%{"name" => "symphony"}]},
+      "inverseRelations" => %{"nodes" => []},
+      "createdAt" => "2026-07-17T00:00:00Z",
+      "updatedAt" => "2026-07-17T00:00:00Z"
+    }
   end
 
   defp await_supervised_child_linked_to(supervisor, owner, timeout_ms) do

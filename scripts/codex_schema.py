@@ -79,8 +79,34 @@ MANIFEST_TOP_LEVEL_KEYS = {
     "matrix",
 }
 
+RUNTIME_STATUS_PAIRS = {
+    "not_run": "pending_r0_06",
+    "blocked": "blocked_r0_06",
+    "pass": "pass",
+}
+RUNTIME_EVIDENCE_KEYS = {
+    "hashAlgorithm",
+    "readinessManifestSha256",
+    "schemaManifestBasisSha256",
+    "sourceSha256",
+}
+RUNTIME_EVIDENCE_HASH_ALGORITHM = "sha256-canonical-json-v1"
+
 LOCK_ROOT = Path("/tmp") / f"symphony-schema-locks-{os.geteuid()}"
 SNAPSHOT_ROOT = Path("/tmp") / f"symphony-codex-fixture-snapshots-{os.geteuid()}"
+READINESS_RELATIVE = "artifacts/readiness/implementation-readiness.json"
+READINESS_TRANSACTION_DIRECTORY = "symphony-readiness-transaction"
+READINESS_TRANSACTION_VERSION = 3
+READINESS_SCHEMA_INSTALL = ".manifest.readiness-install"
+READINESS_ARTIFACT_INSTALL = ".implementation-readiness.install"
+READINESS_INDEX_CANDIDATE = "index.candidate"
+READINESS_INDEX_COMMIT = "index.commit"
+READINESS_INDEX_ROLLBACK = "index.rollback"
+READINESS_INDEX_VERIFIER = "index.verifier"
+READINESS_VERIFICATION_ATTEMPT = "verification-attempt.json"
+READINESS_VERIFICATION_ATTEMPT_PREPARE = ".verification-attempt.prepare"
+READINESS_VERIFICATION = "verification.json"
+READINESS_VERIFICATION_PREPARE = ".verification.prepare"
 
 # This is the canonical semantic SHA-256 of scripts/codex_schema_matrix.json.
 # Update it only after an intentional matrix review; whitespace-only changes do
@@ -512,6 +538,7 @@ FIXTURE_TEST_FILES = (
     "test/symphony_elixir/codex_request_policy_test.exs",
     "test/symphony_elixir/codex_stderr_diagnostics_test.exs",
     "test/symphony_elixir/dynamic_tool_test.exs",
+    "test/symphony_elixir/extensions_test.exs",
     "test/symphony_elixir/event_sink_test.exs",
     "test/symphony_elixir/event_test.exs",
     "test/symphony_elixir/fake_codex_app_server_test.exs",
@@ -526,6 +553,20 @@ FIXTURE_TEST_FILES = (
     "test/symphony_elixir/hook_cancellation_containment_test.exs",
     "test/symphony_elixir/runtime_supervisor_test.exs",
     "test/symphony_elixir/tracker_outbox_test.exs",
+    "test/symphony_elixir/codex_capability_error_test.exs",
+    "test/symphony_elixir/codex_capability_decoder_test.exs",
+    "test/symphony_elixir/codex_capability_discovery_test.exs",
+    "test/symphony_elixir/codex_capability_report_test.exs",
+    "test/symphony_elixir/codex_depth_guard_test.exs",
+    "test/symphony_elixir/codex_identity_binding_test.exs",
+    "test/symphony_elixir/codex_quota_shape_test.exs",
+    "test/symphony_elixir/fake_responses_test.exs",
+    "test/symphony_elixir/codex_v2_cap_hook_conformance_test.exs",
+    "test/mix/tasks/studio_capabilities_test.exs",
+    "test/symphony_elixir/linear_capability_discovery_test.exs",
+    "test/symphony_elixir/linear_error_boundary_test.exs",
+    "test/symphony_elixir/linear_read_only_broker_test.exs",
+    "test/mix/tasks/studio_linear_capabilities_test.exs",
 )
 VENDORED_ERLEXEC_SOURCE_FILES = (
     ".gitignore",
@@ -557,7 +598,7 @@ ERLEXEC_PATH_ENV = "SYMPHONY_ERLEXEC_PATH"
 FIXTURE_TEST_COMMAND = ("mise", "exec", "--", "mix", "test", *FIXTURE_TEST_FILES, "--seed", "0")
 FIXTURE_DEPENDENCY_COMMAND = ("mise", "exec", "--", "mix", "deps.get", "--check-locked")
 FIXTURE_DEPENDENCY_COMPILE_COMMAND = ("mise", "exec", "--", "mix", "deps.compile")
-FIXTURE_EXPECTED_TEST_COUNT = 411
+FIXTURE_EXPECTED_TEST_COUNT = 549
 TEST_MANIFEST_ENV = "SYMPHONY_CODEX_SCHEMA_TEST_MANIFEST"
 RESERVED_MANIFEST_PATTERNS = (".manifest.*",)
 LF_NORMALIZED_SUFFIXES = {
@@ -593,6 +634,10 @@ class VendoredErlexecSourceProof:
 
 class SchemaError(RuntimeError):
     """Raised when the pinned schema contract is not satisfied."""
+
+
+class AmbiguousReadinessTransactionError(SchemaError):
+    """Raised when recovery must preserve an independent writer and journal."""
 
 
 def read_version(version_file: Path | None = None) -> str:
@@ -872,6 +917,31 @@ def secure_rename(source: Path, destination: Path) -> None:
             )
 
 
+def secure_rename_noreplace(source: Path, destination: Path) -> None:
+    """Rename a regular transaction entry only if the destination is absent."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise SchemaError("platform lacks renameat2 required for transaction fencing")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    with anchored_parent(source) as (source_parent, source_name):
+        with anchored_parent(destination) as (destination_parent, destination_name):
+            result = renameat2(
+                source_parent,
+                os.fsencode(source_name),
+                destination_parent,
+                os.fsencode(destination_name),
+                1,  # RENAME_NOREPLACE
+            )
+            if result != 0:
+                error = ctypes.get_errno()
+                raise SchemaError(
+                    f"cannot reserve transaction destination: {os.strerror(error)}"
+                )
+
+
 def secure_exchange(source: Path, destination: Path) -> None:
     """Atomically exchange two entries so a displaced writer is recoverable."""
 
@@ -1047,7 +1117,9 @@ def fixture_source_files(
         "scripts/codex_schema.py",
         "scripts/codex_schema_matrix.json",
         "scripts/run_codex_schema_tests.py",
+        "scripts/studio_readiness.py",
         "scripts/test_codex_schema.py",
+        "scripts/test_studio_readiness.py",
         *(f"elixir/{path}" for path in FIXTURE_TEST_FILES),
         *(f"elixir/vendor/erlexec/{path}" for path in VENDORED_ERLEXEC_SOURCE_FILES),
     }
@@ -1070,6 +1142,11 @@ def fixture_source_files(
     static_root = repo_root / "elixir" / "priv" / "static"
     relative_files.update(
         path.relative_to(repo_root).as_posix() for path in regular_tree_files(static_root)
+    )
+
+    hooks_root = repo_root / "elixir" / "priv" / "hooks"
+    relative_files.update(
+        path.relative_to(repo_root).as_posix() for path in regular_tree_files(hooks_root)
     )
 
     for relative in relative_files:
@@ -2376,10 +2453,17 @@ def validate_compatibility(
     if date.fromisoformat(tested_at) < date.fromisoformat(generated_at):
         raise SchemaError("manifest compatibility date cannot precede schema generation")
 
+    runtime_status = compatibility.get("runtimeCapabilities")
+    expected_overall = RUNTIME_STATUS_PAIRS.get(runtime_status)
+    if expected_overall is None:
+        raise SchemaError(
+            "manifest compatibility runtimeCapabilities must be 'not_run', 'blocked', or 'pass'"
+        )
+
     expected_static = {
         "schemaContract": "pass",
-        "runtimeCapabilities": "not_run",
-        "overall": "pending_r0_06",
+        "runtimeCapabilities": runtime_status,
+        "overall": expected_overall,
         "testedAt": tested_at,
     }
     for key, expected in expected_static.items():
@@ -2434,6 +2518,29 @@ def validate_compatibility(
     else:
         raise SchemaError("manifest fixture evidence is not sealed")
 
+    runtime_evidence = compatibility.get("runtimeEvidence")
+    if runtime_status == "not_run":
+        if "runtimeEvidence" in compatibility:
+            raise SchemaError("not-run runtime compatibility must not contain runtime evidence")
+    else:
+        if fixture_status != "pass" or transport_status != "pass":
+            raise SchemaError("paired runtime compatibility requires sealed fixture evidence")
+        if not isinstance(runtime_evidence, dict):
+            raise SchemaError("paired runtime compatibility requires runtime evidence")
+        if set(runtime_evidence) != RUNTIME_EVIDENCE_KEYS:
+            raise SchemaError("manifest runtime evidence has unexpected or missing keys")
+        if runtime_evidence.get("hashAlgorithm") != RUNTIME_EVIDENCE_HASH_ALGORITHM:
+            raise SchemaError("manifest runtime evidence hash algorithm is unsupported")
+        for key in (
+            "readinessManifestSha256",
+            "schemaManifestBasisSha256",
+            "sourceSha256",
+        ):
+            value = runtime_evidence.get(key)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise SchemaError(f"manifest runtime evidence {key} is not a lowercase SHA-256")
+        expected_keys.add("runtimeEvidence")
+
     if set(compatibility) != expected_keys:
         raise SchemaError("manifest compatibility record has unexpected or missing keys")
 
@@ -2465,7 +2572,10 @@ def build_unsealed_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     compatibility = candidate["compatibility"]
     compatibility["fixtures"] = "not_run"
     compatibility["transportConformance"] = "not_run"
+    compatibility["runtimeCapabilities"] = "not_run"
+    compatibility["overall"] = "pending_r0_06"
     compatibility.pop("fixtureEvidence", None)
+    compatibility.pop("runtimeEvidence", None)
     return candidate
 
 
@@ -3154,8 +3264,12 @@ def prepare_fixture_snapshot(
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MAX_DIAGNOSTIC_OUTPUT_BYTES = 32 * 1024
 MAX_CHILD_OUTPUT_BYTES = 1024 * 1024
+FIXTURE_OFFLINE_HEX_MAX_ENTRIES = 50_000
+FIXTURE_OFFLINE_HEX_MAX_BYTES = 512 * 1024 * 1024
+FIXTURE_OFFLINE_NIF_MAX_FILES = 64
+FIXTURE_OFFLINE_NIF_MAX_BYTES = 64 * 1024 * 1024
 CODEX_CHILD_DEADLINE_SECONDS = 120.0
-FIXTURE_CHILD_DEADLINE_SECONDS = 300.0
+FIXTURE_CHILD_DEADLINE_SECONDS = 600.0
 PROCESS_TERMINATION_GRACE_SECONDS = 1.0
 SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b("
@@ -3547,6 +3661,191 @@ def redacted_bounded_process_output(
     )
 
 
+def copy_exact_regular_file(
+    source: Path,
+    destination: Path,
+    expected_identity: Identity,
+) -> None:
+    """Copy one bounded, immutable input without following either pathname."""
+
+    if expected_identity[2] <= 0:
+        raise SchemaError("fixture offline Hex input contains an empty file")
+    mkdir_parents_no_follow(destination.parent, mode=0o700)
+    destination_descriptor: int | None = None
+    created = False
+    try:
+        with anchored_descriptor(source, directory=False) as source_descriptor:
+            if metadata_identity(os.fstat(source_descriptor)) != expected_identity:
+                raise SchemaError("fixture offline Hex input changed before copy")
+            with anchored_parent(destination) as (parent, name):
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+                destination_descriptor = os.open(name, flags, 0o600, dir_fd=parent)
+                created = True
+                remaining = expected_identity[2]
+                while remaining:
+                    chunk = os.read(source_descriptor, min(64 * 1024, remaining))
+                    if not chunk:
+                        raise SchemaError("fixture offline Hex input ended during copy")
+                    offset = 0
+                    while offset < len(chunk):
+                        written = os.write(destination_descriptor, chunk[offset:])
+                        if written <= 0:
+                            raise SchemaError("fixture offline Hex input copy made no progress")
+                        offset += written
+                    remaining -= len(chunk)
+                if os.read(source_descriptor, 1):
+                    raise SchemaError("fixture offline Hex input exceeded its byte bound")
+                if metadata_identity(os.fstat(source_descriptor)) != expected_identity:
+                    raise SchemaError("fixture offline Hex input changed during copy")
+                os.fchmod(destination_descriptor, 0o600)
+                os.fsync(destination_descriptor)
+        if destination_descriptor is not None:
+            os.close(destination_descriptor)
+            destination_descriptor = None
+        copied = regular_file_identity(destination)
+        if copied[2] != expected_identity[2] or regular_file_mode(destination) != 0o600:
+            raise SchemaError("fixture offline Hex input copy differs from its source")
+    except BaseException:
+        if destination_descriptor is not None:
+            os.close(destination_descriptor)
+        if created and path_kind_no_follow(destination) == "file":
+            with anchored_parent(destination) as (parent, name):
+                os.unlink(name, dir_fd=parent)
+        raise
+
+
+def install_fixture_offline_hex_home(source_root: Path, destination_root: Path) -> None:
+    """Install a bounded writable clone of the outer gate's read-only Hex cache."""
+
+    source_root = lexical_absolute(source_root)
+    root_identity = directory_identity(source_root)
+    if path_kind_no_follow(destination_root) is not None:
+        raise SchemaError("fixture private offline Hex destination already exists")
+
+    entries: list[tuple[str, bool, Identity]] = []
+    pending: list[tuple[Path, Path]] = [(source_root, Path())]
+    total_bytes = 0
+    while pending:
+        directory, relative_directory = pending.pop()
+        with anchored_descriptor(directory, directory=True) as descriptor:
+            directory_before = metadata_identity(os.fstat(descriptor))
+            children: list[tuple[Path, Path]] = []
+            with os.scandir(descriptor) as scanner:
+                for entry in scanner:
+                    if len(entries) >= FIXTURE_OFFLINE_HEX_MAX_ENTRIES:
+                        raise SchemaError("fixture offline Hex cache contains too many entries")
+                    metadata = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                    relative = relative_directory / entry.name
+                    if stat.S_ISDIR(metadata.st_mode):
+                        entries.append((relative.as_posix(), True, metadata_identity(metadata)))
+                        children.append((directory / entry.name, relative))
+                    elif stat.S_ISREG(metadata.st_mode):
+                        total_bytes += metadata.st_size
+                        if total_bytes > FIXTURE_OFFLINE_HEX_MAX_BYTES:
+                            raise SchemaError("fixture offline Hex cache exceeds its byte bound")
+                        entries.append((relative.as_posix(), False, metadata_identity(metadata)))
+                    else:
+                        raise SchemaError("fixture offline Hex cache contains an unsafe entry")
+            if metadata_identity(os.fstat(descriptor)) != directory_before:
+                raise SchemaError("fixture offline Hex cache changed during bounded traversal")
+            pending.extend(children)
+
+    entries.sort(key=lambda item: item[0])
+    top_level = {
+        (relative, "directory" if is_directory else "file")
+        for relative, is_directory, _identity in entries
+        if "/" not in relative
+    }
+    if top_level != {("cache.ets", "file"), ("packages", "directory")}:
+        raise SchemaError("fixture offline Hex cache has an invalid top-level inventory")
+    if not any(
+        not is_directory and relative.startswith("packages/")
+        for relative, is_directory, _identity in entries
+    ):
+        raise SchemaError("fixture offline Hex cache contains no package files")
+
+    mkdir_parents_no_follow(destination_root, mode=0o700)
+    os.chmod(destination_root, 0o700)
+    try:
+        for relative, is_directory, _identity in entries:
+            if is_directory:
+                destination = destination_root / relative
+                mkdir_parents_no_follow(destination, mode=0o700)
+                os.chmod(destination, 0o700)
+        for relative, is_directory, expected_identity in entries:
+            if not is_directory:
+                copy_exact_regular_file(
+                    source_root / relative,
+                    destination_root / relative,
+                    expected_identity,
+                )
+        if directory_identity(source_root) != root_identity:
+            raise SchemaError("fixture offline Hex cache changed while copied")
+        for relative, is_directory, expected_identity in entries:
+            if is_directory:
+                if directory_identity(source_root / relative) != expected_identity:
+                    raise SchemaError("fixture offline Hex directory changed while copied")
+            elif regular_file_identity(source_root / relative) != expected_identity:
+                raise SchemaError("fixture offline Hex file changed while copied")
+    except BaseException:
+        shutil.rmtree(destination_root, ignore_errors=True)
+        raise
+
+
+def install_fixture_offline_nif_cache(source_root: Path, destination_root: Path) -> None:
+    """Clone the outer gate's bounded precompiled-NIF cache into fixture state."""
+
+    source_root = lexical_absolute(source_root)
+    root_identity = directory_identity(source_root)
+    if path_kind_no_follow(destination_root) is not None:
+        raise SchemaError("fixture private offline NIF destination already exists")
+
+    entries: list[tuple[str, Identity]] = []
+    total_bytes = 0
+    with anchored_descriptor(source_root, directory=True) as descriptor:
+        before = metadata_identity(os.fstat(descriptor))
+        with os.scandir(descriptor) as scanner:
+            for entry in scanner:
+                if len(entries) >= FIXTURE_OFFLINE_NIF_MAX_FILES:
+                    raise SchemaError("fixture offline NIF cache contains too many files")
+                metadata = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.tar\.gz", entry.name
+                    )
+                    is None
+                ):
+                    raise SchemaError("fixture offline NIF cache contains an unsafe entry")
+                total_bytes += metadata.st_size
+                if total_bytes > FIXTURE_OFFLINE_NIF_MAX_BYTES:
+                    raise SchemaError("fixture offline NIF cache exceeds its byte bound")
+                entries.append((entry.name, metadata_identity(metadata)))
+        if metadata_identity(os.fstat(descriptor)) != before:
+            raise SchemaError("fixture offline NIF cache changed during bounded traversal")
+    if not entries:
+        raise SchemaError("fixture offline NIF cache is empty")
+
+    entries.sort(key=lambda item: item[0])
+    mkdir_parents_no_follow(destination_root, mode=0o700)
+    os.chmod(destination_root, 0o700)
+    try:
+        for name, expected_identity in entries:
+            copy_exact_regular_file(
+                source_root / name,
+                destination_root / name,
+                expected_identity,
+            )
+        if directory_identity(source_root) != root_identity:
+            raise SchemaError("fixture offline NIF cache changed while copied")
+        for name, expected_identity in entries:
+            if regular_file_identity(source_root / name) != expected_identity:
+                raise SchemaError("fixture offline NIF archive changed while copied")
+    except BaseException:
+        shutil.rmtree(destination_root, ignore_errors=True)
+        raise
+
+
 def fixture_child_environment(
     runtime_root: Path,
     build_path: Path,
@@ -3568,16 +3867,60 @@ def fixture_child_environment(
     )
     directory_identity(mise_data)
 
+    outer_marker = os.environ.get("SYMPHONY_READINESS_OUTER_SANDBOX")
+    if outer_marker not in {None, "1"}:
+        raise SchemaError("fixture outer-sandbox marker is invalid")
+    offline_hex_source: Path | None = None
+    offline_nif_cache_source: Path | None = None
+    offline_mix_archives: Path | None = None
+    offline_mix_rebar3: Path | None = None
+    if outer_marker == "1":
+        if os.environ.get("HEX_OFFLINE") != "1":
+            raise SchemaError("fixture outer sandbox is not Hex-offline")
+        raw_hex_home = os.environ.get("HEX_HOME")
+        raw_xdg_cache = os.environ.get("XDG_CACHE_HOME")
+        raw_mix_archives = os.environ.get("MIX_ARCHIVES")
+        raw_mix_rebar3 = os.environ.get("MIX_REBAR3")
+        if (
+            not raw_hex_home
+            or not raw_xdg_cache
+            or not raw_mix_archives
+            or not raw_mix_rebar3
+        ):
+            raise SchemaError("fixture outer sandbox lacks its private Mix inputs")
+        offline_hex_source = lexical_absolute(Path(raw_hex_home))
+        offline_nif_cache_source = lexical_absolute(
+            Path(raw_xdg_cache) / "elixir_make"
+        )
+        offline_mix_archives = lexical_absolute(Path(raw_mix_archives))
+        offline_mix_rebar3 = lexical_absolute(Path(raw_mix_rebar3))
+        directory_identity(offline_hex_source)
+        directory_identity(offline_nif_cache_source)
+        directory_identity(offline_mix_archives)
+        regular_file_identity(offline_mix_rebar3)
+        if regular_file_mode(offline_mix_rebar3) & 0o111 == 0:
+            raise SchemaError("fixture outer sandbox Rebar input is not executable")
+
     private_home = runtime_root / "home"
     cache_root = runtime_root / "cache"
     config_root = runtime_root / "config"
     state_root = runtime_root / "state"
     for path in (private_home, cache_root, config_root, state_root):
         mkdir_parents_no_follow(path, mode=0o700)
+    offline_hex_home: Path | None = None
+    if offline_hex_source is not None:
+        offline_hex_home = runtime_root / "offline-hex"
+        install_fixture_offline_hex_home(offline_hex_source, offline_hex_home)
+        assert offline_nif_cache_source is not None
+        install_fixture_offline_nif_cache(
+            offline_nif_cache_source, cache_root / "elixir_make"
+        )
     runtime_erlexec = runtime_root / "vendor" / "erlexec"
     directory_identity(runtime_erlexec)
 
-    return {
+    codex_launcher, _native, _lock, _selected = installed_codex("codex")
+
+    environment = {
         "CLICOLOR": "0",
         "ERL_CRASH_DUMP": str(temporary_path / "erl_crash.dump"),
         "HOME": str(private_home),
@@ -3598,6 +3941,7 @@ def fixture_child_environment(
         "SHELL": "/bin/sh",
         ERLEXEC_PATH_ENV: str(runtime_erlexec),
         "SYMPHONY_FIXTURE_LOG_FILE": str(temporary_path / "symphony.log"),
+        "SYMPHONY_CODEX_CONFORMANCE_BIN": str(codex_launcher),
         "TERM": "dumb",
         TEST_MANIFEST_ENV: str(test_manifest_path),
         "TMPDIR": str(temporary_path),
@@ -3605,6 +3949,12 @@ def fixture_child_environment(
         "XDG_CONFIG_HOME": str(config_root),
         "XDG_STATE_HOME": str(state_root),
     }
+    if offline_hex_home is not None:
+        environment["HEX_HOME"] = str(offline_hex_home)
+        environment["HEX_OFFLINE"] = "1"
+        environment["MIX_ARCHIVES"] = str(offline_mix_archives)
+        environment["MIX_REBAR3"] = str(offline_mix_rebar3)
+    return environment
 
 
 def regular_tree_directories(
@@ -4361,7 +4711,7 @@ def seal_fixtures(args: argparse.Namespace) -> None:
     assert_file_unchanged(manifest_path, committed_identity, committed_digest)
     if read_json(manifest_path) != manifest:
         raise SchemaError("committed schema manifest changed after initial verification")
-    test_manifest = build_test_manifest(manifest, tested_at)
+    test_manifest = build_test_manifest(build_unsealed_manifest(manifest), tested_at)
     test_evidence = test_manifest["compatibility"]["fixtureEvidence"]
     run_snapshot_fixture_tests(test_manifest, test_evidence)
 
@@ -4373,7 +4723,8 @@ def seal_fixtures(args: argparse.Namespace) -> None:
         allow_legacy_fixture_only_seal_source=True,
     )
     assert_directory_unchanged(bundle, bundle_identity)
-    publication_manifest = build_sealed_manifest(fresh_manifest, tested_at)
+    fresh_unsealed_manifest = build_unsealed_manifest(fresh_manifest)
+    publication_manifest = build_sealed_manifest(fresh_unsealed_manifest, tested_at)
     if publication_manifest["compatibility"]["fixtureEvidence"] != test_evidence:
         raise SchemaError("fixture-bound sources or schema artifacts changed while tests ran")
 
@@ -4389,7 +4740,7 @@ def seal_fixtures(args: argparse.Namespace) -> None:
         publication_path = publication_root / "manifest.json"
         write_json_fsync(
             publication_path,
-            build_unsealed_manifest(fresh_manifest),
+            fresh_unsealed_manifest,
             create=True,
         )
         write_json_fsync(publication_path, publication_manifest, create=False)
@@ -4477,11 +4828,60 @@ def verify(args: argparse.Namespace) -> None:
     version = read_version()
     bundle = SCHEMA_ROOT / version
     manifest, entries = verify_bundle(bundle)
+    if manifest["compatibility"]["runtimeCapabilities"] != "not_run":
+        try:
+            import studio_readiness
+
+            studio_readiness.verify_repository_pair(
+                REPO_ROOT,
+                REPO_ROOT / READINESS_RELATIVE,
+                args.codex,
+            )
+        except (ImportError, AttributeError) as error:
+            raise SchemaError(
+                "paired runtime compatibility cannot load the readiness verifier"
+            ) from error
+        except studio_readiness.ReadinessError as error:
+            raise SchemaError(f"implementation-readiness pair verification failed: {error}") from error
     if args.installed:
         installed_codex(args.codex)
     print(
         f"verified Codex schema bundle {version}: {len(entries)} files, "
         f"{manifest['artifacts']['artifactBundleSha256']}"
+    )
+
+
+def verify_source_bound_prepublication(args: argparse.Namespace) -> None:
+    """Verify current staged source, schema, and installed Codex before publication.
+
+    The previously published runtime pair is intentionally outside this command's
+    contract: publication replaces that pair only after the complete gate succeeds.
+    """
+
+    version = read_version()
+    bundle = SCHEMA_ROOT / version
+    manifest, entries = verify_bundle(bundle)
+    try:
+        import studio_readiness
+
+        _static, _matrix, source_manifest = studio_readiness.collect_static_basis(
+            REPO_ROOT, args.codex
+        )
+    except (ImportError, AttributeError) as error:
+        raise SchemaError(
+            "source-bound prepublication verification cannot load the readiness verifier"
+        ) from error
+    except studio_readiness.ReadinessError as error:
+        raise SchemaError(
+            f"source-bound prepublication verification failed: {error}"
+        ) from error
+    if source_manifest != manifest:
+        raise SchemaError(
+            "source-bound prepublication schema differs from the verified bundle"
+        )
+    print(
+        f"verified source-bound prepublication Codex schema bundle {version}: "
+        f"{len(entries)} files, {manifest['artifacts']['artifactBundleSha256']}"
     )
 
 
@@ -4569,6 +4969,1778 @@ def schema_bundle_lock(*, exclusive: bool, repo_root: Path | None = None):
             os.close(lock_descriptor)
 
 
+def pretty_json_bytes(value: Any) -> bytes:
+    try:
+        return (
+            json.dumps(value, allow_nan=False, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise SchemaError(f"readiness transaction value is not canonical JSON: {error}") from error
+
+
+def _git_transaction_command(
+    repo_root: Path,
+    arguments: list[str],
+    *,
+    index_file: Path | None = None,
+    input_bytes: bytes | None = None,
+) -> bytes:
+    # Git plumbing is part of the publication boundary. Inheriting the runner's
+    # environment would expose credentials to ambient helpers such as an
+    # injected core.fsmonitor and would let those helpers rewrite the index.
+    # Keep only the executable search path and deterministic process settings;
+    # command-line config then overrides even repository-local helper config.
+    environment = {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": os.devnull,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": os.environ.get("PATH", os.defpath),
+    }
+    if index_file is not None:
+        environment["GIT_INDEX_FILE"] = str(lexical_absolute(index_file))
+    try:
+        run_options: dict[str, Any] = {
+            "cwd": repo_root,
+            "env": environment,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "check": False,
+            "timeout": 60,
+        }
+        if input_bytes is None:
+            run_options["stdin"] = subprocess.DEVNULL
+        else:
+            run_options["input"] = input_bytes
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *arguments,
+            ],
+            **run_options,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SchemaError(f"readiness Git command failed safely: {arguments[0]}: {error}") from error
+    if len(result.stdout) > 8 * 1024 * 1024 or len(result.stderr) > 8 * 1024 * 1024:
+        raise SchemaError(f"readiness Git command output exceeded its bound: {arguments[0]}")
+    if result.returncode != 0:
+        diagnostic = result.stderr.decode("utf-8", errors="replace").strip()[:512]
+        raise SchemaError(
+            f"readiness Git command failed ({result.returncode}) for {arguments[0]}: {diagnostic}"
+        )
+    return result.stdout
+
+
+def _git_transaction_text(
+    repo_root: Path, arguments: list[str], *, index_file: Path | None = None
+) -> str:
+    try:
+        value = _git_transaction_command(
+            repo_root, arguments, index_file=index_file
+        ).decode("ascii", errors="strict").strip()
+    except UnicodeDecodeError as error:
+        raise SchemaError(f"readiness Git output is not ASCII: {arguments[0]}") from error
+    if not value:
+        raise SchemaError(f"readiness Git command returned an empty value: {arguments[0]}")
+    return value
+
+
+def _git_index_paths(repo_root: Path) -> tuple[Path, Path, Path]:
+    index = Path(
+        _git_transaction_text(
+            repo_root, ["rev-parse", "--path-format=absolute", "--git-path", "index"]
+        )
+    )
+    index = lexical_absolute(index)
+    if not index.is_absolute():
+        raise SchemaError("Git index path is not absolute")
+    index_parent = index.parent
+    with anchored_descriptor(index_parent, directory=True) as descriptor:
+        parent_metadata = os.fstat(descriptor)
+        parent_mode = stat.S_IMODE(parent_metadata.st_mode)
+        if (
+            parent_metadata.st_uid != os.geteuid()
+            or parent_metadata.st_gid != os.getegid()
+            or parent_mode & 0o022
+        ):
+            raise SchemaError("Git index parent is not owner controlled")
+    _git_index_file_metadata(index)
+    lock = Path(f"{index}.lock")
+    transaction = index_parent / READINESS_TRANSACTION_DIRECTORY
+    return index, lock, transaction
+
+
+def _git_index_file_metadata(path: Path) -> tuple[int, int]:
+    """Validate and return the exact mode/group of an index-state file."""
+
+    with anchored_descriptor(path, directory=False) as descriptor:
+        metadata = os.fstat(descriptor)
+        mode = stat.S_IMODE(metadata.st_mode)
+        if metadata.st_uid != os.geteuid() or metadata.st_gid != os.getegid():
+            raise SchemaError("Git index state is not owned by the current operator")
+        if metadata.st_nlink != 1:
+            raise SchemaError("Git index state must have exactly one link")
+        if (
+            mode & 0o700 != 0o600
+            or mode & 0o002
+            or mode & 0o111
+            or mode & 0o7000
+        ):
+            raise SchemaError("Git index state has unsafe permissions")
+        return mode, metadata.st_gid
+
+
+def _set_git_index_file_mode(path: Path, mode: int, gid: int) -> None:
+    """Preserve accepted index metadata despite the process umask."""
+
+    descriptor = open_regular_descriptor_no_follow(path, writable=True)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_uid != os.geteuid()
+            or metadata.st_gid != gid
+            or metadata.st_nlink != 1
+        ):
+            raise SchemaError("readiness candidate index metadata changed")
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if _git_index_file_metadata(path) != (mode, gid):
+        raise SchemaError("readiness candidate index mode was not preserved")
+
+
+def _assert_git_index_file_metadata(
+    path: Path, journal: dict[str, Any], label: str
+) -> None:
+    expected = (journal["indexMode"], journal["indexGid"])
+    if _git_index_file_metadata(path) != expected:
+        raise SchemaError(f"readiness {label} index metadata changed")
+
+
+def _git_index_tree(repo_root: Path, *, index_file: Path | None = None) -> str:
+    value = _git_transaction_text(repo_root, ["write-tree"], index_file=index_file)
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
+        raise SchemaError("Git index tree is not a supported object ID")
+    return value
+
+
+def _git_index_entries_sha256(
+    repo_root: Path, *, index_file: Path | None = None
+) -> str:
+    """Hash the staged paths, modes, object IDs, stages, and index flags."""
+
+    return sha256_bytes(
+        _git_transaction_command(
+            repo_root,
+            ["ls-files", "--stage", "-v", "-z"],
+            index_file=index_file,
+        )
+    )
+
+
+def _git_blob(repo_root: Path, payload: bytes) -> str:
+    value = _git_transaction_command(
+        repo_root, ["hash-object", "-w", "--stdin"], input_bytes=payload
+    ).decode("ascii", errors="strict").strip()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
+        raise SchemaError("Git hash-object returned an invalid object ID")
+    return value
+
+
+def _indexed_mode(repo_root: Path, relative: str) -> str:
+    output = _git_transaction_command(
+        repo_root, ["ls-files", "--stage", "--", relative]
+    ).decode("utf-8", errors="strict").strip()
+    if not output:
+        return "100644"
+    lines = output.splitlines()
+    if len(lines) != 1:
+        raise SchemaError(f"Git index contains an ambiguous entry for {relative}")
+    match = re.fullmatch(r"(100644|100755) [0-9a-f]+ 0\t(.+)", lines[0])
+    if match is None or match.group(2) != relative:
+        raise SchemaError(f"Git index contains an invalid entry for {relative}")
+    return match.group(1)
+
+
+def _unlink_regular_exact(path: Path, expected_sha256: str) -> None:
+    if path_kind_no_follow(path) is None:
+        return
+    if path_kind_no_follow(path) != "file" or sha256_file(path) != expected_sha256:
+        raise SchemaError(f"refusing to remove changed readiness transaction file: {path}")
+    with anchored_parent(path) as (parent, name):
+        os.unlink(name, dir_fd=parent)
+    fsync_directory(path.parent)
+
+
+def _transaction_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise SchemaError(f"readiness transaction {label} is not a lowercase SHA-256")
+    return value
+
+
+def _read_readiness_journal(
+    transaction: Path, repo_root: Path
+) -> dict[str, Any]:
+    journal = read_json(transaction / "journal.json")
+    expected_keys = {
+        "candidateIndexEntriesSha256",
+        "candidateIndexSha256",
+        "candidateIndexTree",
+        "candidateReadinessSha256",
+        "candidateSchemaSha256",
+        "indexGid",
+        "indexMode",
+        "originalIndexSha256",
+        "originalIndexTree",
+        "originalReadinessSha256",
+        "originalSchemaSha256",
+        "readinessPath",
+        "schemaPath",
+        "transactionVersion",
+    }
+    if not isinstance(journal, dict) or set(journal) != expected_keys:
+        raise SchemaError("readiness transaction journal has unexpected or missing keys")
+    if journal["transactionVersion"] != READINESS_TRANSACTION_VERSION:
+        raise SchemaError("readiness transaction journal version is unsupported")
+    if (
+        not isinstance(journal["indexMode"], int)
+        or isinstance(journal["indexMode"], bool)
+        or not isinstance(journal["indexGid"], int)
+        or isinstance(journal["indexGid"], bool)
+        or journal["indexGid"] < 0
+    ):
+        raise SchemaError("readiness transaction index metadata is invalid")
+    mode = journal["indexMode"]
+    if mode & 0o700 != 0o600 or mode & 0o002 or mode & 0o111 or mode & 0o7000:
+        raise SchemaError("readiness transaction index mode is unsafe")
+    version = read_version(repo_root / "CODEX_VERSION")
+    expected_schema = f"elixir/priv/codex_schema/{version}/manifest.json"
+    if journal["schemaPath"] != expected_schema or journal["readinessPath"] != READINESS_RELATIVE:
+        raise SchemaError("readiness transaction journal paths differ from the repository contract")
+    for key in (
+        "candidateIndexEntriesSha256",
+        "candidateIndexSha256",
+        "candidateReadinessSha256",
+        "candidateSchemaSha256",
+        "originalIndexSha256",
+        "originalSchemaSha256",
+    ):
+        _transaction_digest(journal[key], key)
+    original_readiness = journal["originalReadinessSha256"]
+    if original_readiness is not None:
+        _transaction_digest(original_readiness, "originalReadinessSha256")
+    for key in ("candidateIndexTree", "originalIndexTree"):
+        if not isinstance(journal[key], str) or not re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", journal[key]
+        ):
+            raise SchemaError(f"readiness transaction {key} is not a Git tree ID")
+    return journal
+
+
+def _private_transaction_identity(transaction: Path) -> Identity:
+    with anchored_descriptor(transaction, directory=True) as descriptor:
+        metadata = os.fstat(descriptor)
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise SchemaError(
+                "readiness transaction directory is not private and owner controlled"
+            )
+        return metadata_identity(metadata)
+
+
+def _assert_private_transaction_same_object(
+    transaction: Path, identity: Identity
+) -> None:
+    with anchored_descriptor(transaction, directory=True) as descriptor:
+        metadata = os.fstat(descriptor)
+        if (
+            stable_directory_link_identity(metadata)
+            != (identity[0], identity[1], identity[6])
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise SchemaError("readiness transaction directory changed during recovery")
+
+
+def _verification_record(journal: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidateIndexEntriesSha256": journal["candidateIndexEntriesSha256"],
+        "candidateIndexSha256": journal["candidateIndexSha256"],
+        "candidateIndexTree": journal["candidateIndexTree"],
+        "candidateReadinessSha256": journal["candidateReadinessSha256"],
+        "candidateSchemaSha256": journal["candidateSchemaSha256"],
+        "transactionVersion": READINESS_TRANSACTION_VERSION,
+    }
+
+
+def _verification_attempt_record(
+    journal: dict[str, Any], candidate_index_sha256: str
+) -> dict[str, Any]:
+    _transaction_digest(candidate_index_sha256, "verification attempt index")
+    return {
+        "candidateIndexEntriesSha256": journal["candidateIndexEntriesSha256"],
+        "candidateIndexSha256": candidate_index_sha256,
+        "candidateIndexTree": journal["candidateIndexTree"],
+        "transactionVersion": READINESS_TRANSACTION_VERSION,
+    }
+
+
+def _verification_attempt_index_sha256(
+    transaction: Path, journal: dict[str, Any]
+) -> str | None:
+    """Recover one durable, canonical per-attempt fenced-index digest."""
+
+    marker = transaction / READINESS_VERIFICATION_ATTEMPT
+    preparing = transaction / READINESS_VERIFICATION_ATTEMPT_PREPARE
+    marker_kind = path_kind_no_follow(marker)
+    preparing_kind = path_kind_no_follow(preparing)
+
+    def decode(path: Path) -> tuple[str, bytes]:
+        payload = read_regular_bytes(path)
+        value = decode_json_bytes(payload, path)
+        if not isinstance(value, dict) or set(value) != {
+            "candidateIndexEntriesSha256",
+            "candidateIndexSha256",
+            "candidateIndexTree",
+            "transactionVersion",
+        }:
+            raise SchemaError("readiness verification-attempt record is invalid")
+        digest = value["candidateIndexSha256"]
+        if value != _verification_attempt_record(journal, digest):
+            raise SchemaError("readiness verification-attempt record changed")
+        expected = pretty_json_bytes(value)
+        if payload != expected:
+            raise SchemaError("readiness verification-attempt record is not canonical")
+        return digest, expected
+
+    if marker_kind is not None:
+        if marker_kind != "file":
+            raise SchemaError("readiness verification-attempt record is unsafe")
+        digest, expected = decode(marker)
+        if preparing_kind is not None:
+            if preparing_kind != "file" or read_regular_bytes(preparing) != expected:
+                raise SchemaError(
+                    "readiness verification-attempt preparation is invalid"
+                )
+            _unlink_regular_exact(preparing, sha256_bytes(expected))
+        return digest
+    if preparing_kind is None:
+        return None
+    if preparing_kind != "file":
+        raise SchemaError("readiness verification-attempt preparation is unsafe")
+    try:
+        digest, expected = decode(preparing)
+    except SchemaError:
+        payload = read_regular_bytes(preparing)
+        _unlink_regular_exact(preparing, sha256_bytes(payload))
+        return None
+    secure_rename_noreplace(preparing, marker)
+    fsync_directory(transaction)
+    if read_regular_bytes(marker) != expected:
+        raise SchemaError("readiness verification-attempt publication changed")
+    return digest
+
+
+def _replace_verification_attempt(
+    transaction: Path,
+    journal: dict[str, Any],
+    candidate_index_sha256: str,
+) -> None:
+    existing = _verification_attempt_index_sha256(transaction, journal)
+    marker = transaction / READINESS_VERIFICATION_ATTEMPT
+    preparing = transaction / READINESS_VERIFICATION_ATTEMPT_PREPARE
+    if existing is not None:
+        _unlink_regular_exact(marker, sha256_file(marker))
+    if path_kind_no_follow(preparing) is not None:
+        raise SchemaError("readiness verification-attempt preparation remained")
+    payload = pretty_json_bytes(
+        _verification_attempt_record(journal, candidate_index_sha256)
+    )
+    write_bytes_fsync(preparing, payload, create=True)
+    secure_rename_noreplace(preparing, marker)
+    fsync_directory(transaction)
+    if read_regular_bytes(marker) != payload:
+        raise SchemaError("readiness verification-attempt publication changed")
+
+
+def _transaction_is_verified(
+    transaction: Path, journal: dict[str, Any]
+) -> bool:
+    marker = transaction / READINESS_VERIFICATION
+    preparing = transaction / READINESS_VERIFICATION_PREPARE
+    expected = pretty_json_bytes(_verification_record(journal))
+    marker_kind = path_kind_no_follow(marker)
+    preparing_kind = path_kind_no_follow(preparing)
+    if marker_kind is not None:
+        if marker_kind != "file" or read_regular_bytes(marker) != expected:
+            raise SchemaError("readiness transaction verification marker is invalid")
+        if preparing_kind is not None:
+            if preparing_kind != "file" or read_regular_bytes(preparing) != expected:
+                raise SchemaError("readiness transaction verification preparation is invalid")
+            _unlink_regular_exact(preparing, sha256_bytes(expected))
+        return True
+    if preparing_kind is None:
+        return False
+    if preparing_kind != "file":
+        raise SchemaError("readiness transaction verification preparation is unsafe")
+    prepared = read_regular_bytes(preparing)
+    if prepared != expected:
+        _unlink_regular_exact(preparing, sha256_bytes(prepared))
+        return False
+    secure_rename_noreplace(preparing, marker)
+    fsync_directory(transaction)
+    if read_regular_bytes(marker) != expected:
+        raise SchemaError("readiness transaction verification marker is invalid")
+    return True
+
+
+def _read_transaction_payload(
+    transaction: Path, name: str, expected_sha256: str
+) -> bytes:
+    path = transaction / name
+    payload = read_regular_bytes(path)
+    if sha256_bytes(payload) != expected_sha256:
+        raise SchemaError(f"readiness transaction payload changed: {name}")
+    return payload
+
+
+def _install_transaction_payload(
+    destination: Path,
+    install: Path,
+    desired: bytes,
+    *,
+    allowed_existing: set[str | None],
+) -> None:
+    desired_digest = sha256_bytes(desired)
+    current = read_optional_regular_bytes(destination)
+    current_digest = sha256_bytes(current) if current is not None else None
+    if current_digest not in allowed_existing:
+        raise SchemaError(f"readiness transaction destination changed unexpectedly: {destination}")
+
+    install_payload = read_optional_regular_bytes(install)
+    if current_digest == desired_digest:
+        if install_payload is not None:
+            install_digest = sha256_bytes(install_payload)
+            _unlink_regular_exact(install, install_digest)
+        return
+
+    if install_payload is not None:
+        install_digest = sha256_bytes(install_payload)
+        if install_digest != desired_digest:
+            _unlink_regular_exact(install, install_digest)
+            install_payload = None
+    if install_payload is None:
+        write_bytes_fsync(install, desired, create=True, mode=0o644)
+
+    if current is None:
+        secure_rename_noreplace(install, destination)
+    else:
+        secure_exchange(install, destination)
+        displaced = read_regular_bytes(install)
+        if sha256_bytes(displaced) != current_digest:
+            secure_exchange(install, destination)
+            raise SchemaError("readiness transaction displaced an unexpected destination")
+    fsync_directory(destination.parent)
+    if read_regular_bytes(destination) != desired:
+        raise SchemaError(f"readiness transaction failed to install exact bytes: {destination}")
+
+
+def _readiness_transaction_locations(
+    repo_root: Path,
+) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
+    version = read_version(repo_root / "CODEX_VERSION")
+    schema = repo_root / "elixir" / "priv" / "codex_schema" / version / "manifest.json"
+    readiness = repo_root / READINESS_RELATIVE
+    mkdir_parents_no_follow(readiness.parent)
+    index, index_lock, transaction = _git_index_paths(repo_root)
+    schema_install = schema.parent / READINESS_SCHEMA_INSTALL
+    readiness_install = readiness.parent / READINESS_ARTIFACT_INSTALL
+    return schema, readiness, index, index_lock, transaction, schema_install, readiness_install
+
+
+def _cleanup_readiness_install_residues(
+    schema_install: Path,
+    readiness_install: Path,
+    journal: dict[str, Any],
+) -> None:
+    allowed = {
+        journal["originalSchemaSha256"],
+        journal["candidateSchemaSha256"],
+        journal["candidateReadinessSha256"],
+        journal["originalReadinessSha256"],
+    }
+    for residue in (schema_install, readiness_install):
+        payload = read_optional_regular_bytes(residue)
+        if payload is None:
+            continue
+        digest = sha256_bytes(payload)
+        if digest not in allowed:
+            raise SchemaError("readiness transaction cleanup residue changed")
+        _unlink_regular_exact(residue, digest)
+
+
+def _restore_original_readiness_pair(
+    schema: Path,
+    readiness: Path,
+    schema_install: Path,
+    readiness_install: Path,
+    original_schema: bytes,
+    original_readiness: bytes | None,
+    journal: dict[str, Any],
+) -> None:
+    _install_transaction_payload(
+        schema,
+        schema_install,
+        original_schema,
+        allowed_existing={
+            journal["originalSchemaSha256"],
+            journal["candidateSchemaSha256"],
+        },
+    )
+    original_readiness_digest = journal["originalReadinessSha256"]
+    if original_readiness is None:
+        current = read_optional_regular_bytes(readiness)
+        if current is not None:
+            digest = sha256_bytes(current)
+            if digest != journal["candidateReadinessSha256"]:
+                raise SchemaError(
+                    "pre-commit readiness destination changed; preserving transaction"
+                )
+            with anchored_parent(readiness) as (parent, name):
+                os.unlink(name, dir_fd=parent)
+            fsync_directory(readiness.parent)
+    else:
+        _install_transaction_payload(
+            readiness,
+            readiness_install,
+            original_readiness,
+            allowed_existing={
+                original_readiness_digest,
+                journal["candidateReadinessSha256"],
+            },
+        )
+    _cleanup_readiness_install_residues(
+        schema_install, readiness_install, journal
+    )
+
+
+def _ensure_candidate_readiness_pair(
+    schema: Path,
+    readiness: Path,
+    schema_install: Path,
+    readiness_install: Path,
+    candidate_schema: bytes,
+    candidate_readiness: bytes,
+    journal: dict[str, Any],
+) -> None:
+    _install_transaction_payload(
+        schema,
+        schema_install,
+        candidate_schema,
+        allowed_existing={
+            journal["originalSchemaSha256"],
+            journal["candidateSchemaSha256"],
+        },
+    )
+    _install_transaction_payload(
+        readiness,
+        readiness_install,
+        candidate_readiness,
+        allowed_existing={
+            journal["originalReadinessSha256"],
+            journal["candidateReadinessSha256"],
+            None,
+        },
+    )
+    _cleanup_readiness_install_residues(
+        schema_install, readiness_install, journal
+    )
+
+
+def _candidate_readiness_pair_is_exact(
+    schema: Path,
+    readiness: Path,
+    candidate_schema: bytes,
+    candidate_readiness: bytes,
+) -> bool:
+    return (
+        read_optional_regular_bytes(schema) == candidate_schema
+        and read_optional_regular_bytes(readiness) == candidate_readiness
+    )
+
+
+def _candidate_index_is_semantically_exact(
+    repo_root: Path,
+    index: Path,
+    journal: dict[str, Any],
+) -> bool:
+    """Accept benign stat-cache refreshes but no staged semantic change."""
+
+    return (
+        _git_index_file_metadata(index)
+        == (journal["indexMode"], journal["indexGid"])
+        and _git_index_tree(repo_root, index_file=index)
+        == journal["candidateIndexTree"]
+        and _git_index_entries_sha256(repo_root, index_file=index)
+        == journal["candidateIndexEntriesSha256"]
+    )
+
+
+def _candidate_readiness_state_is_exact(
+    repo_root: Path,
+    schema: Path,
+    readiness: Path,
+    index: Path,
+    candidate_schema: bytes,
+    candidate_readiness: bytes,
+    journal: dict[str, Any],
+) -> bool:
+    return _candidate_readiness_pair_is_exact(
+        schema, readiness, candidate_schema, candidate_readiness
+    ) and _candidate_index_is_semantically_exact(repo_root, index, journal)
+
+
+def _fenced_candidate_readiness_state_is_exact(
+    schema: Path,
+    readiness: Path,
+    index: Path,
+    candidate_schema: bytes,
+    candidate_readiness: bytes,
+    journal: dict[str, Any],
+    expected_index_sha256: str,
+) -> bool:
+    """Use the captured raw index only while the conventional fence is held."""
+
+    return (
+        _candidate_readiness_pair_is_exact(
+            schema, readiness, candidate_schema, candidate_readiness
+        )
+        and sha256_file(index) == expected_index_sha256
+        and _git_index_file_metadata(index)
+        == (journal["indexMode"], journal["indexGid"])
+    )
+
+
+def _return_verification_index_fence(
+    index: Path,
+    index_lock: Path,
+    transaction: Path,
+    rollback_path: Path,
+    journal: dict[str, Any],
+) -> None:
+    if path_kind_no_follow(index_lock) != "file":
+        raise AmbiguousReadinessTransactionError(
+            "readiness verification index fence is missing"
+        )
+    if sha256_file(index_lock) != journal["originalIndexSha256"]:
+        raise AmbiguousReadinessTransactionError(
+            "readiness verification index fence changed"
+        )
+    _assert_git_index_file_metadata(index_lock, journal, "verification fence")
+    if path_kind_no_follow(rollback_path) is not None:
+        raise AmbiguousReadinessTransactionError(
+            "duplicate readiness verification rollback index"
+        )
+    secure_rename_noreplace(index_lock, rollback_path)
+    fsync_directory(index.parent)
+    fsync_directory(transaction)
+
+
+def _discard_readiness_verification_index(
+    repo_root: Path,
+    journal: dict[str, Any],
+    transaction: Path,
+    *,
+    require_candidate_semantics: bool = True,
+) -> None:
+    """Remove only owner-controlled disposable verifier-index state."""
+
+    verification_index = transaction / READINESS_INDEX_VERIFIER
+    verification_lock = Path(f"{verification_index}.lock")
+    verification_lock_kind = path_kind_no_follow(verification_lock)
+    if verification_lock_kind is not None:
+        if verification_lock_kind != "file":
+            raise AmbiguousReadinessTransactionError(
+                "readiness verification-index lock residue is unsafe"
+            )
+        verification_lock_metadata = _git_index_file_metadata(verification_lock)
+        if require_candidate_semantics and verification_lock_metadata != (
+            journal["indexMode"],
+            journal["indexGid"],
+        ):
+            raise SchemaError(
+                "readiness private verification-index lock index metadata changed"
+            )
+        _unlink_regular_exact(verification_lock, sha256_file(verification_lock))
+    if path_kind_no_follow(verification_index) is None:
+        return
+    if path_kind_no_follow(verification_index) != "file":
+        raise AmbiguousReadinessTransactionError(
+            "readiness verification-index residue is unsafe"
+        )
+    verification_metadata = _git_index_file_metadata(verification_index)
+    if require_candidate_semantics and verification_metadata != (
+        journal["indexMode"],
+        journal["indexGid"],
+    ):
+        raise SchemaError(
+            "readiness private verification index index metadata changed"
+        )
+    if require_candidate_semantics and not _candidate_index_is_semantically_exact(
+        repo_root, verification_index, journal
+    ):
+        raise AmbiguousReadinessTransactionError(
+            "readiness verification index changed semantically"
+        )
+    if require_candidate_semantics:
+        _assert_git_index_file_metadata(
+            verification_index, journal, "private verification index"
+        )
+    _unlink_regular_exact(verification_index, sha256_file(verification_index))
+
+
+def _prepare_readiness_verification_index(
+    repo_root: Path,
+    journal: dict[str, Any],
+    transaction: Path,
+    expected_live_index_sha256: str,
+) -> Path:
+    """Copy and semantically validate the fenced live candidate index."""
+
+    _discard_readiness_verification_index(
+        repo_root,
+        journal,
+        transaction,
+        require_candidate_semantics=False,
+    )
+    verification_index = transaction / READINESS_INDEX_VERIFIER
+    index, _index_lock, expected_transaction = _git_index_paths(repo_root)
+    if expected_transaction != transaction:
+        raise SchemaError("readiness verification transaction path changed")
+    _assert_git_index_file_metadata(index, journal, "fenced candidate")
+    candidate_index = read_regular_bytes(index)
+    if sha256_bytes(candidate_index) != expected_live_index_sha256:
+        raise AmbiguousReadinessTransactionError(
+            "readiness fenced candidate changed before verifier copy"
+        )
+    write_bytes_fsync(
+        verification_index,
+        candidate_index,
+        create=True,
+        mode=journal["indexMode"],
+    )
+    _set_git_index_file_mode(
+        verification_index, journal["indexMode"], journal["indexGid"]
+    )
+    fsync_directory(transaction)
+    _assert_git_index_file_metadata(
+        verification_index, journal, "private verification index"
+    )
+    if (
+        sha256_file(verification_index) != expected_live_index_sha256
+        or sha256_file(index) != expected_live_index_sha256
+    ):
+        raise AmbiguousReadinessTransactionError(
+            "readiness verification index changed during preparation"
+        )
+    if not _candidate_index_is_semantically_exact(
+        repo_root, verification_index, journal
+    ):
+        raise AmbiguousReadinessTransactionError(
+            "readiness fenced candidate changed semantically"
+        )
+    if sha256_file(index) != expected_live_index_sha256:
+        raise AmbiguousReadinessTransactionError(
+            "readiness fenced candidate changed during semantic validation"
+        )
+    _replace_verification_attempt(
+        transaction, journal, expected_live_index_sha256
+    )
+    readiness_publication_checkpoint("verification_index_prepared")
+    return verification_index
+
+
+def _acquire_verification_index_fence(
+    repo_root: Path,
+    journal: dict[str, Any],
+    locations: tuple[Path, Path, Path, Path, Path, Path, Path],
+) -> str:
+    """Fence the exact committed candidate before any final verifier Git call."""
+
+    (
+        schema,
+        readiness,
+        index,
+        index_lock,
+        transaction,
+        _schema_install,
+        _readiness_install,
+    ) = locations
+    candidate_schema = _read_transaction_payload(
+        transaction, "schema.candidate", journal["candidateSchemaSha256"]
+    )
+    candidate_readiness = _read_transaction_payload(
+        transaction,
+        "readiness.candidate",
+        journal["candidateReadinessSha256"],
+    )
+    rollback_index = transaction / READINESS_INDEX_ROLLBACK
+    if (
+        not _candidate_readiness_state_is_exact(
+            repo_root,
+            schema,
+            readiness,
+            index,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+        )
+        or path_kind_no_follow(index_lock) is not None
+        or path_kind_no_follow(rollback_index) != "file"
+        or sha256_file(rollback_index) != journal["originalIndexSha256"]
+    ):
+        raise AmbiguousReadinessTransactionError(
+            "readiness publication changed before final verification; "
+            "preserving transaction"
+        )
+    candidate_index_sha256 = sha256_file(index)
+    _assert_git_index_file_metadata(rollback_index, journal, "verification rollback")
+    secure_rename_noreplace(rollback_index, index_lock)
+    fsync_directory(index.parent)
+    fsync_directory(transaction)
+    readiness_publication_checkpoint("verification_index_fenced")
+    _assert_git_index_file_metadata(index_lock, journal, "verification fence")
+    if (
+        sha256_file(index_lock) != journal["originalIndexSha256"]
+        or not _fenced_candidate_readiness_state_is_exact(
+            schema,
+            readiness,
+            index,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+            candidate_index_sha256,
+        )
+    ):
+        _return_verification_index_fence(
+            index,
+            index_lock,
+            transaction,
+            rollback_index,
+            journal,
+        )
+        raise AmbiguousReadinessTransactionError(
+            "readiness publication changed while final verification was fenced; "
+            "preserving transaction"
+        )
+    return candidate_index_sha256
+
+
+def recover_readiness_transaction(repo_root: Path = REPO_ROOT) -> bool:
+    """Recover a transaction and report an unverified committed candidate.
+
+    ``True`` means the exact candidate index/pair crossed the atomic exchange
+    but still requires the strongest repository-pair verification. The durable
+    journal and original payloads remain present in that state.
+    """
+
+    (
+        schema,
+        readiness,
+        index,
+        index_lock,
+        transaction,
+        schema_install,
+        readiness_install,
+    ) = _readiness_transaction_locations(repo_root)
+    preparing = transaction.with_name(f"{transaction.name}.prepare")
+    transaction_kind = path_kind_no_follow(transaction)
+    preparing_kind = path_kind_no_follow(preparing)
+    if transaction_kind is not None and preparing_kind is not None:
+        raise SchemaError("ambiguous readiness transaction and preparation residues")
+    if transaction_kind is None and preparing_kind is not None:
+        if preparing_kind != "directory":
+            raise SchemaError("readiness transaction preparation residue is unsafe")
+        identity = directory_identity(preparing)
+        with anchored_descriptor(preparing, directory=True) as descriptor:
+            metadata = os.fstat(descriptor)
+            if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise SchemaError("readiness transaction preparation residue is not private")
+        if directory_identity(preparing) != identity:
+            raise SchemaError("readiness transaction preparation residue changed")
+        remove_transaction_tree(preparing)
+        preparing_kind = None
+    if transaction_kind is None:
+        residues = [
+            path
+            for path in (schema_install, readiness_install)
+            if path_kind_no_follow(path) is not None
+        ]
+        if residues:
+            raise SchemaError(f"orphan readiness transaction residue is present: {residues}")
+        return False
+    if transaction_kind != "directory":
+        raise SchemaError("readiness transaction residue is not a directory")
+
+    transaction_identity = _private_transaction_identity(transaction)
+    journal = _read_readiness_journal(transaction, repo_root)
+    original_schema = _read_transaction_payload(
+        transaction, "schema.original", journal["originalSchemaSha256"]
+    )
+    candidate_schema = _read_transaction_payload(
+        transaction, "schema.candidate", journal["candidateSchemaSha256"]
+    )
+    candidate_readiness = _read_transaction_payload(
+        transaction, "readiness.candidate", journal["candidateReadinessSha256"]
+    )
+    original_readiness_digest = journal["originalReadinessSha256"]
+    original_readiness = None
+    if original_readiness_digest is not None:
+        original_readiness = _read_transaction_payload(
+            transaction, "readiness.original", original_readiness_digest
+        )
+    original_index = _read_transaction_payload(
+        transaction, "index.original", journal["originalIndexSha256"]
+    )
+    candidate_index = _read_transaction_payload(
+        transaction,
+        READINESS_INDEX_CANDIDATE,
+        journal["candidateIndexSha256"],
+    )
+    _assert_git_index_file_metadata(
+        transaction / "index.original", journal, "original backup"
+    )
+    _assert_git_index_file_metadata(
+        transaction / READINESS_INDEX_CANDIDATE, journal, "candidate backup"
+    )
+    if directory_identity(transaction) != transaction_identity:
+        raise SchemaError("readiness transaction changed while its journal was read")
+    verified = _transaction_is_verified(transaction, journal)
+    _assert_private_transaction_same_object(transaction, transaction_identity)
+
+    lock_kind = path_kind_no_follow(index_lock)
+    if lock_kind not in (None, "file"):
+        raise AmbiguousReadinessTransactionError(
+            "ambiguous readiness index lock; preserving transaction"
+        )
+    index_digest = sha256_file(index)
+    lock_digest = sha256_file(index_lock) if lock_kind == "file" else None
+    original_digest = journal["originalIndexSha256"]
+    candidate_digest = journal["candidateIndexSha256"]
+    if index_digest in {original_digest, candidate_digest}:
+        _assert_git_index_file_metadata(index, journal, "installed")
+    if lock_digest in {original_digest, candidate_digest}:
+        _assert_git_index_file_metadata(index_lock, journal, "lock")
+
+    commit_path = transaction / READINESS_INDEX_COMMIT
+    commit_kind = path_kind_no_follow(commit_path)
+    if commit_kind not in (None, "file"):
+        raise SchemaError("readiness commit-index residue is unsafe")
+    if commit_kind == "file" and sha256_file(commit_path) != candidate_digest:
+        raise SchemaError("readiness commit-index residue changed")
+    if commit_kind == "file":
+        _assert_git_index_file_metadata(commit_path, journal, "commit")
+    rollback_path = transaction / READINESS_INDEX_ROLLBACK
+    rollback_kind = path_kind_no_follow(rollback_path)
+    if rollback_kind not in (None, "file"):
+        raise SchemaError("readiness rollback-index residue is unsafe")
+    if rollback_kind == "file" and sha256_file(rollback_path) != original_digest:
+        raise SchemaError("readiness rollback-index residue changed")
+    if rollback_kind == "file":
+        _assert_git_index_file_metadata(rollback_path, journal, "rollback")
+    attempt_digest = _verification_attempt_index_sha256(transaction, journal)
+    if lock_digest is not None and lock_digest == attempt_digest:
+        _assert_git_index_file_metadata(index_lock, journal, "verification attempt")
+
+    if verified:
+        if lock_digest == original_digest:
+            if rollback_kind is not None:
+                raise AmbiguousReadinessTransactionError(
+                    "verified readiness has duplicate rollback indexes"
+            )
+            try:
+                exact_pair = _candidate_readiness_pair_is_exact(
+                    schema,
+                    readiness,
+                    candidate_schema,
+                    candidate_readiness,
+                ) and _git_index_file_metadata(index) == (
+                    journal["indexMode"],
+                    journal["indexGid"],
+                )
+            finally:
+                _return_verification_index_fence(
+                    index,
+                    index_lock,
+                    transaction,
+                    rollback_path,
+                    journal,
+                )
+            rollback_kind = "file"
+            if not exact_pair:
+                raise AmbiguousReadinessTransactionError(
+                    "verified readiness pair changed; preserving transaction"
+                )
+        elif lock_digest is not None:
+            raise AmbiguousReadinessTransactionError(
+                "verified readiness index lock changed; preserving transaction"
+            )
+        if not _candidate_readiness_state_is_exact(
+            repo_root,
+            schema,
+            readiness,
+            index,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+        ):
+            raise AmbiguousReadinessTransactionError(
+                "verified readiness candidate changed; preserving transaction"
+            )
+        if rollback_kind != "file":
+            raise AmbiguousReadinessTransactionError(
+                "verified readiness rollback index is missing"
+            )
+        # Recheck after releasing the conventional Git fence. A writer that
+        # arrives after this point is a later staged-tree mutation, while a
+        # writer that raced the verification boundary retains the durable
+        # journal and rollback index for explicit recovery.
+        if not _candidate_readiness_state_is_exact(
+            repo_root,
+            schema,
+            readiness,
+            index,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+        ):
+            raise AmbiguousReadinessTransactionError(
+                "verified readiness candidate changed after fence release; "
+                "preserving transaction"
+            )
+        _cleanup_readiness_install_residues(
+            schema_install, readiness_install, journal
+        )
+        _assert_private_transaction_same_object(transaction, transaction_identity)
+        remove_transaction_tree(transaction)
+        return False
+
+    if lock_digest == candidate_digest:
+        if index_digest == original_digest:
+            _unlink_regular_exact(index_lock, candidate_digest)
+            lock_digest = None
+        elif index_digest == candidate_digest:
+            _unlink_regular_exact(index_lock, candidate_digest)
+            lock_digest = None
+        else:
+            _unlink_regular_exact(index_lock, candidate_digest)
+            raise AmbiguousReadinessTransactionError(
+                "Git index changed behind the reserved readiness lock; preserving transaction"
+            )
+    elif lock_digest == original_digest:
+        if rollback_kind is not None:
+            raise AmbiguousReadinessTransactionError(
+                "duplicate readiness rollback indexes; preserving transaction"
+            )
+        secure_rename_noreplace(index_lock, rollback_path)
+        fsync_directory(index.parent)
+        fsync_directory(transaction)
+        if _candidate_index_is_semantically_exact(repo_root, index, journal):
+            _ensure_candidate_readiness_pair(
+                schema,
+                readiness,
+                schema_install,
+                readiness_install,
+                candidate_schema,
+                candidate_readiness,
+                journal,
+            )
+            return True
+        raise AmbiguousReadinessTransactionError(
+            "committed readiness Git index changed; preserving transaction"
+        )
+    elif attempt_digest is not None and lock_digest == attempt_digest:
+        if index_digest == original_digest:
+            _unlink_regular_exact(index_lock, attempt_digest)
+            lock_digest = None
+        else:
+            raise AmbiguousReadinessTransactionError(
+                "verification rollback index state changed; preserving transaction"
+            )
+    elif lock_digest is not None:
+        if index_digest == candidate_digest:
+            displaced_digest = lock_digest
+            secure_exchange(index_lock, index)
+            fsync_directory(index.parent)
+            if (
+                sha256_file(index) != displaced_digest
+                or sha256_file(index_lock) != candidate_digest
+            ):
+                raise AmbiguousReadinessTransactionError(
+                    "readiness index exchange rollback changed; preserving transaction"
+                )
+            _unlink_regular_exact(index_lock, candidate_digest)
+        raise AmbiguousReadinessTransactionError(
+            "ambiguous readiness index lock; preserving transaction"
+        )
+
+    current_tree = _git_index_tree(repo_root)
+    if current_tree == journal["originalIndexTree"]:
+        if rollback_kind is not None:
+            raise AmbiguousReadinessTransactionError(
+                "committed readiness rollback index has an original-tree "
+                "worktree; preserving transaction"
+            )
+        _restore_original_readiness_pair(
+            schema,
+            readiness,
+            schema_install,
+            readiness_install,
+            original_schema,
+            original_readiness,
+            journal,
+        )
+        if read_regular_bytes(index) != original_index:
+            # Tree equality permits benign index stat refreshes. Never rewrite
+            # such an index; the staged semantic state is already the original.
+            if _git_index_tree(repo_root) != journal["originalIndexTree"]:
+                raise SchemaError("pre-commit Git index changed during recovery")
+        _assert_private_transaction_same_object(transaction, transaction_identity)
+        remove_transaction_tree(transaction)
+        return False
+    if current_tree == journal["candidateIndexTree"]:
+        if not _candidate_index_is_semantically_exact(repo_root, index, journal):
+            raise AmbiguousReadinessTransactionError(
+                "committed readiness index flags changed; preserving transaction"
+            )
+        if rollback_kind != "file":
+            raise AmbiguousReadinessTransactionError(
+                "committed readiness transaction lost its rollback index"
+            )
+        _ensure_candidate_readiness_pair(
+            schema,
+            readiness,
+            schema_install,
+            readiness_install,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+        )
+        return True
+    raise AmbiguousReadinessTransactionError(
+        "ambiguous readiness transaction index state; preserving transaction"
+    )
+
+
+def readiness_publication_checkpoint(_name: str) -> None:
+    """No-op seam for crash-injection tests of the two-file/index transaction."""
+
+
+def _prepare_readiness_transaction(
+    repo_root: Path,
+    schema_candidate: bytes,
+    readiness_candidate: bytes,
+) -> tuple[dict[str, Any], tuple[Path, Path, Path, Path, Path, Path, Path]]:
+    locations = _readiness_transaction_locations(repo_root)
+    schema, readiness, index, index_lock, transaction, schema_install, readiness_install = locations
+    preparing = transaction.with_name(f"{transaction.name}.prepare")
+    if path_kind_no_follow(transaction) is not None:
+        raise SchemaError("readiness transaction is already present")
+    if path_kind_no_follow(preparing) is not None:
+        raise SchemaError("readiness transaction preparation is already present")
+    if path_kind_no_follow(index_lock) is not None:
+        raise SchemaError("Git index is locked by another writer")
+    for residue in (schema_install, readiness_install):
+        if path_kind_no_follow(residue) is not None:
+            raise SchemaError(f"readiness transaction install residue already exists: {residue}")
+
+    original_schema = read_regular_bytes(schema)
+    original_readiness = read_optional_regular_bytes(readiness)
+    index_mode, index_gid = _git_index_file_metadata(index)
+    original_index = read_regular_bytes(index)
+    if sha256_bytes(schema_candidate) == sha256_bytes(original_schema):
+        raise SchemaError("readiness publication must advance the paired schema manifest")
+    for relative in (schema.relative_to(repo_root).as_posix(), READINESS_RELATIVE):
+        if _indexed_mode(repo_root, relative) != "100644":
+            raise SchemaError(
+                f"readiness publication metadata must use index mode 100644: {relative}"
+            )
+    with anchored_parent(preparing) as (parent, name):
+        os.mkdir(name, 0o700, dir_fd=parent)
+    directory_identity(preparing)
+    try:
+        payloads: list[tuple[str, bytes]] = [
+            ("schema.original", original_schema),
+            ("schema.candidate", schema_candidate),
+            ("readiness.candidate", readiness_candidate),
+            ("index.original", original_index),
+            (READINESS_INDEX_CANDIDATE, original_index),
+        ]
+        if original_readiness is not None:
+            payloads.append(("readiness.original", original_readiness))
+        for name, payload in payloads:
+            write_bytes_fsync(preparing / name, payload, create=True)
+        for name in ("index.original", READINESS_INDEX_CANDIDATE):
+            _set_git_index_file_mode(preparing / name, index_mode, index_gid)
+
+        candidate_index = preparing / READINESS_INDEX_CANDIDATE
+        original_tree = _git_index_tree(repo_root, index_file=candidate_index)
+        schema_relative = schema.relative_to(repo_root).as_posix()
+        schema_blob = _git_blob(repo_root, schema_candidate)
+        readiness_blob = _git_blob(repo_root, readiness_candidate)
+        for relative, blob in (
+            (schema_relative, schema_blob),
+            (READINESS_RELATIVE, readiness_blob),
+        ):
+            _git_transaction_command(
+                repo_root,
+                ["update-index", "--add", "--cacheinfo", f"100644,{blob},{relative}"],
+                index_file=candidate_index,
+            )
+        candidate_tree = _git_index_tree(repo_root, index_file=candidate_index)
+        if candidate_tree == original_tree:
+            raise SchemaError("readiness publication would not change the staged Git tree")
+        fsync_file(candidate_index)
+        _set_git_index_file_mode(candidate_index, index_mode, index_gid)
+        candidate_index_bytes = read_regular_bytes(candidate_index)
+        write_bytes_fsync(
+            preparing / READINESS_INDEX_COMMIT,
+            candidate_index_bytes,
+            create=True,
+            mode=index_mode,
+        )
+        _set_git_index_file_mode(
+            preparing / READINESS_INDEX_COMMIT, index_mode, index_gid
+        )
+        journal = {
+            "candidateIndexEntriesSha256": _git_index_entries_sha256(
+                repo_root, index_file=candidate_index
+            ),
+            "candidateIndexSha256": sha256_bytes(candidate_index_bytes),
+            "candidateIndexTree": candidate_tree,
+            "candidateReadinessSha256": sha256_bytes(readiness_candidate),
+            "candidateSchemaSha256": sha256_bytes(schema_candidate),
+            "indexGid": index_gid,
+            "indexMode": index_mode,
+            "originalIndexSha256": sha256_bytes(original_index),
+            "originalIndexTree": original_tree,
+            "originalReadinessSha256": (
+                sha256_bytes(original_readiness) if original_readiness is not None else None
+            ),
+            "originalSchemaSha256": sha256_bytes(original_schema),
+            "readinessPath": READINESS_RELATIVE,
+            "schemaPath": schema_relative,
+            "transactionVersion": READINESS_TRANSACTION_VERSION,
+        }
+        write_bytes_fsync(
+            preparing / "journal.json", pretty_json_bytes(journal), create=True
+        )
+        fsync_directory(preparing)
+        secure_rename_noreplace(preparing, transaction)
+        fsync_directory(transaction.parent)
+        return journal, locations
+    except BaseException:
+        if path_kind_no_follow(preparing) == "directory":
+            remove_transaction_tree(preparing)
+        raise
+
+
+def _commit_readiness_transaction(
+    repo_root: Path,
+    journal: dict[str, Any],
+    locations: tuple[Path, Path, Path, Path, Path, Path, Path],
+) -> None:
+    schema, readiness, index, index_lock, transaction, schema_install, readiness_install = locations
+    commit_index = transaction / READINESS_INDEX_COMMIT
+    _assert_git_index_file_metadata(index, journal, "original")
+    _assert_git_index_file_metadata(commit_index, journal, "commit")
+    secure_rename_noreplace(commit_index, index_lock)
+    fsync_directory(index.parent)
+    readiness_publication_checkpoint("index_lock_reserved")
+    if sha256_file(index) != journal["originalIndexSha256"]:
+        raise SchemaError("Git index changed before readiness publication acquired its lock")
+
+    schema_candidate = _read_transaction_payload(
+        transaction, "schema.candidate", journal["candidateSchemaSha256"]
+    )
+    readiness_candidate = _read_transaction_payload(
+        transaction, "readiness.candidate", journal["candidateReadinessSha256"]
+    )
+    _install_transaction_payload(
+        schema,
+        schema_install,
+        schema_candidate,
+        allowed_existing={journal["originalSchemaSha256"]},
+    )
+    readiness_publication_checkpoint("schema_installed")
+    _install_transaction_payload(
+        readiness,
+        readiness_install,
+        readiness_candidate,
+        allowed_existing={journal["originalReadinessSha256"], None},
+    )
+    readiness_publication_checkpoint("readiness_installed")
+    fsync_directory(schema.parent)
+    fsync_directory(readiness.parent)
+    _cleanup_readiness_install_residues(
+        schema_install, readiness_install, journal
+    )
+
+    if sha256_file(index) != journal["originalIndexSha256"]:
+        raise SchemaError("Git index changed behind the reserved readiness lock")
+    if sha256_file(index_lock) != journal["candidateIndexSha256"]:
+        raise SchemaError("reserved candidate Git index changed before commit")
+    _assert_git_index_file_metadata(index, journal, "original")
+    _assert_git_index_file_metadata(index_lock, journal, "candidate lock")
+    secure_exchange(index_lock, index)
+    fsync_directory(index.parent)
+    readiness_publication_checkpoint("index_exchanged")
+
+    installed_digest = sha256_file(index)
+    displaced_digest = sha256_file(index_lock)
+    if installed_digest != journal["candidateIndexSha256"]:
+        if displaced_digest == journal["originalIndexSha256"]:
+            _unlink_regular_exact(index_lock, displaced_digest)
+        raise AmbiguousReadinessTransactionError(
+            "candidate Git index changed after atomic exchange; preserving transaction"
+        )
+    _assert_git_index_file_metadata(index, journal, "installed candidate")
+    if displaced_digest != journal["originalIndexSha256"]:
+        secure_exchange(index_lock, index)
+        fsync_directory(index.parent)
+        if (
+            sha256_file(index) != displaced_digest
+            or sha256_file(index_lock) != journal["candidateIndexSha256"]
+        ):
+            raise AmbiguousReadinessTransactionError(
+                "concurrent Git index exchange rollback changed; preserving transaction"
+            )
+        _unlink_regular_exact(index_lock, journal["candidateIndexSha256"])
+        raise AmbiguousReadinessTransactionError(
+            "concurrent Git index writer preserved; readiness transaction not committed"
+        )
+    if sha256_file(index) != journal["candidateIndexSha256"]:
+        _unlink_regular_exact(index_lock, journal["originalIndexSha256"])
+        raise AmbiguousReadinessTransactionError(
+            "candidate Git index changed before lock release; preserving transaction"
+        )
+    rollback_index = transaction / READINESS_INDEX_ROLLBACK
+    secure_rename_noreplace(index_lock, rollback_index)
+    fsync_directory(index.parent)
+    fsync_directory(transaction)
+    readiness_publication_checkpoint("index_committed")
+
+
+def _rollback_unverified_readiness_transaction(
+    repo_root: Path,
+    journal: dict[str, Any],
+    locations: tuple[Path, Path, Path, Path, Path, Path, Path],
+    *,
+    fenced_candidate_index_sha256: str,
+) -> None:
+    """Roll back a rejected candidate while retaining the verification fence."""
+
+    schema, readiness, index, index_lock, transaction, _schema_install, _readiness_install = (
+        locations
+    )
+    if _transaction_is_verified(transaction, journal):
+        raise SchemaError("verified readiness transaction cannot be rolled back")
+    candidate_schema = _read_transaction_payload(
+        transaction, "schema.candidate", journal["candidateSchemaSha256"]
+    )
+    candidate_readiness = _read_transaction_payload(
+        transaction,
+        "readiness.candidate",
+        journal["candidateReadinessSha256"],
+    )
+    rollback_index = transaction / READINESS_INDEX_ROLLBACK
+    if (
+        path_kind_no_follow(index_lock) != "file"
+        or sha256_file(index_lock) != journal["originalIndexSha256"]
+        or path_kind_no_follow(rollback_index) is not None
+        or not _fenced_candidate_readiness_state_is_exact(
+            schema,
+            readiness,
+            index,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+            fenced_candidate_index_sha256,
+        )
+    ):
+        if (
+            path_kind_no_follow(index_lock) == "file"
+            and sha256_file(index_lock) == journal["originalIndexSha256"]
+            and path_kind_no_follow(rollback_index) is None
+        ):
+            _return_verification_index_fence(
+                index,
+                index_lock,
+                transaction,
+                rollback_index,
+                journal,
+            )
+        raise AmbiguousReadinessTransactionError(
+            "committed readiness index changed before rollback; preserving transaction"
+        )
+    _assert_git_index_file_metadata(index_lock, journal, "verification fence")
+    secure_exchange(index_lock, index)
+    fsync_directory(index.parent)
+    readiness_publication_checkpoint("verification_rollback_exchanged")
+    restored_index_digest = sha256_file(index)
+    displaced_candidate_digest = sha256_file(index_lock)
+    if (
+        restored_index_digest != journal["originalIndexSha256"]
+        or displaced_candidate_digest != fenced_candidate_index_sha256
+    ):
+        secure_exchange(index_lock, index)
+        fsync_directory(index.parent)
+        if (
+            sha256_file(index) != displaced_candidate_digest
+            or sha256_file(index_lock) != restored_index_digest
+        ):
+            raise AmbiguousReadinessTransactionError(
+                "failed verification index rollback changed; preserving transaction"
+            )
+        if (
+            sha256_file(index_lock) == journal["originalIndexSha256"]
+            and path_kind_no_follow(rollback_index) is None
+        ):
+            secure_rename_noreplace(index_lock, rollback_index)
+            fsync_directory(index.parent)
+            fsync_directory(transaction)
+        raise AmbiguousReadinessTransactionError(
+            "concurrent Git index writer preserved during verification rollback"
+        )
+    _unlink_regular_exact(index_lock, fenced_candidate_index_sha256)
+    if recover_readiness_transaction(repo_root):
+        raise SchemaError("readiness verification rollback remained committed")
+
+
+def _record_verified_readiness_transaction(
+    repo_root: Path,
+    journal: dict[str, Any],
+    locations: tuple[Path, Path, Path, Path, Path, Path, Path],
+    *,
+    verification_fence_held: bool = False,
+    fenced_candidate_index_sha256: str | None = None,
+) -> None:
+    schema, readiness, index, index_lock, transaction, _schema_install, _readiness_install = (
+        locations
+    )
+    candidate_schema = _read_transaction_payload(
+        transaction, "schema.candidate", journal["candidateSchemaSha256"]
+    )
+    candidate_readiness = _read_transaction_payload(
+        transaction,
+        "readiness.candidate",
+        journal["candidateReadinessSha256"],
+    )
+    rollback_index = transaction / READINESS_INDEX_ROLLBACK
+    if not verification_fence_held:
+        fenced_candidate_index_sha256 = _acquire_verification_index_fence(
+            repo_root, journal, locations
+        )
+        try:
+            verification_index = _prepare_readiness_verification_index(
+                repo_root,
+                journal,
+                transaction,
+                fenced_candidate_index_sha256,
+            )
+            if path_kind_no_follow(verification_index) != "file":
+                raise SchemaError("readiness private verification index is missing")
+            _discard_readiness_verification_index(
+                repo_root, journal, transaction
+            )
+        except BaseException:
+            _return_verification_index_fence(
+                index,
+                index_lock,
+                transaction,
+                rollback_index,
+                journal,
+            )
+            raise
+    elif (
+        fenced_candidate_index_sha256 is None
+        or path_kind_no_follow(index_lock) != "file"
+        or sha256_file(index_lock) != journal["originalIndexSha256"]
+        or path_kind_no_follow(rollback_index) is not None
+    ):
+        raise AmbiguousReadinessTransactionError(
+            "readiness final-verification fence changed; preserving transaction"
+        )
+    _assert_git_index_file_metadata(index_lock, journal, "verification fence")
+    if (
+        sha256_file(index_lock) != journal["originalIndexSha256"]
+        or not _fenced_candidate_readiness_state_is_exact(
+            schema,
+            readiness,
+            index,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+            fenced_candidate_index_sha256,
+        )
+    ):
+        _return_verification_index_fence(
+            index,
+            index_lock,
+            transaction,
+            rollback_index,
+            journal,
+        )
+        raise AmbiguousReadinessTransactionError(
+            "readiness publication changed while final verification was fenced; "
+            "preserving transaction"
+        )
+    marker = transaction / READINESS_VERIFICATION
+    preparing = transaction / READINESS_VERIFICATION_PREPARE
+    if path_kind_no_follow(marker) is not None or path_kind_no_follow(preparing) is not None:
+        raise SchemaError("readiness verification marker residue already exists")
+    marker_bytes = pretty_json_bytes(_verification_record(journal))
+    write_bytes_fsync(preparing, marker_bytes, create=True)
+    secure_rename_noreplace(preparing, marker)
+    fsync_directory(transaction)
+    readiness_publication_checkpoint("verification_recorded")
+    if (
+        sha256_file(index_lock) != journal["originalIndexSha256"]
+        or not _fenced_candidate_readiness_state_is_exact(
+            schema,
+            readiness,
+            index,
+            candidate_schema,
+            candidate_readiness,
+            journal,
+            fenced_candidate_index_sha256,
+        )
+    ):
+        _return_verification_index_fence(
+            index,
+            index_lock,
+            transaction,
+            rollback_index,
+            journal,
+        )
+        raise AmbiguousReadinessTransactionError(
+            "readiness publication changed after verification was recorded; "
+            "preserving transaction"
+        )
+    if recover_readiness_transaction(repo_root):
+        raise SchemaError("verified readiness transaction was not finalized")
+
+
+def _verify_and_finalize_readiness_transaction(
+    repo_root: Path,
+    codex_command: str,
+    studio_readiness: Any,
+    journal: dict[str, Any],
+    locations: tuple[Path, Path, Path, Path, Path, Path, Path],
+) -> None:
+    index, index_lock, transaction = locations[2:5]
+    rollback_index = transaction / READINESS_INDEX_ROLLBACK
+    fenced_candidate_index_sha256 = _acquire_verification_index_fence(
+        repo_root, journal, locations
+    )
+    try:
+        verification_index = _prepare_readiness_verification_index(
+            repo_root,
+            journal,
+            transaction,
+            fenced_candidate_index_sha256,
+        )
+        studio_readiness.verify_repository_pair(
+            repo_root,
+            repo_root / READINESS_RELATIVE,
+            codex_command,
+            index_file=verification_index,
+        )
+        _discard_readiness_verification_index(repo_root, journal, transaction)
+    except studio_readiness.ReadinessError as error:
+        try:
+            _discard_readiness_verification_index(
+                repo_root,
+                journal,
+                transaction,
+                require_candidate_semantics=False,
+            )
+        except BaseException:
+            _return_verification_index_fence(
+                index,
+                index_lock,
+                transaction,
+                rollback_index,
+                journal,
+            )
+            raise
+        _rollback_unverified_readiness_transaction(
+            repo_root,
+            journal,
+            locations,
+            fenced_candidate_index_sha256=fenced_candidate_index_sha256,
+        )
+        raise SchemaError(
+            f"published readiness pair failed final verification and was rolled back: {error}"
+        ) from error
+    except BaseException:
+        try:
+            _discard_readiness_verification_index(
+                repo_root,
+                journal,
+                transaction,
+                require_candidate_semantics=False,
+            )
+        finally:
+            _return_verification_index_fence(
+                index,
+                index_lock,
+                transaction,
+                rollback_index,
+                journal,
+            )
+        raise
+    _record_verified_readiness_transaction(
+        repo_root,
+        journal,
+        locations,
+        verification_fence_held=True,
+        fenced_candidate_index_sha256=fenced_candidate_index_sha256,
+    )
+
+
+def publish_readiness(args: argparse.Namespace) -> None:
+    if os.environ.get("LINEAR_API_KEY") is not None:
+        raise SchemaError("raw Linear credential reached the readiness publisher")
+    try:
+        import studio_readiness
+    except ImportError as error:
+        raise SchemaError("cannot load the readiness compiler") from error
+    if getattr(studio_readiness, "READINESS_RELATIVE", None) != READINESS_RELATIVE:
+        raise SchemaError("readiness compiler and publisher paths differ")
+
+    # Recovery is short and lock-protected. The expensive full gate compiler
+    # intentionally runs after this lock is released.
+    with schema_bundle_lock(exclusive=True):
+        if recover_readiness_transaction(REPO_ROOT):
+            locations = _readiness_transaction_locations(REPO_ROOT)
+            transaction = locations[4]
+            journal = _read_readiness_journal(transaction, REPO_ROOT)
+            _verify_and_finalize_readiness_transaction(
+                REPO_ROOT, args.codex, studio_readiness, journal, locations
+            )
+            print("recovered, verified, and staged Symphony Studio implementation-readiness pair")
+            return
+
+    try:
+        readiness, schema_manifest, static_basis = studio_readiness.compile_full_gate_pair(
+            repo_root=REPO_ROOT,
+            codex_command=args.codex,
+            mise_command=args.mise,
+        )
+    except AttributeError as error:
+        raise SchemaError("readiness compiler does not expose compile_full_gate_pair") from error
+    except studio_readiness.ReadinessError as error:
+        raise SchemaError(f"full readiness gate failed: {error}") from error
+    try:
+        studio_readiness.require_green_pair(readiness, schema_manifest)
+    except (AttributeError, studio_readiness.ReadinessError) as error:
+        raise SchemaError(
+            f"full readiness gate did not produce an acceptable green pair: {error}"
+        ) from error
+
+    compiled_index_tree = _git_index_tree(REPO_ROOT)
+    readiness_bytes = studio_readiness.canonical_json_bytes(readiness)
+    schema_bytes = studio_readiness.canonical_json_bytes(schema_manifest)
+    try:
+        source_sha256 = static_basis["checkout"]["source"]["sha256"]
+    except (KeyError, TypeError) as error:
+        raise SchemaError("readiness compiler returned an invalid static source basis") from error
+    if not isinstance(source_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise SchemaError("readiness compiler returned an invalid source SHA-256")
+    final_archive = None
+    if isinstance(readiness.get("platform"), dict) and readiness["platform"].get(
+        "packageStatus"
+    ) == "pass":
+        try:
+            final_archive = studio_readiness.rehearse_final_pair_source_archive(
+                REPO_ROOT,
+                readiness,
+                schema_manifest,
+                source_sha256,
+                compiled_index_tree,
+            )
+        except AttributeError as error:
+            raise SchemaError("readiness compiler does not expose final archive rehearsal") from error
+        except studio_readiness.ReadinessError as error:
+            raise SchemaError(f"final readiness archive rehearsal failed: {error}") from error
+
+    with schema_bundle_lock(exclusive=True):
+        recover_readiness_transaction(REPO_ROOT)
+        fresh_static, fresh_matrix, fresh_schema = studio_readiness.collect_static_basis(
+            REPO_ROOT, args.codex
+        )
+        if fresh_static != static_basis:
+            raise SchemaError("readiness static basis changed while full gates ran")
+        if _git_index_tree(REPO_ROOT) != compiled_index_tree:
+            raise SchemaError("Git index changed after full readiness compilation")
+        try:
+            studio_readiness.verify_readiness_pair(
+                readiness,
+                schema_manifest,
+                fresh_matrix,
+                expected_static_basis=static_basis,
+            )
+            studio_readiness.require_green_pair(readiness, schema_manifest)
+        except studio_readiness.ReadinessError as error:
+            raise SchemaError(f"full readiness compiler returned an invalid pair: {error}") from error
+        journal, locations = _prepare_readiness_transaction(
+            REPO_ROOT, schema_bytes, readiness_bytes
+        )
+        try:
+            expected_original_schema = studio_readiness.canonical_json_bytes(fresh_schema)
+            if (
+                journal["originalIndexTree"] != compiled_index_tree
+                or journal["originalSchemaSha256"]
+                != sha256_bytes(expected_original_schema)
+            ):
+                raise SchemaError(
+                    "schema manifest or Git index changed at readiness publication boundary"
+                )
+            if final_archive is not None:
+                try:
+                    studio_readiness.validate_package_probe_record(
+                        final_archive,
+                        source_sha256,
+                        journal["candidateIndexTree"],
+                    )
+                except studio_readiness.ReadinessError as error:
+                    raise SchemaError(
+                        f"published candidate tree differs from final archive rehearsal: {error}"
+                    ) from error
+            _commit_readiness_transaction(REPO_ROOT, journal, locations)
+        except AmbiguousReadinessTransactionError:
+            raise
+        except BaseException:
+            # SIGKILL cannot enter this path; the next command will recover the
+            # durable journal. Ordinary failures recover immediately.
+            recover_readiness_transaction(REPO_ROOT)
+            raise
+        _verify_and_finalize_readiness_transaction(
+            REPO_ROOT, args.codex, studio_readiness, journal, locations
+        )
+    print("published and staged Symphony Studio implementation-readiness pair")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     subparsers = result.add_subparsers(dest="command", required=True)
@@ -4591,10 +6763,31 @@ def parser() -> argparse.ArgumentParser:
     seal_parser.add_argument("--tested-at", required=True)
     seal_parser.set_defaults(function=seal_fixtures, lock_exclusive=True)
 
+    readiness_parser = subparsers.add_parser(
+        "publish-readiness",
+        help="run all R0-06 gates outside the lock, then atomically publish and stage the pair",
+    )
+    readiness_parser.add_argument("--codex", default="codex")
+    readiness_parser.add_argument("--mise", default="mise")
+    readiness_parser.set_defaults(function=publish_readiness, manages_lock=True)
+
     verify_parser = subparsers.add_parser("verify", help="verify committed metadata and artifacts")
     verify_parser.add_argument("--installed", action="store_true")
     verify_parser.add_argument("--codex", default="codex")
     verify_parser.set_defaults(function=verify, lock_exclusive=False)
+
+    prepublication_parser = subparsers.add_parser(
+        "verify-source-bound-prepublication",
+        help=(
+            "verify staged source, schema, and installed Codex without consulting "
+            "the pair that publication will replace"
+        ),
+    )
+    prepublication_parser.add_argument("--codex", default="codex")
+    prepublication_parser.set_defaults(
+        function=verify_source_bound_prepublication,
+        lock_exclusive=False,
+    )
 
     regenerate_parser = subparsers.add_parser(
         "regenerate-check", help="regenerate in a temporary directory and compare without writing"
@@ -4607,8 +6800,16 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        with schema_bundle_lock(exclusive=args.lock_exclusive):
+        if getattr(args, "manages_lock", False):
             args.function(args)
+        else:
+            with schema_bundle_lock(exclusive=args.lock_exclusive):
+                if args.lock_exclusive:
+                    if recover_readiness_transaction(REPO_ROOT):
+                        raise SchemaError(
+                            "committed readiness transaction requires publish-readiness verification"
+                        )
+                args.function(args)
     except (OSError, SchemaError, subprocess.CalledProcessError) as error:
         print(f"codex-schema: {error}", file=sys.stderr)
         return 1

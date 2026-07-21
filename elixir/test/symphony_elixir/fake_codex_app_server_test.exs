@@ -269,13 +269,13 @@ defmodule SymphonyElixir.FakeCodexAppServerTest do
     try do
       first =
         FakeCodex.create!(test_root, [
-          FakeCodex.expect(%{"id" => 7, "method" => "account/read"}),
+          FakeCodex.expect(%{"id" => 7, "method" => "account/read", "params" => %{}}),
           FakeCodex.response_error(7, -32_001, "overloaded", nil, fragments: [1, 2, :rest])
         ])
 
       second =
         FakeCodex.create!(test_root, [
-          FakeCodex.expect(%{"id" => 8, "method" => "model/list"}),
+          FakeCodex.expect(%{"id" => 8, "method" => "model/list", "params" => %{}}),
           FakeCodex.response(8, %{"data" => []}, fragments: [3, :rest])
         ])
 
@@ -283,8 +283,15 @@ defmodule SymphonyElixir.FakeCodexAppServerTest do
         run_fixture(fixture, Jason.encode!(payload) <> "\n")
       end
 
-      first_task = Task.async(fn -> run.(first, %{"id" => 7, "method" => "account/read"}) end)
-      second_task = Task.async(fn -> run.(second, %{"id" => 8, "method" => "model/list"}) end)
+      first_task =
+        Task.async(fn ->
+          run.(first, %{"id" => 7, "method" => "account/read", "params" => %{}})
+        end)
+
+      second_task =
+        Task.async(fn ->
+          run.(second, %{"id" => 8, "method" => "model/list", "params" => %{}})
+        end)
 
       {first_output, 0} = Task.await(first_task)
       {second_output, 0} = Task.await(second_task)
