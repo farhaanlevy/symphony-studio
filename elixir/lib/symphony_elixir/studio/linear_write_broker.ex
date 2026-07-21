@@ -124,6 +124,9 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker do
       {:error, :least_privilege_write_broker_unavailable} ->
         {:error, :least_privilege_write_broker_unavailable}
 
+      {:error, :protected_linear_issue_denied} ->
+        {:error, :protected_linear_issue_denied}
+
       {:error, :rejected} ->
         {:error, :linear_write_broker_rejected}
 
