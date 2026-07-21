@@ -134,6 +134,16 @@ export default defineConfig({
       testMatch: /harness-contract\.spec\.mjs/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } },
     },
+    {
+      name: "owner-readonly-desktop",
+      testMatch: /owner-readonly\.spec\.mjs/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
+    },
+    {
+      name: "owner-readonly-mobile",
+      testMatch: /owner-readonly\.spec\.mjs/,
+      use: { ...devices["Pixel 5"], viewport: { width: 390, height: 844 } },
+    },
     ...(liveWrite
       ? [
           {

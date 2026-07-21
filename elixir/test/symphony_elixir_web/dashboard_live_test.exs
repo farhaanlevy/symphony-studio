@@ -309,9 +309,9 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "Tokens used"
     assert html =~ "1,500"
     assert html =~ "View run"
+    assert html =~ ~s(aria-label="Open STUDIO-201 in the issue tracker")
     assert html =~ ~s(data-testid="connection-state")
     assert html =~ ~s(data-testid="mission-run")
-    assert html =~ ~s(aria-label="Open STUDIO-201 in the issue tracker")
     refute html =~ "hero-card"
     refute html =~ "% complete"
   end
@@ -374,15 +374,24 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "Tests failed: 1 failure"
     assert html =~ "Independent review"
     assert html =~ "Not run"
-    assert html =~ ~s(data-testid="run-truth-state")
-    assert html =~ ~s(data-testid="run-next-action")
-    assert html =~ ~s(data-testid="run-objective")
-    assert html =~ ~s(data-testid="run-acceptance")
-    assert html =~ ~s(data-testid="run-plan")
-    assert html =~ ~s(data-testid="run-checks")
-    assert html =~ ~s(data-testid="run-independent-review")
-    assert html =~ ~s(data-testid="run-outcome")
-    assert html =~ ~s(data-testid="run-completion-reason")
+
+    for test_id <- [
+          "run-objective",
+          "run-next-action",
+          "run-truth-state",
+          "run-acceptance",
+          "run-plan",
+          "run-phase",
+          "run-commands",
+          "run-changed-files",
+          "run-checks",
+          "run-independent-review",
+          "run-evidence",
+          "run-outcome",
+          "run-completion-reason"
+        ] do
+      assert html =~ ~s(data-testid="#{test_id}")
+    end
 
     {outcome_index, _} = :binary.match(html, "Evidence and outcome")
     {activity_index, _} = :binary.match(html, "Meaningful events")

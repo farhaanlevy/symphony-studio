@@ -45,6 +45,8 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   @project_root Path.expand("../../..", __DIR__)
   @readiness_path Path.join(@project_root, "artifacts/readiness/implementation-readiness.json")
   @event_replay_limit 512
+  @preview_project_slug "symphony-studio-build-week-3f2698765546"
+  @preview_team_key "SYM"
 
   @impl true
   def load(:mission_control, _params), do: mission_control()
@@ -64,6 +66,31 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   end
 
   def load(:run_detail, _params), do: error("run_not_found", "Run not found.")
+
+  @doc "Returns the bounded, read-only owner verification projection."
+  @spec verification(map()) :: {:ok, map()} | {:error, SymphonyElixirWeb.StudioDataPort.public_error()}
+  def verification(params \\ %{}) when is_map(params) do
+    with {:ok, mission} <- mission_control() do
+      intents = intent_documents()
+      run = verification_run(mission, params)
+      intent = verification_intent(intents, run, params)
+      setup = setup_page()
+
+      {:ok,
+       %{
+         authoritative: true,
+         dependencies: verification_dependencies(setup),
+         intent: intent && verification_intent_payload(intent),
+         mode: "live",
+         project: %{slugId: @preview_project_slug, teamKey: @preview_team_key},
+         run: run && verification_run_payload(run, mission),
+         schemaVersion: 1,
+         sequence: verification_sequence(mission.runs),
+         source: "symphony_runtime",
+         stateRunIds: verification_state_run_ids(mission.runs)
+       }}
+    end
+  end
 
   @impl true
   def command(:submit_intent, %{"kind" => kind, "content" => content}, context)
@@ -126,6 +153,116 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   def command(_command, _payload, _context) do
     error("unsupported_web_command", "That action is not available.")
+  end
+
+  defp verification_run(mission, params) do
+    run_id = Map.get(params, "run_id") || Map.get(params, :run_id)
+
+    if is_binary(run_id) and run_id != "" do
+      Enum.find(mission.runs, &(&1.id == run_id or &1.issue_identifier == run_id))
+    else
+      mission.active_run
+    end
+  end
+
+  defp verification_intent(intents, run, params) do
+    intent_id = Map.get(params, "intent") || Map.get(params, :intent)
+
+    cond do
+      is_binary(intent_id) and intent_id != "" -> Enum.find(intents, &(&1["intent_id"] == intent_id))
+      is_map(run) -> Enum.find(intents, &(get_in(&1, ["admission", "run_id"]) == run.id))
+      true -> List.last(intents)
+    end
+  end
+
+  defp verification_intent_payload(document) do
+    page = intent_page(document)
+    publication = page.publication
+    confirmed = publication.tasks |> Enum.take(8) |> Enum.filter(&(&1.status == "confirmed"))
+    admission = page.admission
+
+    %{
+      intentId: page.intent_id,
+      publication: %{
+        confirmedWrites: length(confirmed),
+        idempotencyStatus: verification_publication_status(publication.status),
+        linearIssues: Enum.map(confirmed, &Map.take(&1, [:issue_id, :issue_identifier, :task_id])),
+        status: verification_publication_status(publication.status)
+      },
+      start: %{
+        issueIdentifier: page.start.issue_identifier,
+        runId: admission && admission.run_id,
+        status: if(admission, do: "admitted", else: page.start.status)
+      },
+      status: (page.proposal && page.proposal.status) || page.lifecycle_state
+    }
+  end
+
+  defp verification_publication_status("complete"), do: "confirmed"
+  defp verification_publication_status(status), do: status
+
+  defp verification_run_payload(run, mission) do
+    page = run_page(run, mission)
+    evidence = Enum.find(page.evidence, &(&1.current and &1.sealed))
+
+    %{
+      checks: %{required: aggregate_check_status(page.checks), results: page.checks},
+      completion: %{reason: page.outcome.reason, status: completion_status(page.outcome.status)},
+      delivery: page.delivery || %{},
+      evidence: %{
+        current: not is_nil(evidence),
+        reference: evidence && evidence.reference,
+        sealed: not is_nil(evidence)
+      },
+      issueIdentifier: run.issue_identifier,
+      model: verification_model(run.conductor),
+      objective: run.objective,
+      phase: run.phase,
+      reasoningEffort: verification_reasoning_effort(run.conductor),
+      review: page.review,
+      runId: run.id,
+      state: run.state,
+      trackerHandoff: page.tracker_handoff,
+      workspace: %{isolated: Map.get(run, :workspace_isolated, false)}
+    }
+  end
+
+  defp aggregate_check_status([]), do: "not_reported"
+
+  defp aggregate_check_status(checks) when is_list(checks) do
+    cond do
+      Enum.all?(checks, &(&1.status == :passed)) -> "passed"
+      Enum.any?(checks, &(&1.status == :active)) -> "active"
+      true -> "failed"
+    end
+  end
+
+  defp completion_status(:complete), do: "completed"
+  defp completion_status(_status), do: "incomplete"
+  defp verification_model("GPT-5.6 Sol Ultra"), do: "gpt-5.6-sol"
+  defp verification_model(_conductor), do: nil
+  defp verification_reasoning_effort("GPT-5.6 Sol Ultra"), do: "ultra"
+  defp verification_reasoning_effort(_conductor), do: nil
+
+  defp verification_sequence(runs) do
+    runs |> Enum.map(&Map.get(&1, :last_event_sequence, 0)) |> Enum.max(fn -> 0 end)
+  end
+
+  defp verification_state_run_ids(runs) do
+    Map.new(runs, &{to_string(&1.state), &1.id})
+  end
+
+  defp verification_dependencies(setup) do
+    %{
+      codex: dependency_status(setup, ["Codex authentication", "Compatibility", "Runtime selection"]),
+      linear: dependency_status(setup, ["Linear project"]),
+      store: if(match?({:ok, _store}, intent_store()), do: "ready", else: "blocked")
+    }
+  end
+
+  defp dependency_status(setup, systems) do
+    rows = Enum.filter(setup.rows, &(&1.system in systems))
+    if length(rows) == length(systems) and Enum.all?(rows, &(&1.state == :pass)), do: "ready", else: "blocked"
   end
 
   defp mission_control do
@@ -767,8 +904,9 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
     manifest_revision = string_path(manifest, ["checkout", "headCommit"])
     runtime_ready? = string_path(manifest, ["runtime", "overall"]) == "pass"
     revision_current? = is_binary(current_revision) and current_revision == manifest_revision
-    ready? = runtime_ready? and revision_current?
-    model = model_status(manifest)
+    linear_state = live_linear_state(manifest)
+    model = manifest |> model_status() |> live_model_status()
+    ready? = runtime_ready? and revision_current? and linear_state == :pass and model.status == :pass
     checked_at = file_timestamp(readiness_path)
     {verdict, verdict_label} = setup_verdict(ready?)
 
@@ -776,15 +914,15 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       kind: :setup,
       verdict: verdict,
       verdict_label: verdict_label,
-      reason: setup_reason(runtime_ready?, revision_current?),
+      reason: setup_reason(runtime_ready?, revision_current?, linear_state, model.status),
       checked_at: checked_at,
       source_revision: manifest_revision,
       current_revision: current_revision,
-      rows: setup_rows(manifest, current_revision, revision_current?, runtime_ready?, model, checked_at)
+      rows: setup_rows(manifest, current_revision, revision_current?, runtime_ready?, linear_state, model, checked_at)
     }
   end
 
-  defp setup_rows(manifest, current_revision, revision_current?, runtime_ready?, model, checked_at) do
+  defp setup_rows(manifest, current_revision, revision_current?, runtime_ready?, linear_state, model, checked_at) do
     [
       setup_row(
         "Repository",
@@ -796,7 +934,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       ),
       setup_row(
         "Linear project",
-        manifest_status(manifest, ["capabilities", "linear", "project", "status"]),
+        linear_state,
         "Dedicated project binding",
         short_binding(string_path(manifest, ["capabilities", "linear", "configuredProjectBinding"])),
         checked_at,
@@ -1280,9 +1418,45 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
     end
   end
 
-  defp setup_reason(true, true), do: "Repository, Linear, Codex, and runtime evidence match this checkout."
-  defp setup_reason(true, false), do: "Readiness passed for a different source revision."
-  defp setup_reason(false, _revision_current?), do: "At least one required readiness check failed."
+  defp live_linear_state(manifest) do
+    manifest_state = manifest_status(manifest, ["capabilities", "linear", "project", "status"])
+
+    with :pass <- manifest_state,
+         settings <- Config.settings!(),
+         "linear" <- settings.tracker.kind,
+         @preview_project_slug <- settings.tracker.project_slug do
+      :pass
+    else
+      _mismatch -> :fail
+    end
+  rescue
+    _error -> :fail
+  end
+
+  defp live_model_status(%{status: :pass} = status) do
+    if configured_conductor() == "GPT-5.6 Sol Ultra" do
+      status
+    else
+      %{status: :fail, value: "Configured workflow is not GPT-5.6 Sol Ultra"}
+    end
+  end
+
+  defp live_model_status(status), do: status
+
+  defp setup_reason(true, true, :pass, :pass),
+    do: "Repository, Linear, Codex, and runtime evidence match this checkout."
+
+  defp setup_reason(true, false, _linear_state, _model_state),
+    do: "Readiness passed for a different source revision."
+
+  defp setup_reason(_runtime_ready?, _revision_current?, :fail, _model_state),
+    do: "The active workflow is not bound to the verified dedicated Linear project."
+
+  defp setup_reason(_runtime_ready?, _revision_current?, _linear_state, :fail),
+    do: "The active workflow does not select GPT-5.6 Sol with Ultra reasoning."
+
+  defp setup_reason(false, _revision_current?, _linear_state, _model_state),
+    do: "At least one required readiness check failed."
 
   defp setup_state_label(:pass), do: "Pass"
   defp setup_state_label(:warning), do: "Warning"

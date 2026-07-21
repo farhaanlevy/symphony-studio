@@ -256,6 +256,22 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     assert page.outcome.status == :complete
     assert page.run.state == :completed
     assert page.run.phase == :outcome
+
+    assert {:ok, probe} = RuntimeStudioDataPort.verification(%{"run_id" => run_id})
+    assert probe.authoritative
+    assert probe.source == "symphony_runtime"
+    assert probe.project == %{slugId: "symphony-studio-build-week-3f2698765546", teamKey: "SYM"}
+    assert probe.run.runId == run_id
+    assert probe.run.checks.required == "passed"
+    assert probe.run.review.status == :passed
+
+    assert probe.run.evidence == %{
+             current: true,
+             reference: "sha256:" <> String.duplicate("b", 64),
+             sealed: true
+           }
+
+    assert probe.run.completion.status == "completed"
   end
 
   test "Setup reads the sealed readiness artifact and fails closed for changed source" do
@@ -269,8 +285,8 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     assert compatibility.value == "0.144.3"
 
     model = Enum.find(page.rows, &(&1.system == "Runtime selection"))
-    assert model.state == :pass
-    assert model.value == "Ultra reasoning verified"
+    assert model.state == :fail
+    assert model.value == "Configured workflow is not GPT-5.6 Sol Ultra"
 
     repository = Enum.find(page.rows, &(&1.system == "Repository"))
     assert repository.state == :fail

@@ -48,7 +48,10 @@ export function readOwnerIntent() {
 
 export async function readProbe(page) {
   const result = await page.evaluate(async (pathValue) => {
-    const response = await fetch(pathValue, {
+    const url = new URL(pathValue, window.location.origin);
+    const intent = new URL(window.location.href).searchParams.get("intent");
+    if (intent) url.searchParams.set("intent", intent);
+    const response = await fetch(url, {
       credentials: "same-origin",
       headers: { Accept: "application/json" },
     });
@@ -61,7 +64,7 @@ export async function readProbe(page) {
     authoritative: true,
     mode: "live",
     schemaVersion: 1,
-    source: "studio_store",
+    source: "symphony_runtime",
   });
   expect(value.project).toMatchObject({
     slugId: "symphony-studio-build-week-3f2698765546",

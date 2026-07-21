@@ -9,7 +9,8 @@
     "install-browser": "playwright install chromium",
     "list": "playwright test --list",
     "test": "playwright test --workers=1 --retries=0",
-    "test:contract": "playwright test --project=harness-contract --workers=1 --retries=0"
+    "test:contract": "playwright test --project=harness-contract --workers=1 --retries=0",
+    "test:owner-readonly": "playwright test --project=owner-readonly-desktop --project=owner-readonly-mobile --workers=1 --retries=0"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.12.1",
