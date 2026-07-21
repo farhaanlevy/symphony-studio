@@ -28,6 +28,9 @@ For the current source:
   confirmed Linear mutations;
 - no live Linear write, demonstration issue, real Codex run, completed golden
   path, or integrated-preview clean-launch result is claimed yet;
+- the full Elixir suite runs 732 tests with zero failures and two skips, but
+  honest measured coverage is 86.96% against the unchanged 100% repository
+  threshold; the complete preview gate therefore remains failed;
 - unavailable live dependencies and missing run evidence render blocked or
   incomplete; they never become a mock success.
 
@@ -55,15 +58,17 @@ administration, disabled coming-soon controls, and speculative abstractions.
   candidate's clean-launch evidence; other platforms are unverified.
 - The server is local and loopback-only. Remote hosting and multi-user access
   are outside preview scope.
-- One dedicated project and one safe demo journey are supported. `SYM-1` and
-  `SYM-2` remain protected R0 read-only fixtures and are never demo/reset data.
-- A separately scoped preview-write authority is required for approved task
-  publication and the minimum lifecycle transitions. The R0 read-only
-  credential is not broadened or replaced; it must be simultaneously available
-  only so Studio can prove the two credential values differ before any write.
-- The STDIO MCP surface is a non-mutating Intent Liaison. It can attach, submit,
-  clarify, present, and query status. Approval, publication, and start are
-  trusted-local-UI actions until a single-use human-attested host receipt exists.
+- The preview is bounded to one dedicated project. Its single safe demo journey
+  remains blocked/pending. `SYM-1` and `SYM-2` remain protected R0 read-only
+  fixtures and are never demo/reset data.
+- Production live Linear write is disabled in this candidate. An in-process
+  comparison cannot preserve accepted R0 credential blindness. Re-enabling the
+  path requires a distinct trusted out-of-process preview broker that owns and
+  compares both credentials, retains the write key, and executes only the exact
+  typed operations itself. The existing R0 read-only broker is not broadened.
+- The STDIO MCP surface is an owner-local Intent Liaison. Attach, submit,
+  clarify, and present persist canonical local planning state; status reads it.
+  MCP has no approval, publication, start, or Linear mutation authority.
 - Read-only browser verification requires no credential or pairing and is
   limited to the loopback production server. Optional browser storage state,
   when supplied for a future authenticated surface, must be an owner-only
@@ -94,8 +99,8 @@ Before the first preview release, resolve these items with current
 commit/evidence references or retain each item as a blocker:
 
 - live rehearsal of the exact-intent local reset against the integrated store;
-- dedicated preview-write authority and one safe demonstration issue distinct
-  from `SYM-1` and `SYM-2`;
+- a separately reviewed out-of-process preview-write broker and one safe
+  demonstration issue distinct from `SYM-1` and `SYM-2`;
 - approved idempotent Backlog publication, dependency creation, and the single
   selected first-ready transition to Todo against the dedicated project;
 - real Symphony admission, isolated GPT-5.6 Sol Ultra execution, deterministic
@@ -104,6 +109,8 @@ commit/evidence references or retain each item as a blocker:
   evidence, delivery, handoff, terminal, and model-attestation event sequence;
 - real golden-path result, four-viewport state matrix, clean launch,
   public-artifact audit, fresh independent review, and checksum/provenance.
+- measured preview coverage at the unchanged 100% repository threshold; the
+  current 86.96% result must not be presented as a green complete gate.
 
 No screenshot, README statement, video narration, or Devpost copy may describe
 one of these as working before its evidence is current for the release commit.

@@ -30,15 +30,15 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   Mission Control and Run Detail preserve the original Symphony observability
   snapshot. New Work uses the canonical Intent Service through optional remote
-  calls so this web package can land before the service package without a
-  compile-time dependency.
+  calls for local planning and status. Linear publication and start stay
+  fail-closed until a distinct trusted out-of-process preview-write broker is
+  implemented; this process never constructs or injects a Linear adapter.
   """
 
   @behaviour SymphonyElixirWeb.StudioDataPort
 
   alias SymphonyElixir.{Config, Event, EventSink}
   alias SymphonyElixir.Studio.Intent.Store
-  alias SymphonyElixir.Studio.LinearWriteBroker.Linear
   alias SymphonyElixirWeb.{Endpoint, Presenter}
 
   @intent_service SymphonyElixir.Studio.IntentService
@@ -47,6 +47,11 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   @event_replay_limit 512
   @preview_project_slug "symphony-studio-build-week-3f2698765546"
   @preview_team_key "SYM"
+  @external_write_broker_message "Linear publication and start require a distinct trusted out-of-process preview-write broker; live preview writes are disabled in this build."
+
+  @doc "Reports whether the production host can execute Linear publication or start actions."
+  @spec external_write_actions_enabled?() :: false
+  def external_write_actions_enabled?, do: false
 
   @impl true
   def load(:mission_control, _params), do: mission_control()
@@ -134,22 +139,11 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
     intent_command(:present_proposal, [], context)
   end
 
-  def command(:approve_publication, %{"proposal_digest" => digest}, context)
-      when is_binary(digest) and digest != "" do
-    intent_command(
-      :approve_publication,
-      [digest, "publish_linear_backlog"],
-      context
-    )
-  end
+  def command(:approve_publication, _payload, _context), do: external_write_broker_required()
 
-  def command(:publish_approved_plan, _payload, context) do
-    intent_command(:publish_approved_plan, [], context)
-  end
+  def command(:publish_approved_plan, _payload, _context), do: external_write_broker_required()
 
-  def command(:start_first_ready, _payload, context) do
-    intent_command(:start_first_ready, ["start_first_ready"], context)
-  end
+  def command(:start_first_ready, _payload, _context), do: external_write_broker_required()
 
   def command(_command, _payload, _context) do
     error("unsupported_web_command", "That action is not available.")
@@ -1085,21 +1079,31 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   defp setup_page do
     readiness_path = web_config(:studio_readiness_path, @readiness_path)
-    current_revision = current_revision()
+    project_root = web_config(:studio_project_root, @project_root)
+    current_revision = current_revision(project_root)
 
     case read_json(readiness_path) do
-      {:ok, manifest} -> setup_from_manifest(manifest, readiness_path, current_revision)
+      {:ok, manifest} -> setup_from_manifest(manifest, readiness_path, project_root, current_revision)
       {:error, reason} -> setup_unavailable(reason, current_revision)
     end
   end
 
-  defp setup_from_manifest(manifest, readiness_path, current_revision) do
+  defp setup_from_manifest(manifest, readiness_path, project_root, current_revision) do
     manifest_revision = string_path(manifest, ["checkout", "headCommit"])
     runtime_ready? = string_path(manifest, ["runtime", "overall"]) == "pass"
-    revision_current? = is_binary(current_revision) and current_revision == manifest_revision
+    candidate_revision = revision_head(current_revision)
+    candidate_exact? = is_binary(candidate_revision) and current_revision == candidate_revision
+
+    foundation_current? =
+      runtime_ready? and
+        foundation_ancestor?(project_root, manifest_revision, candidate_revision)
+
     linear_state = live_linear_state(manifest)
     model = manifest |> model_status() |> live_model_status()
-    ready? = runtime_ready? and revision_current? and linear_state == :pass and model.status == :pass
+
+    ready? =
+      foundation_current? and candidate_exact? and linear_state == :pass and model.status == :pass
+
     checked_at = file_timestamp(readiness_path)
     {verdict, verdict_label} = setup_verdict(ready?)
 
@@ -1107,23 +1111,55 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       kind: :setup,
       verdict: verdict,
       verdict_label: verdict_label,
-      reason: setup_reason(runtime_ready?, revision_current?, linear_state, model.status),
+      reason:
+        setup_reason(
+          runtime_ready?,
+          foundation_current?,
+          candidate_exact?,
+          linear_state,
+          model.status
+        ),
       checked_at: checked_at,
       source_revision: manifest_revision,
       current_revision: current_revision,
-      rows: setup_rows(manifest, current_revision, revision_current?, runtime_ready?, linear_state, model, checked_at)
+      rows:
+        setup_rows(
+          manifest,
+          current_revision,
+          candidate_exact?,
+          foundation_current?,
+          linear_state,
+          model,
+          checked_at
+        )
     }
   end
 
-  defp setup_rows(manifest, current_revision, revision_current?, runtime_ready?, linear_state, model, checked_at) do
+  defp setup_rows(
+         manifest,
+         current_revision,
+         candidate_exact?,
+         foundation_current?,
+         linear_state,
+         model,
+         checked_at
+       ) do
     [
       setup_row(
         "Repository",
-        readiness_state(revision_current?),
-        repository_label(),
+        readiness_state(candidate_exact?),
+        "Preview candidate · exact committed checkout",
         short_revision(current_revision),
         checked_at,
-        repository_remediation(revision_current?)
+        candidate_remediation(candidate_exact?)
+      ),
+      setup_row(
+        "R0 foundation",
+        readiness_state(foundation_current?),
+        "Accepted readiness ancestry",
+        short_revision(string_path(manifest, ["checkout", "headCommit"])),
+        checked_at,
+        foundation_remediation(foundation_current?)
       ),
       setup_row(
         "Linear project",
@@ -1159,23 +1195,25 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       ),
       setup_row(
         "Readiness evidence",
-        readiness_state(runtime_ready?),
-        "Deterministic readiness",
-        readiness_value(runtime_ready?),
+        :warning,
+        "Preview gates · separate from R0 foundation",
+        "Final gate and review pending",
         checked_at,
-        "Run the readiness publisher and use only its verified result."
+        "Run the preview candidate gate and fresh independent review; the R0 artifact does not attest preview changes."
       )
     ]
   end
 
-  defp setup_verdict(true), do: {:ready, "Ready"}
+  defp setup_verdict(true), do: {:ready, "Candidate preflight ready"}
   defp setup_verdict(false), do: {:not_ready, "Not ready"}
   defp readiness_state(true), do: :pass
   defp readiness_state(false), do: :fail
-  defp readiness_value(true), do: "Passed"
-  defp readiness_value(false), do: "Failed"
-  defp repository_remediation(true), do: "No action needed."
-  defp repository_remediation(false), do: "Regenerate readiness evidence for this checkout."
+  defp candidate_remediation(true), do: "No action needed."
+  defp candidate_remediation(false), do: "Use an exact committed preview checkout before validation."
+  defp foundation_remediation(true), do: "No action needed."
+
+  defp foundation_remediation(false),
+    do: "Use a descendant of the accepted foundation or publish new foundation evidence."
 
   defp authentication_state(manifest) do
     manifest
@@ -1636,20 +1674,23 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   defp live_model_status(status), do: status
 
-  defp setup_reason(true, true, :pass, :pass),
-    do: "Repository, Linear, Codex, and runtime evidence match this checkout."
+  defp setup_reason(true, true, true, :pass, :pass),
+    do: "The accepted R0 foundation is an ancestor of this exact tracked preview checkout. Preview candidate gates remain separate and are not attested by the foundation artifact."
 
-  defp setup_reason(true, false, _linear_state, _model_state),
-    do: "Readiness passed for a different source revision."
+  defp setup_reason(false, _foundation_current?, _candidate_exact?, _linear_state, _model_state),
+    do: "At least one required R0 foundation readiness check failed."
 
-  defp setup_reason(_runtime_ready?, _revision_current?, :fail, _model_state),
+  defp setup_reason(true, false, _candidate_exact?, _linear_state, _model_state),
+    do: "The accepted R0 readiness artifact is not an ancestor of this preview candidate."
+
+  defp setup_reason(_runtime_ready?, _foundation_current?, false, _linear_state, _model_state),
+    do: "The preview candidate has tracked or untracked changes; its accepted R0 foundation remains separate."
+
+  defp setup_reason(_runtime_ready?, _foundation_current?, _candidate_exact?, :fail, _model_state),
     do: "The active workflow is not bound to the verified dedicated Linear project."
 
-  defp setup_reason(_runtime_ready?, _revision_current?, _linear_state, :fail),
+  defp setup_reason(_runtime_ready?, _foundation_current?, _candidate_exact?, _linear_state, :fail),
     do: "The active workflow does not select GPT-5.6 Sol with Ultra reasoning."
-
-  defp setup_reason(false, _revision_current?, _linear_state, _model_state),
-    do: "At least one required readiness check failed."
 
   defp setup_state_label(:pass), do: "Pass"
   defp setup_state_label(:warning), do: "Warning"
@@ -1672,18 +1713,24 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
     end
   end
 
-  defp current_revision do
-    case System.cmd("git", ["rev-parse", "HEAD"], cd: @project_root, stderr_to_stdout: true) do
+  defp current_revision(project_root) do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: project_root, stderr_to_stdout: true) do
       {revision, 0} ->
         revision = String.trim(revision)
 
-        case System.cmd("git", ["status", "--porcelain", "--untracked-files=no"],
-               cd: @project_root,
+        case System.cmd(
+               "bash",
+               [
+                 "-o",
+                 "pipefail",
+                 "-c",
+                 "git status --porcelain=v1 --untracked-files=all | grep -q ."
+               ],
+               cd: project_root,
                stderr_to_stdout: true
              ) do
-          {"", 0} -> revision
-          {_changes, 0} -> "#{revision}+changes"
-          _ -> revision
+          {_no_changes, 1} -> revision
+          {_changes_or_error, _status} -> "#{revision}+changes"
         end
 
       _ ->
@@ -1692,6 +1739,34 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   rescue
     _error -> nil
   end
+
+  defp revision_head(revision) when is_binary(revision) do
+    revision
+    |> String.split("+changes", parts: 2)
+    |> List.first()
+    |> immutable_revision()
+  end
+
+  defp revision_head(_revision), do: nil
+
+  defp foundation_ancestor?(project_root, foundation_revision, candidate_revision)
+       when is_binary(project_root) do
+    with foundation when is_binary(foundation) <- immutable_revision(foundation_revision),
+         candidate when is_binary(candidate) <- immutable_revision(candidate_revision),
+         {_output, 0} <-
+           System.cmd("git", ["merge-base", "--is-ancestor", foundation, candidate],
+             cd: project_root,
+             stderr_to_stdout: true
+           ) do
+      true
+    else
+      _not_ancestor_or_invalid -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp foundation_ancestor?(_project_root, _foundation_revision, _candidate_revision), do: false
 
   defp repository_label do
     web_config(:studio_repository_label, "Symphony Studio")
@@ -1812,13 +1887,14 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   end
 
   defp intent_service_options do
-    data_options =
-      case intent_data_root() do
-        root when is_binary(root) -> [data_root: root]
-        nil -> []
-      end
+    case intent_data_root() do
+      root when is_binary(root) -> [data_root: root]
+      nil -> []
+    end
+  end
 
-    Keyword.put(data_options, :broker, web_config(:studio_linear_write_broker, Linear.target()))
+  defp external_write_broker_required do
+    error("external_write_broker_required", @external_write_broker_message)
   end
 
   defp intent_data_root do

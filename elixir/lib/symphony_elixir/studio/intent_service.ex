@@ -173,17 +173,15 @@ defmodule SymphonyElixir.Studio.IntentService do
   @spec publish_approved_plan(String.t(), String.t(), keyword()) :: result()
   def publish_approved_plan(intent_id, command_id, opts \\ []) do
     request = %{"command_id" => command_id, "intent_id" => intent_id}
+    tool = "studio_publish_approved_plan"
 
     with :ok <- validate_command_id(command_id),
          {:ok, context} <- context(opts),
-         :ok <- require_trusted_host(context),
-         {:ok, :new} <- ensure_command_new(context.store, intent_id, "studio_publish_approved_plan", command_id, request),
-         :ok <- initialize_publication(context, intent_id),
-         :ok <- publication_loop(context, intent_id, 0),
-         {:ok, snapshot} <- finish_command(context, intent_id, "studio_publish_approved_plan", command_id, request) do
-      {:ok, snapshot}
+         :ok <- require_trusted_host(context) do
+      with_external_operation_lock(context, intent_id, "publication", fn ->
+        run_publication_command(context, intent_id, tool, command_id, request)
+      end)
     else
-      {:ok, {:replay, snapshot}} -> {:ok, snapshot}
       {:error, %{} = error} -> {:error, error}
       {:error, reason} -> {:error, translate_error(reason)}
     end
@@ -198,21 +196,18 @@ defmodule SymphonyElixir.Studio.IntentService do
       "intent_id" => intent_id
     }
 
+    tool = "studio_start_first_ready"
+
     with :ok <- validate_command_id(command_id),
          true <- confirmation == @start_confirmation,
          {:ok, context} <- context(opts),
-         :ok <- require_trusted_host(context),
-         {:ok, :new} <- ensure_command_new(context.store, intent_id, "studio_start_first_ready", command_id, request),
-         {:ok, selection} <- initialize_start(context, intent_id, confirmation),
-         :ok <- run_start_transition(context, intent_id, selection),
-         {:ok, snapshot} <- finish_command(context, intent_id, "studio_start_first_ready", command_id, request) do
-      {:ok, snapshot}
+         :ok <- require_trusted_host(context) do
+      with_external_operation_lock(context, intent_id, "start", fn ->
+        run_start_command(context, intent_id, confirmation, tool, command_id, request)
+      end)
     else
       false ->
         {:error, error(:confirmation_mismatch, "Starting work requires the exact confirmation start_first_ready.")}
-
-      {:ok, {:replay, snapshot}} ->
-        {:ok, snapshot}
 
       {:error, %{} = error} ->
         {:error, error}
@@ -504,36 +499,71 @@ defmodule SymphonyElixir.Studio.IntentService do
     end
   end
 
-  defp ensure_command_new(store, intent_id, tool, command_id, request) do
-    with {:ok, document} <- Store.read_intent(store, intent_id) do
-      case Document.command_state(document, tool, command_id, request) do
-        :new ->
-          {:ok, :new}
+  defp run_publication_command(context, intent_id, tool, command_id, request) do
+    case claim_publication_command(context, intent_id, tool, command_id, request) do
+      {:ok, {:replay, snapshot}} ->
+        {:ok, snapshot}
 
-        :replay ->
-          {:ok, {:replay, Document.public_snapshot(document)}}
+      {:ok, :claimed} ->
+        finish_publication_attempt(context, intent_id, tool, command_id, request)
 
-        {:conflict, details} ->
-          {:error, error(:command_conflict, "Command ID was already used with different input.", details)}
-      end
+      {:error, %{} = error} ->
+        {:error, error}
+
+      {:error, reason} ->
+        {:error, translate_error(reason)}
     end
   end
 
-  defp initialize_publication(context, intent_id) do
+  defp claim_publication_command(context, intent_id, tool, command_id, request) do
     timestamp = now(context)
-    updater = fn document -> initialize_publication_document(document, intent_id, timestamp) end
+
+    updater = fn document ->
+      claim_publication_document(document, intent_id, tool, command_id, request, timestamp)
+    end
 
     case Store.update_intent(context.store, intent_id, updater) do
-      {:ok, :ok} -> :ok
+      {:ok, result} -> {:ok, result}
       {:error, %{} = error} -> {:error, error}
       {:error, reason} -> {:error, translate_error(reason)}
     end
   end
 
-  defp initialize_publication_document(document, intent_id, timestamp) do
-    case approved_proposal(document) do
-      {:ok, proposal} -> initialize_approved_publication(document, proposal, intent_id, timestamp)
-      {:error, _reason} = error -> error
+  defp claim_publication_document(document, intent_id, tool, command_id, request, timestamp) do
+    case Document.command_state(document, tool, command_id, request) do
+      :replay ->
+        {:ok, document, {:replay, Document.public_snapshot(document)}}
+
+      {:conflict, details} ->
+        {:error, error(:command_conflict, "Command ID was already used with different input.", details)}
+
+      :new ->
+        claim_new_publication(document, intent_id, tool, command_id, request, timestamp)
+    end
+  end
+
+  defp claim_new_publication(document, intent_id, tool, command_id, request, timestamp) do
+    with {:ok, proposal} <- approved_proposal(document),
+         {:ok, initialized, :ok} <-
+           initialize_approved_publication(document, proposal, intent_id, timestamp) do
+      claimed =
+        initialized
+        |> put_in(["publication", "active_command_id"], command_id)
+        |> put_in(["publication", "attempt_id"], command_id)
+        |> Document.record_command(tool, command_id, request, timestamp)
+
+      {:ok, claimed, :claimed}
+    end
+  end
+
+  defp finish_publication_attempt(context, intent_id, tool, command_id, request) do
+    case publication_loop(context, intent_id, 0) do
+      :ok ->
+        finish_external_command(context, intent_id, "publication", tool, command_id, request)
+
+      {:error, _reason} = error ->
+        release_external_command(context, intent_id, "publication", command_id)
+        error
     end
   end
 
@@ -946,14 +976,94 @@ defmodule SymphonyElixir.Studio.IntentService do
     )
   end
 
-  defp initialize_start(context, intent_id, confirmation) do
+  defp run_start_command(context, intent_id, confirmation, tool, command_id, request) do
+    case claim_start_command(context, intent_id, confirmation, tool, command_id, request) do
+      {:ok, {:replay, snapshot}} ->
+        {:ok, snapshot}
+
+      {:ok, {:complete, snapshot}} ->
+        {:ok, snapshot}
+
+      {:ok, {:claimed, selection}} ->
+        finish_start_attempt(context, intent_id, selection, tool, command_id, request)
+
+      {:error, %{} = error} ->
+        {:error, error}
+
+      {:error, reason} ->
+        {:error, translate_error(reason)}
+    end
+  end
+
+  defp claim_start_command(context, intent_id, confirmation, tool, command_id, request) do
     timestamp = now(context)
-    updater = fn document -> initialize_start_document(document, confirmation, timestamp) end
+
+    updater = fn document ->
+      claim_start_document(document, confirmation, tool, command_id, request, timestamp)
+    end
 
     case Store.update_intent(context.store, intent_id, updater) do
-      {:ok, {:ok, task, mapping}} -> {:ok, {task, mapping}}
+      {:ok, result} -> {:ok, result}
       {:error, %{} = error} -> {:error, error}
       {:error, reason} -> {:error, translate_error(reason)}
+    end
+  end
+
+  defp claim_start_document(document, confirmation, tool, command_id, request, timestamp) do
+    case Document.command_state(document, tool, command_id, request) do
+      :replay ->
+        {:ok, document, {:replay, Document.public_snapshot(document)}}
+
+      {:conflict, details} ->
+        {:error, error(:command_conflict, "Command ID was already used with different input.", details)}
+
+      :new ->
+        claim_new_start(document, confirmation, tool, command_id, request, timestamp)
+    end
+  end
+
+  defp claim_new_start(document, confirmation, tool, command_id, request, timestamp) do
+    with previous_status <- get_in(document, ["start", "status"]),
+         {:ok, initialized, {:ok, task, mapping}} <-
+           initialize_start_document(document, confirmation, timestamp) do
+      claim_initialized_start(
+        initialized,
+        {task, mapping},
+        previous_status,
+        tool,
+        command_id,
+        request,
+        timestamp
+      )
+    end
+  end
+
+  defp claim_initialized_start(document, _selection, status, tool, command_id, request, timestamp)
+       when status in ["waiting_for_admission", "admitted"] do
+    recorded = Document.record_command(document, tool, command_id, request, timestamp)
+    {:ok, recorded, {:complete, Document.public_snapshot(recorded)}}
+  end
+
+  defp claim_initialized_start(document, selection, _status, tool, command_id, request, timestamp) do
+    claimed =
+      document
+      |> put_in(["start", "active_command_id"], command_id)
+      |> put_in(["start", "attempt_id"], command_id)
+      |> put_in(["start", "last_error"], nil)
+      |> put_in(["start", "status"], "in_progress")
+      |> Document.record_command(tool, command_id, request, timestamp)
+
+    {:ok, claimed, {:claimed, selection}}
+  end
+
+  defp finish_start_attempt(context, intent_id, selection, tool, command_id, request) do
+    case run_start_transition(context, intent_id, selection) do
+      :ok ->
+        finish_external_command(context, intent_id, "start", tool, command_id, request)
+
+      {:error, _reason} = error ->
+        release_external_command(context, intent_id, "start", command_id)
+        error
     end
   end
 
@@ -962,8 +1072,11 @@ defmodule SymphonyElixir.Studio.IntentService do
       get_in(document, ["publication", "status"]) != "complete" ->
         {:error, error(:publication_incomplete, "The complete approved backlog must be confirmed first.")}
 
-      get_in(document, ["start", "status"]) in ["waiting_for_admission", "admitted"] ->
-        {:ok, document, start_selection(document)}
+      get_in(document, ["start", "status"]) in ["in_progress", "blocked", "uncertain", "waiting_for_admission", "admitted"] ->
+        case start_selection(document) do
+          {:ok, _task, _mapping} = selection -> {:ok, document, selection}
+          {:error, %{} = error} -> {:error, error}
+        end
 
       true ->
         select_new_start(document, confirmation, timestamp)
@@ -1017,7 +1130,20 @@ defmodule SymphonyElixir.Studio.IntentService do
     task_id = get_in(document, ["start", "task_id"])
     task = Enum.find(document["proposal"]["tasks"], &(&1["id"] == task_id))
     mapping = get_in(document, ["publication", "tasks", task_id])
-    {:ok, task, mapping}
+
+    with true <- is_map(task) and is_map(mapping),
+         true <- task["depends_on"] == [],
+         true <- mapping["status"] == "confirmed",
+         true <- mapping["issue_id"] == get_in(document, ["start", "issue_id"]),
+         true <- mapping["issue_identifier"] == get_in(document, ["start", "issue_identifier"]),
+         false <- LinearWriteBroker.protected_identifier?(mapping["issue_identifier"]),
+         expected_key <- Command.start_key(document["intent_id"], document["proposal"]["digest"], task_id),
+         true <- expected_key == get_in(document, ["start", "idempotency_key"]) do
+      {:ok, task, mapping}
+    else
+      false -> {:error, error(:stale_start_selection, "The recorded start identity no longer matches publication receipts.")}
+      true -> {:error, error(:protected_linear_issue_denied, "SYM-1 and SYM-2 are permanently denied.")}
+    end
   end
 
   defp first_ready_task(document) do
@@ -1142,17 +1268,59 @@ defmodule SymphonyElixir.Studio.IntentService do
     end
   end
 
-  defp finish_command(context, intent_id, tool, command_id, request) do
-    timestamp = now(context)
+  defp with_external_operation_lock(context, intent_id, surface, callback) do
+    resource = {__MODULE__, :external_operation, context.store.root, intent_id, surface}
+    lock = {resource, self()}
 
-    case Store.update_intent(context.store, intent_id, fn document ->
-           recorded = Document.record_command(document, tool, command_id, request, timestamp)
-           {:ok, recorded, Document.public_snapshot(recorded)}
-         end) do
+    case :global.trans(lock, callback, [node()]) do
+      {:aborted, _reason} ->
+        {:error,
+         error(
+           :external_operation_lock_unavailable,
+           "The trusted-host operation lock could not be acquired safely."
+         )}
+
+      result ->
+        result
+    end
+  end
+
+  defp finish_external_command(context, intent_id, surface, tool, command_id, request) do
+    timestamp = now(context)
+    updater = &finish_external_document(&1, surface, tool, command_id, request, timestamp)
+
+    case Store.update_intent(context.store, intent_id, updater) do
       {:ok, snapshot} -> {:ok, snapshot}
       {:error, %{} = error} -> {:error, error}
       {:error, reason} -> {:error, translate_error(reason)}
     end
+  end
+
+  defp finish_external_document(document, surface, tool, command_id, request, timestamp) do
+    if get_in(document, [surface, "active_command_id"]) == command_id do
+      recorded =
+        document
+        |> put_in([surface, "active_command_id"], nil)
+        |> Document.record_command(tool, command_id, request, timestamp)
+
+      {:ok, recorded, Document.public_snapshot(recorded)}
+    else
+      {:error,
+       error(
+         :external_operation_claim_lost,
+         "The durable trusted-host attempt no longer owns this operation."
+       )}
+    end
+  end
+
+  defp release_external_command(context, intent_id, surface, command_id) do
+    Store.update_intent(context.store, intent_id, fn document ->
+      if get_in(document, [surface, "active_command_id"]) == command_id do
+        {:ok, put_in(document, [surface, "active_command_id"], nil), :ok}
+      else
+        {:ok, document, :ok}
+      end
+    end)
   end
 
   defp observe_valid_admission_event(event, opts) do

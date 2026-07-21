@@ -20,73 +20,78 @@ Those capabilities predate this Build Week fork.
 
 ## Build Week additions
 
-The downstream scope is deliberately staged and will be updated only as each
-package is accepted:
+The stable downstream contract remains staged: Release 0 hardens the
+upstream-compatible runner, Release 1 builds the production Studio MVP, and
+Release 1.1 completes submission hardening. The deadline override also permits
+one honestly labelled Build Week Preview without representing it as complete
+Release 1 or 1.1.
 
-1. Release 0 hardens and pins the upstream-compatible runner, conformance
-   boundaries, recovery behavior, capability discovery, and release train.
-2. Release 1 adds the local single-project Studio MVP: durable state and
-   evidence, quota-safe execution, detached review, and five authoritative
-   LiveView route families.
-3. Release 1.1 freezes features and completes submission hardening, packaging,
-   judge-path verification, and external-media preparation.
+Release 0 packages R0-01 through R0-06 are accepted at foundation commit
+`25f4d78e1eb3102dd8d1aa72413988b36b72fd71`. Their downstream additions include:
 
-Accepted downstream packages currently include R0-01 provenance/governance;
-R0-02 Codex 0.144.3 pinning, generated stable/experimental schema contracts,
-exact outbound-request validation, and deterministic App Server and loopback
-Linear fixtures; and R0-03 strict JSONL transport, bounded content-free stderr
-diagnostics, absolute request deadlines, conservative uncertain outcomes,
-source-identity compatibility circuit, shell-free App Server argv and
-PID-namespace containment, and fail-closed remote release gating. R0-03 passed
-its 113-file/276-test source seal, clean regeneration, 73-test schema harness,
-full 398-test gate with 100% of measured modules covered, zero-error Dialyzer
-analysis, real no-model App Server smoke, and independent adversarial review on
-2026-07-16.
+- exact Codex CLI `0.144.3` pinning and 1,873 generated schema artifacts;
+- strict bounded JSONL transport, request correlation, conservative uncertain
+  outcomes, and no-model capability discovery;
+- shell-free App Server launch, PID/process cleanup containment, cancellation
+  convergence, isolated workspace/path safety, and bounded hook execution;
+- one-operation parsed GraphQL enforcement, a separate read-only Linear
+  capability broker, and explicit managed authorization seams;
+- normalized run/attempt/operation/event identity with bounded process-local
+  replay; and
+- atomic redacted readiness evidence, reproducible package/archive checks, and
+  independent exact-tree review.
 
-R0-04 adds an injectable normalized-event seam, deterministic
-event identity, stable run/attempt/operation correlation, bounded process-local
-replay, stale-attempt isolation, and allowlisted redacted payloads while
-preserving existing Symphony callbacks and `/api/v1/*` fields. Its default sink
-retains nothing, and loss of optional sink history cannot block scheduler or
-input-safety projection. It passed its 122-file/308-test source seal, installed
-pin and clean regeneration, 73-test schema harness, full 432-test gate with
-100% of measured modules covered, zero-error Dialyzer analysis, real
-initialize-only App Server smoke, hygiene audit, and independent adversarial
-review on 2026-07-16. R0-04 is an accepted downstream package.
+R0-07 protected `v0.1.0` publication is still pending and is not claimed by the
+Build Week branch.
 
-R0-05 hardens cancellation and retry convergence, binds cleanup to the exact
-workspace that ran, contains local hooks, makes guardian cleanup authority
-single-owner across runtime and nested-supervisor crashes, repairs upstream raw
-GraphQL to exactly one parsed operation, and adds an explicit opt-in managed
-authorization/outbox seam without durable tracker claims. Unsupported workflow
-features remain blocked before SSH and now produce only a stable, content-free
-validation classification rather than a misleading tracker-fetch diagnostic.
-Its accepted package binds 133 source files and 411 tests, passes the 535-test
-complete gate with 100.00% measured coverage and zero Dialyzer errors, verifies
-installed Codex 0.144.3 against 1,873 schema artifacts, and passes a real
-initialize-only no-model smoke. The exact pin rejected host drift to 0.144.5,
-and acceptance restarted under user-local exact 0.144.3 without resealing.
-Provenance, secret/path/media and archive-exclusion scans pass; normalized
-package construction is reproducible; and fresh repaired-tree reviews report no
-remaining P0/P1/P2. R0-05 is an accepted downstream package.
+The public `release/v0.2.0-buildweek-preview.1` branch pulls forward only the
+submission-critical owner experience:
 
-Runtime capability discovery, durable event history, restart/browser replay,
-the durable operation ledger, Studio state, the operator UI, and submission
-hardening remain unclaimed until their later packages pass.
+- prompt or pasted Markdown intake, bounded repository inspection, at most two
+  clarification questions, and a three-to-five-task proposal;
+- one canonical owner-local Intent Service shared by Phoenix LiveView and a
+  five-tool STDIO MCP liaison;
+- production Setup, New Work, Mission Control, and Run Detail routes backed by
+  current Store and runtime-event state, not fixture-only success;
+- latest-attempt and revision-bound completion truth for deterministic checks,
+  detached review, sealed evidence, delivery, tracker handoff, terminal state,
+  and actual model/effort attestation; and
+- strict launch/reset/browser/accessibility/public-artifact verification.
 
-## Build Week execution configuration
+Production Linear publication and Start are hard-disabled. The accepted R0
+credential boundary cannot be preserved by loading either credential into the
+preview BEAM, so a distinct trusted out-of-process write broker is required.
+No demo issue, live Linear mutation, admitted preview run, GPT-5.6 execution,
+completed golden path, or evidence-backed outcome is claimed.
 
-- Primary implementation thread: accountable root conductor
-- Initial work pace: Balanced
-- Conductor target: GPT-5.6 Sol, Ultra reasoning
-- Bounded explorers: GPT-5.6 Terra, Medium reasoning, read-only by default
-- Failure analysis: GPT-5.6 Terra, High reasoning
-- Independent review: GPT-5.6 Sol, High or Max reasoning
-- Release audit: GPT-5.6 Sol, Max reasoning
+## Codex and GPT-5.6 use
 
-The exact available model IDs, effort values, service tiers, and enforceable
-subagent caps are discovered from the pinned Codex executable in R0-06. This
-document does not invent unavailable capabilities.
+Codex served as the accountable implementation conductor. Bounded supporting
+threads handled independent code review, security/release audits, deterministic
+test work, browser verification, and submission copy where file ownership was
+disjoint. Model conclusions never substitute for deterministic gates.
+
+The committed runtime policy requests GPT-5.6 Sol Ultra with Ultra reasoning,
+and R0-06 verifies that the pinned Codex installation advertises the required
+capability without starting model work. The current preview has not admitted a
+demo issue or executed GPT-5.6 end to end. UI and submission copy therefore
+separate configured policy from current-attempt runtime attestation.
+
+## Security and judge boundary
+
+- Loopback-only, one trusted local operator, Linux x86_64 candidate.
+- Every supported preview helper/build/browser/runtime child receives a strict
+  environment allowlist; Linear keys, pointers, tokens, passwords, and session
+  material are not inherited.
+- The local MCP liaison persists owner-local planning state but exposes no
+  approval, publication, Start, or Linear mutation tool.
+- Production external-action controls are absent while the trusted write broker
+  is unavailable; the UI renders `external_write_broker_required` instead.
+- `SYM-1` and `SYM-2` remain protected. No media or credential belongs in Git
+  or GitHub Release assets.
+- A fresh machine currently builds from source once. A local repeat can use the
+  documented `--no-build` path, but no public binary, sandbox, or demo account
+  is claimed.
 
 ## Evidence index
 
@@ -94,8 +99,12 @@ document does not invent unavailable capabilities.
 - Work-package checkpoints: [`docs/implementation/checkpoints/`](docs/implementation/checkpoints/)
 - Release evidence: [`docs/releases/`](docs/releases/)
 - Readiness manifest: `artifacts/readiness/implementation-readiness.json` after R0-06
-- Build Week `/feedback` Session ID: `PENDING_FINAL_PRIMARY_THREAD_FEEDBACK`
-- Screenshot and test references: added with the packages that produce them
+- Build Week `/feedback`: the owner reports that the primary upload was
+  generated and saved in Devpost. Its public-safe identifier remains an
+  external Devpost field; no unverified or side-task identifier is substituted
+  in repository history.
+- Preview owner/browser evidence: [`docs/buildweek/owner-testing.md`](docs/buildweek/owner-testing.md)
+- Preview limitations: [`docs/buildweek/preview-limitations.md`](docs/buildweek/preview-limitations.md)
 
 Final video, raw captures, narration, thumbnails, and editor projects are
 excluded from this repository and every release archive.

@@ -18,9 +18,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    data_port = data_port()
+
     socket =
       socket
-      |> assign(:data_port, data_port())
+      |> assign(:data_port, data_port)
+      |> assign(:external_write_actions?, external_write_actions_enabled?(data_port))
       |> assign(:page, nil)
       |> assign(:load_error, nil)
       |> assign(:action_error, nil)
@@ -108,11 +111,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   def handle_event("publish_approved_plan", _params, socket) do
-    run_command_reply(socket, :publish_approved_plan, %{})
+    run_command_reply(socket, :publish_approved_plan, %{"attempt" => "initial"})
+  end
+
+  def handle_event("resume_publication", _params, socket) do
+    run_command_reply(socket, :publish_approved_plan, %{"attempt" => "resume"})
   end
 
   def handle_event("start_first_ready", _params, socket) do
-    run_command_reply(socket, :start_first_ready, %{})
+    run_command_reply(socket, :start_first_ready, %{"attempt" => "initial"})
+  end
+
+  def handle_event("resume_start", _params, socket) do
+    run_command_reply(socket, :start_first_ready, %{"attempt" => "resume"})
   end
 
   def handle_event("refresh_page", _params, socket) do
@@ -194,6 +205,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           input={@intent_input}
           input_error={@intent_error}
           action_error={@action_error}
+          external_write_actions?={@external_write_actions?}
         />
         <.run_detail
           :if={!@load_error and @live_action == :run_detail and @page}
@@ -405,7 +417,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <dl>
           <div><dt>Checked</dt><dd class="mono">{format_timestamp(@page.checked_at)}</dd></div>
           <div><dt>Current revision</dt><dd class="mono">{short_value(@page.current_revision)}</dd></div>
-          <div><dt>Evidence revision</dt><dd class="mono">{short_value(@page.source_revision)}</dd></div>
+          <div><dt>R0 foundation evidence</dt><dd class="mono">{short_value(@page.source_revision)}</dd></div>
         </dl>
       </section>
 
@@ -441,6 +453,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   attr(:input, :map, required: true)
   attr(:input_error, :string, default: nil)
   attr(:action_error, :map, default: nil)
+  attr(:external_write_actions?, :boolean, required: true)
 
   defp new_work(assigns) do
     assigns =
@@ -474,7 +487,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
       <section :if={@action_error} class={action_error_class(@action_error)} role="alert">
         <div><strong>{@action_error.message}</strong><span class="mono">{@action_error.code}</span></div>
-        <button type="button" class="button quiet" phx-click="refresh_page">Reconcile state</button>
+        <button type="button" class="button quiet" phx-click="refresh_page">Refresh state</button>
       </section>
 
       <section class="intent-workbench" aria-labelledby="intent-input-title">
@@ -569,13 +582,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </form>
       </section>
 
-      <.proposal :if={@page.proposal} page={@page} />
-      <.publication :if={not is_nil(@page.proposal) and publication_visible?(@page)} page={@page} />
+      <.proposal :if={@page.proposal} page={@page} external_write_actions?={@external_write_actions?} />
+      <.publication
+        :if={not is_nil(@page.proposal) and publication_visible?(@page)}
+        page={@page}
+        external_write_actions?={@external_write_actions?}
+      />
     </div>
     """
   end
 
   attr(:page, :map, required: true)
+  attr(:external_write_actions?, :boolean, required: true)
 
   defp proposal(assigns) do
     ~H"""
@@ -613,12 +631,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
           phx-click="present_proposal"
           phx-disable-with="Binding proposal…"
         >Review final proposal</button>
-        <form :if={@page.proposal.status == "presented"} phx-submit="approve_publication">
+        <form :if={@external_write_actions? and @page.proposal.status == "presented"} phx-submit="approve_publication">
           <input type="hidden" name="proposal_digest" value={@page.proposal.digest} />
           <button type="submit" class="button primary" phx-disable-with="Recording approval…">
             Approve Backlog publication
           </button>
         </form>
+        <div
+          :if={not @external_write_actions? and @page.proposal.status == "presented"}
+          class="inline-alert danger"
+          data-testid="external-write-blocker"
+          role="alert"
+        >
+          <strong>Linear publication is unavailable in this candidate.</strong>
+          <span>The authoritative capability is <span class="mono">external_write_broker_required</span>. Planning and proposal review remain read-only.</span>
+        </div>
         <span :if={@page.proposal.status == "approved"} class="approval-receipt">✓ Proposal-bound approval recorded</span>
       </div>
     </section>
@@ -626,6 +653,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   attr(:page, :map, required: true)
+  attr(:external_write_actions?, :boolean, required: true)
 
   defp publication(assigns) do
     ~H"""
@@ -641,12 +669,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </div>
 
       <button
-        :if={@page.proposal.status == "approved" and @page.publication.status in ["not_started", "blocked"]}
+        :if={@external_write_actions? and @page.proposal.status == "approved" and @page.publication.status == "not_started"}
         type="button"
         class="button primary"
         phx-click="publish_approved_plan"
         phx-disable-with="Publishing once…"
       >Publish approved tasks</button>
+
+      <div :if={not @external_write_actions?} class="inline-alert danger" data-testid="external-write-blocker" role="alert">
+        <strong>Linear publication and start are unavailable in this candidate.</strong>
+        <span>The authoritative capability is <span class="mono">external_write_broker_required</span>. No external-action control is exposed.</span>
+      </div>
 
       <div :if={@page.publication.status == "in_progress"} class="inline-alert info" role="status">
         <strong>Publication in progress</strong><span>Duplicate activation is disabled while Linear confirms each issue.</span>
@@ -672,10 +705,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <span class="mono">{relation.last_error.code}</span>
       </div>
 
-      <div :if={@page.publication.status in ["partial", "uncertain"]} class="reconciliation-state" role="alert">
-        <strong>{if(@page.publication.status == "partial", do: "Partially published", else: "Publication result uncertain")}</strong>
-        <span>Do not retry blindly. Reconcile the recorded idempotency keys with Linear, then refresh this intent.</span>
-        <button type="button" class="button secondary" phx-click="refresh_page">Reconcile now</button>
+      <div :if={@page.publication.status in ["blocked", "partial", "uncertain"]} class="reconciliation-state" role="alert">
+        <strong>{publication_recovery_heading(@page.publication.status)}</strong>
+        <span>The next explicit attempt preserves confirmed receipts and reconciles every unresolved idempotency key before any write.</span>
+        <button
+          :if={@external_write_actions?}
+          type="button"
+          class="button secondary"
+          phx-click="resume_publication"
+          phx-disable-with="Reconciling…"
+        >
+          Resume publication safely
+        </button>
+        <button type="button" class="button quiet" phx-click="refresh_page">Refresh stored state</button>
       </div>
 
       <div :if={@page.publication.status == "complete"} class="start-boundary">
@@ -684,12 +726,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <span>Starting the first dependency-ready task is a separate external action.</span>
         </div>
         <button
-          :if={@page.start.status in ["not_started", "blocked"]}
+          :if={@external_write_actions? and @page.start.status == "not_started"}
           type="button"
           class="button primary"
           phx-click="start_first_ready"
           phx-disable-with="Requesting Todo transition…"
         >Start first ready task</button>
+        <button
+          :if={@external_write_actions? and @page.start.status in ["blocked", "uncertain"]}
+          type="button"
+          class="button secondary"
+          phx-click="resume_start"
+          phx-disable-with="Reconciling transition…"
+        >Resume Todo transition safely</button>
       </div>
 
       <div :if={Map.get(@page.start, :last_error)} class="inline-alert danger" role="alert">
@@ -966,6 +1015,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     basis = %{
       command: command,
       intent_id: page && page[:intent_id],
+      operation_receipt: operation_receipt(command, page),
       proposal_digest: page && page[:proposal] && page.proposal[:digest],
       payload: payload
     }
@@ -974,10 +1024,51 @@ defmodule SymphonyElixirWeb.DashboardLive do
     "studio-web-#{binary_part(digest, 0, 24)}"
   end
 
+  defp operation_receipt(:publish_approved_plan, page) when is_map(page) do
+    publication = Map.get(page, :publication, %{})
+
+    %{
+      latest_event: latest_intent_event(page),
+      relations: receipt_rows(Map.get(publication, :relation_entries, []), [:relation_id, :status, :external_id]),
+      status: Map.get(publication, :status),
+      tasks: receipt_rows(Map.get(publication, :tasks, []), [:task_id, :status, :issue_id, :issue_identifier])
+    }
+  end
+
+  defp operation_receipt(:start_first_ready, page) when is_map(page) do
+    start = Map.get(page, :start, %{})
+
+    %{
+      issue_id: Map.get(start, :issue_id),
+      issue_identifier: Map.get(start, :issue_identifier),
+      latest_event: latest_intent_event(page),
+      status: Map.get(start, :status),
+      task_id: Map.get(start, :task_id)
+    }
+  end
+
+  defp operation_receipt(_command, _page), do: nil
+
+  defp receipt_rows(rows, keys) when is_list(rows) do
+    rows
+    |> Enum.map(&Map.take(&1, keys))
+    |> Enum.sort_by(&Jason.encode!/1)
+  end
+
+  defp latest_intent_event(page) do
+    page
+    |> Map.get(:events, [])
+    |> List.last()
+    |> case do
+      event when is_map(event) -> Map.take(event, [:event_id, :sequence, :type])
+      _missing -> nil
+    end
+  end
+
   defp command_success(:submit_intent, _page), do: "Repository inspected. Intent state updated."
   defp command_success(:answer_clarifications, _page), do: "Clarifications recorded."
   defp command_success(:use_recommended_defaults, _page), do: "Recommended answers recorded."
-  defp command_success(:present_proposal, _page), do: "Proposal is ready for publication approval."
+  defp command_success(:present_proposal, _page), do: "Final proposal review state recorded."
   defp command_success(:approve_publication, _page), do: "Proposal-bound publication approval recorded."
   defp command_success(:publish_approved_plan, _page), do: "Publication state updated from Linear receipts."
   defp command_success(:start_first_ready, _page), do: "Start state updated. Await runtime admission before treating work as queued."
@@ -1001,6 +1092,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp data_port, do: Endpoint.config(:studio_data_port) || RuntimeStudioDataPort
+
+  defp external_write_actions_enabled?(data_port) when is_atom(data_port) do
+    Code.ensure_loaded?(data_port) and
+      function_exported?(data_port, :external_write_actions_enabled?, 0) and
+      data_port.external_write_actions_enabled?() == true
+  rescue
+    _error -> false
+  end
 
   defp announce(socket, message) do
     assign(socket, :announcement, message || "")
@@ -1133,6 +1232,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp publication_tone(status) when status in ["partial", "uncertain", "blocked"], do: :blocked
   defp publication_tone(status) when status in ["in_progress", "waiting_for_admission"], do: :queued
   defp publication_tone(_status), do: :pending
+
+  defp publication_recovery_heading("partial"), do: "Partially published"
+  defp publication_recovery_heading("uncertain"), do: "Publication result uncertain"
+  defp publication_recovery_heading(_status), do: "Publication blocked"
 
   defp start_heading("admitted"), do: "Runtime admission confirmed"
   defp start_heading("waiting_for_admission"), do: "Waiting for Symphony admission"

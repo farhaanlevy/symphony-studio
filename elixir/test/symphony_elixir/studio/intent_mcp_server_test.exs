@@ -21,7 +21,7 @@ defmodule SymphonyElixir.Studio.Intent.MCPServerTest do
     %{data_root: data_root, project_root: project_root}
   end
 
-  test "negotiates MCP lifecycle and lists exactly five non-mutating intent tools", ctx do
+  test "lists five owner-local tools with no external mutation authority", ctx do
     responses =
       MCPServer.exchange_for_test(
         [
@@ -61,7 +61,7 @@ defmodule SymphonyElixir.Studio.Intent.MCPServerTest do
     refute Enum.any?(tools, & &1["annotations"]["destructiveHint"])
   end
 
-  test "returns structured tool content for the non-mutating liaison", ctx do
+  test "returns structured tool content and persists canonical local intent state", ctx do
     messages = [
       initialize_message(),
       %{"jsonrpc" => "2.0", "method" => "notifications/initialized"},

@@ -6,10 +6,29 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
 
   alias SymphonyElixir.{Event, EventSink, Identity}
   alias SymphonyElixir.EventSink.Memory
-  alias SymphonyElixir.Studio.Intent.{AdmissionSink, Store}
+  alias SymphonyElixir.Studio.Intent.{AdmissionSink, Canonical, Store}
   alias SymphonyElixir.Studio.IntentService
   alias SymphonyElixir.Studio.LinearWriteBroker
   alias SymphonyElixir.Studio.LinearWriteBroker.{Command, Fake, Result}
+
+  defmodule BlockingBroker do
+    @behaviour SymphonyElixir.Studio.LinearWriteBroker
+
+    @impl true
+    def reconcile(owner, command) do
+      send(owner, {:blocking_reconcile, self(), command.idempotency_key})
+
+      receive do
+        {:release_reconcile, idempotency_key} when idempotency_key == command.idempotency_key ->
+          {:error, :simulated_failure}
+      after
+        5_000 -> {:error, :simulated_timeout}
+      end
+    end
+
+    @impl true
+    def execute(_owner, _command), do: {:error, :unexpected_execute}
+  end
 
   setup do
     unique = System.unique_integer([:positive, :monotonic])
@@ -174,6 +193,8 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
       IntentService.publish_approved_plan(ready["intent_id"], "publish-uncertain-1", opts)
 
     assert uncertain["publication"]["status"] == "uncertain"
+    assert uncertain["publication"]["attempt_id"] == "publish-uncertain-1"
+    assert uncertain["publication"]["active_command_id"] == nil
     assert uncertain["publication"]["tasks"][first["id"]]["status"] == "uncertain"
     refute Enum.any?(Fake.calls(ctx.broker), &(&1.phase == :execute and &1.idempotency_key == issue_key))
 
@@ -181,6 +202,7 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
       IntentService.publish_approved_plan(ready["intent_id"], "publish-uncertain-2", opts)
 
     assert complete["publication"]["status"] == "complete"
+    assert complete["publication"]["attempt_id"] == "publish-uncertain-2"
 
     exact_calls = Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == issue_key))
     assert Enum.map(exact_calls, & &1.phase) == [:reconcile, :reconcile, :execute]
@@ -204,6 +226,211 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
     assert partial["publication"]["tasks"][first["id"]]["status"] == "confirmed"
     assert partial["publication"]["tasks"][second["id"]]["status"] == "blocked"
     assert partial["publication"]["last_error"]["resumable"]
+
+    first_key = Command.issue_key(ready["intent_id"], ready["proposal"]["digest"], first["id"])
+    calls_before_resume = Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == first_key))
+
+    {:ok, complete} =
+      IntentService.publish_approved_plan(ready["intent_id"], "publish-partial-resume", opts)
+
+    assert complete["publication"]["status"] == "complete"
+    assert complete["publication"]["tasks"][first["id"]]["issue_id"] == partial["publication"]["tasks"][first["id"]]["issue_id"]
+    assert Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == first_key)) == calls_before_resume
+
+    resumed_calls = Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == second_key))
+    assert Enum.map(resumed_calls, & &1.phase) == [:reconcile, :reconcile, :execute]
+  end
+
+  test "relation recovery preserves every confirmed issue identity and reconciles before execution", ctx do
+    opts = [store: ctx.store, broker: {Fake, ctx.broker}]
+    ready = approved_intent(ctx, opts, "relation-resume")
+    dependent = Enum.find(ready["proposal"]["tasks"], &(&1["depends_on"] != []))
+    prerequisite_task_id = List.first(dependent["depends_on"])
+
+    prerequisite_issue_key =
+      Command.issue_key(ready["intent_id"], ready["proposal"]["digest"], prerequisite_task_id)
+
+    prerequisite_issue_id = Canonical.id("fake_issue_", prerequisite_issue_key, 20)
+
+    relation_key =
+      Command.relation_key(
+        ready["intent_id"],
+        ready["proposal"]["digest"],
+        dependent["id"],
+        prerequisite_issue_id
+      )
+
+    :ok = Fake.set_responses(ctx.broker, :reconcile, relation_key, [{:error, :simulated_failure}])
+
+    {:ok, partial} =
+      IntentService.publish_approved_plan(ready["intent_id"], "publish-relation-partial", opts)
+
+    assert partial["publication"]["status"] == "partial"
+
+    confirmed_issues =
+      Map.new(partial["publication"]["tasks"], fn {task_id, entry} ->
+        assert entry["status"] == "confirmed"
+        {task_id, {entry["issue_id"], entry["issue_identifier"]}}
+      end)
+
+    issue_calls_before_resume = Enum.filter(Fake.calls(ctx.broker), &(&1.kind == :issue))
+
+    {:ok, complete} =
+      IntentService.publish_approved_plan(ready["intent_id"], "publish-relation-resume", opts)
+
+    assert complete["publication"]["status"] == "complete"
+
+    assert Map.new(complete["publication"]["tasks"], fn {task_id, entry} ->
+             {task_id, {entry["issue_id"], entry["issue_identifier"]}}
+           end) == confirmed_issues
+
+    assert Enum.filter(Fake.calls(ctx.broker), &(&1.kind == :issue)) == issue_calls_before_resume
+
+    relation_calls = Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == relation_key))
+    assert Enum.map(relation_calls, & &1.phase) == [:reconcile, :reconcile, :execute]
+  end
+
+  test "blocked publication completes after the broker becomes available and exact command replay is inert", ctx do
+    blocked_opts = [store: ctx.store]
+    ready = approved_intent(ctx, blocked_opts, "available-later")
+
+    {:ok, blocked} =
+      IntentService.publish_approved_plan(ready["intent_id"], "publish-before-broker", blocked_opts)
+
+    assert blocked["publication"]["status"] == "blocked"
+    assert blocked["publication"]["attempt_id"] == "publish-before-broker"
+    assert blocked["publication"]["active_command_id"] == nil
+
+    {:ok, replayed} =
+      IntentService.publish_approved_plan(ready["intent_id"], "publish-before-broker", blocked_opts)
+
+    assert replayed["publication"]["status"] == "blocked"
+
+    available_opts = [store: ctx.store, broker: {Fake, ctx.broker}]
+
+    {:ok, complete} =
+      IntentService.publish_approved_plan(ready["intent_id"], "publish-after-broker", available_opts)
+
+    assert complete["publication"]["status"] == "complete"
+    assert complete["publication"]["attempt_id"] == "publish-after-broker"
+    assert complete["publication"]["active_command_id"] == nil
+  end
+
+  test "simultaneous fresh publication resumes serialize across the complete broker operation", ctx do
+    opts = [store: ctx.store, broker: {Fake, ctx.broker}]
+    ready = approved_intent(ctx, opts, "single-flight")
+    [first | _rest] = ready["proposal"]["tasks"]
+    first_key = Command.issue_key(ready["intent_id"], ready["proposal"]["digest"], first["id"])
+
+    :ok = Fake.set_responses(ctx.broker, :reconcile, first_key, [{:error, :simulated_failure}])
+
+    {:ok, blocked} =
+      IntentService.publish_approved_plan(ready["intent_id"], "publish-flight-blocked", opts)
+
+    assert blocked["publication"]["status"] == "blocked"
+
+    parent = self()
+    blocking_opts = [store: ctx.store, broker: {BlockingBroker, parent}]
+
+    first_attempt =
+      Task.async(fn ->
+        IntentService.publish_approved_plan(
+          ready["intent_id"],
+          "publish-flight-resume-1",
+          blocking_opts
+        )
+      end)
+
+    assert_receive {:blocking_reconcile, broker_process, ^first_key}
+
+    second_attempt =
+      Task.async(fn ->
+        IntentService.publish_approved_plan(
+          ready["intent_id"],
+          "publish-flight-resume-2",
+          blocking_opts
+        )
+      end)
+
+    refute_receive {:blocking_reconcile, _second_process, ^first_key}, 100
+
+    send(broker_process, {:release_reconcile, first_key})
+    assert {:ok, resumed_blocked} = Task.await(first_attempt)
+    assert resumed_blocked["publication"]["status"] == "blocked"
+    assert resumed_blocked["publication"]["active_command_id"] == nil
+
+    assert_receive {:blocking_reconcile, second_broker_process, ^first_key}, 1_000
+    send(second_broker_process, {:release_reconcile, first_key})
+
+    assert {:ok, second_blocked} = Task.await(second_attempt)
+    assert second_blocked["publication"]["status"] == "blocked"
+    assert second_blocked["publication"]["attempt_id"] == "publish-flight-resume-2"
+
+    calls_before_replay = Fake.calls(ctx.broker)
+
+    assert {:ok, exact_replay} =
+             IntentService.publish_approved_plan(
+               ready["intent_id"],
+               "publish-flight-resume-1",
+               opts
+             )
+
+    assert exact_replay["publication"]["status"] == "blocked"
+    assert Fake.calls(ctx.broker) == calls_before_replay
+  end
+
+  test "fresh publication command reclaims a durable orphan after the prior caller dies", ctx do
+    opts = [store: ctx.store, broker: {Fake, ctx.broker}]
+    ready = approved_intent(ctx, opts, "orphan-recovery")
+    [first | _rest] = ready["proposal"]["tasks"]
+    first_key = Command.issue_key(ready["intent_id"], ready["proposal"]["digest"], first["id"])
+    parent = self()
+    blocking_opts = [store: ctx.store, broker: {BlockingBroker, parent}]
+
+    {caller, monitor} =
+      spawn_monitor(fn ->
+        IntentService.publish_approved_plan(
+          ready["intent_id"],
+          "publish-orphaned-command",
+          blocking_opts
+        )
+      end)
+
+    assert_receive {:blocking_reconcile, ^caller, ^first_key}
+
+    {:ok, claimed} = IntentService.get_intent_status(ready["intent_id"], opts)
+    assert claimed["publication"]["status"] == "in_progress"
+    assert claimed["publication"]["active_command_id"] == "publish-orphaned-command"
+
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+
+    calls_before_replay = Fake.calls(ctx.broker)
+
+    assert {:ok, exact_replay} =
+             IntentService.publish_approved_plan(
+               ready["intent_id"],
+               "publish-orphaned-command",
+               opts
+             )
+
+    assert exact_replay["publication"]["status"] == "in_progress"
+    assert exact_replay["publication"]["active_command_id"] == "publish-orphaned-command"
+    assert Fake.calls(ctx.broker) == calls_before_replay
+
+    assert {:ok, recovered} =
+             IntentService.publish_approved_plan(
+               ready["intent_id"],
+               "publish-orphan-recovery",
+               opts
+             )
+
+    assert recovered["publication"]["status"] == "complete"
+    assert recovered["publication"]["active_command_id"] == nil
+    assert recovered["publication"]["attempt_id"] == "publish-orphan-recovery"
+
+    first_action_calls = Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == first_key))
+    assert Enum.map(first_action_calls, & &1.phase) == [:reconcile, :execute]
   end
 
   test "default broker fails closed and leaves publication visibly resumable", ctx do
@@ -222,6 +449,164 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
     assert Enum.all?(blocked["publication"]["tasks"], fn {_id, entry} ->
              is_nil(entry["issue_id"])
            end)
+  end
+
+  test "blocked start preserves its selected identity, replays exactly, and resumes by reconciliation", ctx do
+    opts = [store: ctx.store, broker: {Fake, ctx.broker}]
+    ready = approved_intent(ctx, opts, "start-blocked")
+    {:ok, published} = IntentService.publish_approved_plan(ready["intent_id"], "publish-start-blocked", opts)
+    [first | _rest] = published["proposal"]["tasks"]
+    mapping = published["publication"]["tasks"][first["id"]]
+    start_key = Command.start_key(ready["intent_id"], ready["proposal"]["digest"], first["id"])
+
+    :ok = Fake.set_responses(ctx.broker, :reconcile, start_key, [{:error, :simulated_failure}])
+
+    {:ok, blocked} =
+      IntentService.start_first_ready(
+        ready["intent_id"],
+        "start_first_ready",
+        "start-blocked-1",
+        opts
+      )
+
+    assert blocked["start"]["status"] == "blocked"
+    assert blocked["start"]["attempt_id"] == "start-blocked-1"
+    assert blocked["start"]["active_command_id"] == nil
+    assert blocked["start"]["task_id"] == first["id"]
+    assert blocked["start"]["issue_id"] == mapping["issue_id"]
+    assert blocked["start"]["idempotency_key"] == start_key
+
+    calls_after_block = Fake.calls(ctx.broker)
+
+    {:ok, replayed} =
+      IntentService.start_first_ready(
+        ready["intent_id"],
+        "start_first_ready",
+        "start-blocked-1",
+        opts
+      )
+
+    assert replayed["start"]["status"] == "blocked"
+    assert Fake.calls(ctx.broker) == calls_after_block
+
+    {:ok, waiting} =
+      IntentService.start_first_ready(
+        ready["intent_id"],
+        "start_first_ready",
+        "start-blocked-2",
+        opts
+      )
+
+    assert waiting["start"]["status"] == "waiting_for_admission"
+    assert waiting["start"]["attempt_id"] == "start-blocked-2"
+    assert waiting["start"]["task_id"] == first["id"]
+    assert waiting["start"]["issue_id"] == mapping["issue_id"]
+    assert waiting["start"]["idempotency_key"] == start_key
+
+    transition_calls = Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == start_key))
+    assert Enum.map(transition_calls, & &1.phase) == [:reconcile, :reconcile, :execute]
+  end
+
+  test "uncertain start never executes blindly and a fresh command reconciles the same transition", ctx do
+    opts = [store: ctx.store, broker: {Fake, ctx.broker}]
+    ready = approved_intent(ctx, opts, "start-uncertain")
+    {:ok, published} = IntentService.publish_approved_plan(ready["intent_id"], "publish-start-uncertain", opts)
+    [first | _rest] = published["proposal"]["tasks"]
+    start_key = Command.start_key(ready["intent_id"], ready["proposal"]["digest"], first["id"])
+
+    :ok =
+      Fake.set_responses(ctx.broker, :reconcile, start_key, [
+        {:ok, Result.uncertain("fake", %{"reason" => "lost response"})}
+      ])
+
+    {:ok, uncertain} =
+      IntentService.start_first_ready(
+        ready["intent_id"],
+        "start_first_ready",
+        "start-uncertain-1",
+        opts
+      )
+
+    assert uncertain["start"]["status"] == "uncertain"
+
+    refute Enum.any?(Fake.calls(ctx.broker), fn call ->
+             call.phase == :execute and call.idempotency_key == start_key
+           end)
+
+    {:ok, waiting} =
+      IntentService.start_first_ready(
+        ready["intent_id"],
+        "start_first_ready",
+        "start-uncertain-2",
+        opts
+      )
+
+    assert waiting["start"]["status"] == "waiting_for_admission"
+    assert waiting["start"]["idempotency_key"] == start_key
+
+    transition_calls = Enum.filter(Fake.calls(ctx.broker), &(&1.idempotency_key == start_key))
+    assert Enum.map(transition_calls, & &1.phase) == [:reconcile, :reconcile, :execute]
+  end
+
+  test "fresh start command reclaims an orphaned transition claim and reconciles its exact identity", ctx do
+    opts = [store: ctx.store, broker: {Fake, ctx.broker}]
+    ready = approved_intent(ctx, opts, "start-orphan")
+    {:ok, published} = IntentService.publish_approved_plan(ready["intent_id"], "publish-start-orphan", opts)
+    [first | _rest] = published["proposal"]["tasks"]
+    start_key = Command.start_key(ready["intent_id"], ready["proposal"]["digest"], first["id"])
+    calls_before_start = Fake.calls(ctx.broker)
+    parent = self()
+    blocking_opts = [store: ctx.store, broker: {BlockingBroker, parent}]
+
+    {caller, monitor} =
+      spawn_monitor(fn ->
+        IntentService.start_first_ready(
+          ready["intent_id"],
+          "start_first_ready",
+          "start-orphaned-command",
+          blocking_opts
+        )
+      end)
+
+    assert_receive {:blocking_reconcile, ^caller, ^start_key}
+
+    {:ok, claimed} = IntentService.get_intent_status(ready["intent_id"], opts)
+    assert claimed["start"]["status"] == "in_progress"
+    assert claimed["start"]["active_command_id"] == "start-orphaned-command"
+
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+
+    assert {:ok, exact_replay} =
+             IntentService.start_first_ready(
+               ready["intent_id"],
+               "start_first_ready",
+               "start-orphaned-command",
+               opts
+             )
+
+    assert exact_replay["start"]["status"] == "in_progress"
+    assert Fake.calls(ctx.broker) == calls_before_start
+
+    assert {:ok, waiting} =
+             IntentService.start_first_ready(
+               ready["intent_id"],
+               "start_first_ready",
+               "start-orphan-recovery",
+               opts
+             )
+
+    assert waiting["start"]["status"] == "waiting_for_admission"
+    assert waiting["start"]["active_command_id"] == nil
+    assert waiting["start"]["attempt_id"] == "start-orphan-recovery"
+    assert waiting["start"]["idempotency_key"] == start_key
+
+    transition_calls =
+      Fake.calls(ctx.broker)
+      |> Enum.drop(length(calls_before_start))
+      |> Enum.filter(&(&1.idempotency_key == start_key))
+
+    assert Enum.map(transition_calls, & &1.phase) == [:reconcile, :execute]
   end
 
   test "broker permanently denies SYM-1 and SYM-2 before transition delegation", ctx do

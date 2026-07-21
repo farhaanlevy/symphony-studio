@@ -9,9 +9,25 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
   defmodule TestDataPort do
     @behaviour SymphonyElixirWeb.StudioDataPort
 
+    @spec external_write_actions_enabled?() :: boolean()
+    def external_write_actions_enabled? do
+      Application.get_env(:symphony_elixir, :studio_web_test_write_actions_enabled, true)
+    end
+
     @impl true
     def load(:mission_control, _params), do: {:ok, mission_page()}
     def load(:setup, _params), do: {:ok, setup_page()}
+
+    def load(:new_work, %{"intent" => "intent-publication-recovery"}) do
+      {:ok, proposal_page("approved") |> Map.put(:intent_id, "intent-publication-recovery")}
+    end
+
+    def load(:new_work, %{"intent" => "intent-proposed"}), do: {:ok, proposal_page("proposed")}
+    def load(:new_work, %{"intent" => "intent-publication-blocked"}), do: {:ok, publication_recovery_page("blocked")}
+    def load(:new_work, %{"intent" => "intent-publication-partial"}), do: {:ok, publication_recovery_page("partial")}
+    def load(:new_work, %{"intent" => "intent-publication-uncertain"}), do: {:ok, publication_recovery_page("uncertain")}
+    def load(:new_work, %{"intent" => "intent-start-blocked"}), do: {:ok, start_recovery_page("blocked")}
+    def load(:new_work, %{"intent" => "intent-start-uncertain"}), do: {:ok, start_recovery_page("uncertain")}
     def load(:new_work, %{"intent" => _intent_id}), do: {:ok, proposal_page("presented")}
     def load(:new_work, _params), do: {:ok, empty_intent_page()}
     def load(:run_detail, _params), do: {:ok, run_page()}
@@ -22,16 +38,27 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
         send(test_pid, {:studio_command, command, payload, context})
       end
 
-      command_result(command)
+      command_result(command, payload, context)
     end
 
-    defp command_result(command) when command in [:submit_intent, :answer_clarifications, :use_recommended_defaults, :present_proposal],
-      do: {:ok, proposal_page("presented")}
+    defp command_result(command, _payload, _context)
+         when command in [:submit_intent, :answer_clarifications, :use_recommended_defaults, :present_proposal],
+         do: {:ok, proposal_page("presented")}
 
-    defp command_result(:approve_publication), do: {:ok, proposal_page("approved")}
-    defp command_result(:publish_approved_plan), do: {:ok, published_page()}
-    defp command_result(:start_first_ready), do: {:ok, waiting_page()}
-    defp command_result(_command), do: {:error, %{code: "unsupported", message: "Unsupported", details: %{}}}
+    defp command_result(:approve_publication, _payload, _context), do: {:ok, proposal_page("approved")}
+
+    defp command_result(
+           :publish_approved_plan,
+           %{"attempt" => "initial"},
+           %{intent_id: "intent-publication-recovery"}
+         ),
+         do: {:ok, publication_recovery_page("blocked")}
+
+    defp command_result(:publish_approved_plan, _payload, _context), do: {:ok, published_page()}
+    defp command_result(:start_first_ready, _payload, _context), do: {:ok, waiting_page()}
+
+    defp command_result(_command, _payload, _context),
+      do: {:error, %{code: "unsupported", message: "Unsupported", details: %{}}}
 
     defp mission_page do
       run = run_summary()
@@ -223,6 +250,55 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
       }
     end
 
+    defp publication_recovery_page(status) do
+      page = proposal_page("approved")
+      tasks = published_page().publication.tasks
+
+      tasks =
+        case status do
+          "partial" -> [List.first(tasks) | Enum.map(Enum.drop(tasks, 1), &%{&1 | status: "blocked"})]
+          _other -> Enum.map(tasks, &%{&1 | status: status, issue_id: nil, issue_identifier: nil})
+        end
+
+      error = %{code: "linear_write_broker_failed", message: "Linear did not confirm the operation.", resumable: true}
+      event_type = if(status == "uncertain", do: "publication.uncertain", else: "publication.blocked")
+
+      %{
+        page
+        | intent_id: "intent-publication-#{status}",
+          lifecycle_state: "publication_#{status}",
+          publication: %{
+            status: status,
+            proposal_digest: page.proposal.digest,
+            tasks: tasks,
+            relations: 0,
+            relation_entries: [],
+            last_error: error
+          },
+          events: [%{event_id: "event-#{status}-7", sequence: 7, type: event_type}]
+      }
+    end
+
+    defp start_recovery_page(status) do
+      page = published_page()
+      error = %{code: "linear_write_broker_failed", message: "Todo transition was not confirmed.", resumable: true}
+
+      %{
+        page
+        | intent_id: "intent-start-#{status}",
+          lifecycle_state: "start_#{status}",
+          start: %{
+            status: status,
+            task_id: "task-1",
+            issue_id: "issue-1",
+            issue_identifier: "STUDIO-301",
+            confirmation: "start_first_ready",
+            last_error: error
+          },
+          events: [%{event_id: "event-start-#{status}-9", sequence: 9, type: "start.#{status}"}]
+      }
+    end
+
     defp run_page do
       run =
         run_summary()
@@ -282,6 +358,7 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
   setup do
     endpoint_config = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     Application.put_env(:symphony_elixir, :studio_web_test_pid, self())
+    Application.put_env(:symphony_elixir, :studio_web_test_write_actions_enabled, true)
 
     config =
       endpoint_config
@@ -294,6 +371,7 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     on_exit(fn ->
       Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
       Application.delete_env(:symphony_elixir, :studio_web_test_pid)
+      Application.delete_env(:symphony_elixir, :studio_web_test_write_actions_enabled)
     end)
 
     :ok
@@ -324,6 +402,7 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "GPT-5.6 Sol"
     assert html =~ "Ultra reasoning verified"
     assert html =~ "Credentials stay private"
+    assert html =~ "R0 foundation evidence"
     assert html =~ ~s(data-testid="setup-readiness")
     assert html =~ ~s(data-testid="setup-repository")
     assert html =~ ~s(data-testid="setup-model-policy")
@@ -352,6 +431,33 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert context.command_id =~ "studio-web-"
   end
 
+  test "write-disabled capability keeps planning usable and suppresses every external-action control" do
+    Application.put_env(:symphony_elixir, :studio_web_test_write_actions_enabled, false)
+
+    {:ok, planning_view, planning_html} = live(build_conn(), "/work/new?intent=intent-proposed")
+    assert planning_html =~ "Review final proposal"
+
+    presented_html = render_click(planning_view, "present_proposal")
+    assert presented_html =~ "external_write_broker_required"
+    assert presented_html =~ "Planning and proposal review remain read-only."
+    refute presented_html =~ "Approve Backlog publication"
+    assert_received {:studio_command, :present_proposal, %{}, _context}
+
+    {:ok, _publication_view, publication_html} =
+      live(build_conn(), "/work/new?intent=intent-publication-blocked")
+
+    assert publication_html =~ "Linear publication and start are unavailable in this candidate."
+    assert publication_html =~ "external_write_broker_required"
+    assert publication_html =~ "Refresh stored state"
+    refute publication_html =~ "Publish approved tasks"
+    refute publication_html =~ "Resume publication safely"
+
+    {:ok, _start_view, start_html} = live(build_conn(), "/work/new?intent=intent-start-blocked")
+    assert start_html =~ "external_write_broker_required"
+    refute start_html =~ "Start first ready task"
+    refute start_html =~ "Resume Todo transition safely"
+  end
+
   test "publication confirmation reveals a separate Start action and waiting is not admission" do
     {:ok, view, _html} = live(build_conn(), "/work/new?intent=intent-201")
 
@@ -365,6 +471,66 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "Waiting for Symphony admission"
     assert html =~ "no Symphony admission event has been observed"
     refute html =~ "Open admitted run"
+  end
+
+  test "blocked publication exposes an explicit resume and sends a fresh durable command ID" do
+    {:ok, view, _html} = live(build_conn(), "/work/new?intent=intent-publication-recovery")
+
+    blocked_html = render_click(view, "publish_approved_plan")
+
+    assert blocked_html =~ "Publication blocked"
+    assert blocked_html =~ "Resume publication safely"
+    assert blocked_html =~ "Refresh stored state"
+    refute blocked_html =~ "Reconcile now"
+
+    assert_received {:studio_command, :publish_approved_plan, %{"attempt" => "initial"}, initial_context}
+
+    complete_html = render_click(view, "resume_publication")
+
+    assert complete_html =~ "Backlog publication confirmed"
+    assert_received {:studio_command, :publish_approved_plan, %{"attempt" => "resume"}, resume_context}
+    assert initial_context.command_id != resume_context.command_id
+    assert resume_context.intent_id == "intent-publication-blocked"
+  end
+
+  test "publication recovery command is stable across reload of the same durable receipt" do
+    {:ok, first_view, first_html} = live(build_conn(), "/work/new?intent=intent-publication-blocked")
+    assert first_html =~ "Resume publication safely"
+    _html = render_click(first_view, "resume_publication")
+    assert_received {:studio_command, :publish_approved_plan, %{"attempt" => "resume"}, first_context}
+
+    {:ok, second_view, second_html} = live(build_conn(), "/work/new?intent=intent-publication-blocked")
+    assert second_html =~ "Resume publication safely"
+    _html = render_click(second_view, "resume_publication")
+    assert_received {:studio_command, :publish_approved_plan, %{"attempt" => "resume"}, second_context}
+
+    assert first_context.command_id == second_context.command_id
+  end
+
+  test "partial and uncertain publication states offer reconciliation-backed resume, not refresh-as-reconcile" do
+    for status <- ["partial", "uncertain"] do
+      {:ok, _view, html} = live(build_conn(), "/work/new?intent=intent-publication-#{status}")
+
+      assert html =~ "Resume publication safely"
+      assert html =~ "reconciles every unresolved idempotency key before any write"
+      assert html =~ "Refresh stored state"
+      refute html =~ "Reconcile now"
+    end
+  end
+
+  test "blocked and uncertain starts expose a real resume action with the selected issue" do
+    for status <- ["blocked", "uncertain"] do
+      {:ok, view, html} = live(build_conn(), "/work/new?intent=intent-start-#{status}")
+
+      assert html =~ "Resume Todo transition safely"
+      assert html =~ "STUDIO-301"
+
+      waiting_html = render_click(view, "resume_start")
+      assert waiting_html =~ "Waiting for Symphony admission"
+
+      assert_received {:studio_command, :start_first_ready, %{"attempt" => "resume"}, context}
+      assert context.intent_id == "intent-start-#{status}"
+    end
   end
 
   test "Run Detail puts an incomplete outcome before historical activity in the DOM" do

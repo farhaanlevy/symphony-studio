@@ -1,62 +1,45 @@
 # Build Week Preview: Linear write boundary
 
-The preview keeps the accepted R0 query-only Linear credential unchanged. Plan
-publication uses a second, team-scoped credential with only Linear **Read +
-Write** access to the **Symphony Studio** team (`SYM`). It needs no Admin,
-comment, label, or workspace-wide capability.
+Status: production live write is disabled in this preview candidate.
 
-The protected file contract is deliberately separate:
+The accepted R0 boundary keeps its query credential, selector, provider bodies,
+and network access outside candidate-controlled Mix and BEAM processes. The
+first preview design attempted to validate a second write credential inside the
+preview BEAM. A fresh security review rejected that direction: candidate code
+would receive both credentials, could substitute its own comparison input, and
+would execute provider calls directly. Constant-time comparison inside the
+candidate does not repair that trust failure.
 
-- `SYMPHONY_LINEAR_WRITE_ENV_FILE` is set only for the Studio launch command;
-- it points outside every Git repository and worktree to a regular,
-  single-link, current-user-owned file with mode `0600`;
-- the file contains exactly one non-empty
-  `SYMPHONY_LINEAR_WRITE_API_KEY=` assignment;
-- the same launch must also provide the protected R0 query credential through
-  `SYMPHONY_LINEAR_ENV_FILE`, or through the already supported bounded
-  `LINEAR_API_KEY` environment boundary;
-- before any write callback, Studio validates both authorities and compares
-  fixed-size in-memory frames in constant time; unavailable comparison or equal
-  credential values fails closed;
-- the pointer and key are never logged, returned, copied to application
-  configuration, or exposed to model/shell children.
+The supported preview launcher therefore strips credential-shaped variables
+from build and runtime children, and production Studio uses the unavailable
+broker. Do not provide either Linear credential or environment-file pointer to
+the preview command. The in-process typed adapter remains deterministic
+test/prototype code only; it is not a production credential boundary and is not
+injected by the supported application.
 
-The recommended location is
-`$HOME/.config/symphony-studio/linear-write.env`, with each parent directory at
-mode `0700`. The launch process should set the pointer command-locally rather
-than exporting it from a shell profile.
+## Required future boundary
 
-The production adapter is explicitly injected only at the trusted local Studio
-host boundary as:
+Re-enabling the path requires a distinct, versioned, trusted out-of-process
+preview-write broker. It must not broaden or replace the R0 read-only broker.
+The trusted broker must:
 
-```elixir
-broker = SymphonyElixir.Studio.LinearWriteBroker.Linear.target()
-SymphonyElixir.Studio.IntentService.publish_approved_plan(intent_id, command_id,
-  broker: broker
-)
-```
+- own both credentials, validate their protected files, and prove the values
+  differ without returning either value or selector to candidate code;
+- retain the write credential and all provider network access;
+- peer-attest the exact candidate process and expose only bounded typed command
+  frames plus content-free receipts;
+- permit only `issueCreate` in Backlog, `issueRelationCreate(type: blocks)`, and
+  one selected first-ready `issueUpdate` to Todo for the dedicated project;
+- reconcile deterministic issue, relation, and transition identities before
+  execution and report partial or uncertain outcomes without blind retry;
+- deny `SYM-1` and `SYM-2` before any provider operation; and
+- use a separate team-scoped credential with only Linear Read + Write for
+  Symphony Studio / `SYM`, with no Admin, comment, label, or workspace-wide
+  capability.
 
-The default Intent Service broker remains fail-closed. The adapter is bound to
-project `symphony-studio-build-week-3f2698765546`, team `Symphony Studio` / `SYM`,
-and exactly these mutations:
+The local STDIO MCP server persists owner-local planning state for attach,
+submit, clarification, and proposal presentation, but exposes no approval,
+publication, start, or Linear mutation tool.
 
-1. `issueCreate` with an exact client-generated UUID, project/team binding, and
-   the team's `Backlog` state;
-2. `issueRelationCreate` with an exact client-generated UUID and type `blocks`;
-3. `issueUpdate` for the one explicitly selected first-ready issue, using the
-   team's exact `Todo` state ID.
-
-Every issue and relation is reconciled before execution. Lost mutation
-responses become `uncertain`; a retry queries the same deterministic UUID
-instead of creating a duplicate. Relation and transition writes additionally
-prove that their endpoints are Studio-created issues for the exact approved
-intent and proposal digest. `SYM-1` and `SYM-2` are denied before mutation.
-
-The local STDIO MCP server intentionally exposes no approval, publication, or
-start tool and has no production write broker. A Codex thread can attach,
-submit, clarify, present, and query status, while the owner must perform the
-proposal-bound approval, publication, and separate Start action in the trusted
-local Studio UI.
-
-Automated tests use an injected in-memory GraphQL transport. They execute no
-live Linear mutation and never load a real credential.
+Automated adapter tests use an injected in-memory GraphQL transport. They
+execute no live Linear mutation and never load a real credential.

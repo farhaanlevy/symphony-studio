@@ -6,10 +6,13 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
   Local newline-delimited JSON-RPC STDIO server for the canonical Intent Service.
 
   Standard output contains protocol messages only. The server supports the MCP
-  initialization lifecycle and five non-mutating intent-liaison tools; it
-  performs no model calls. Approval, Linear publication, and start are
-  intentionally unavailable here because an MCP/model caller cannot attest
-  human consent. Those actions remain at the trusted local Studio boundary.
+  initialization lifecycle and five owner-local planning/status tools; it
+  performs no model calls or external provider mutation. Attach, submit,
+  answer, and present persist the canonical owner-local Intent Store. Approval,
+  Linear publication, and start are intentionally unavailable here because an
+  MCP/model caller cannot attest human consent. The current local Studio host
+  also blocks those external actions until a distinct trusted out-of-process
+  write broker exists.
   """
 
   alias SymphonyElixir.Studio.Intent.Canonical
@@ -437,7 +440,7 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
   end
 
   defp server_instructions do
-    "Inspect and clarify before planning, then present the full proposal and digest. This MCP liaison cannot approve, publish, or start work; those actions require an explicit human action in the trusted local Studio interface. Query status here after the host acts. SYM-1 and SYM-2 remain permanently denied."
+    "Inspect and clarify before planning, then present the full proposal and digest. This MCP liaison cannot approve, publish, or start work. The current Studio host also blocks those external actions until a distinct trusted out-of-process write broker exists. Query durable local status here. SYM-1 and SYM-2 remain permanently denied."
   end
 
   defp service_options(opts) do
@@ -490,14 +493,15 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
   defp cli_help do
     """
     Run the precompiled Symphony Studio Intent MCP server over STDIO with the
-    non-mutating intent liaison.
+    owner-local intent liaison with no external mutation authority.
 
       studio_intent_mcp [--data-root /absolute/owner-local/path]
 
     Compile the Elixir project before launching. Standard output is reserved
     for newline-delimited MCP JSON-RPC messages while the server is running.
     Approval, Linear publication, and start are deliberately unavailable over
-    MCP and remain bound to explicit actions in the trusted local Studio UI.
+    MCP. The current local Studio host also blocks them until a distinct trusted
+    out-of-process write broker exists.
     """
     |> String.trim()
   end

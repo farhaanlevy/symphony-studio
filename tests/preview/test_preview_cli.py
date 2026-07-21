@@ -23,6 +23,31 @@ import preview_cli as preview  # noqa: E402
 
 
 class PreviewCliTest(unittest.TestCase):
+    SECRET_SHAPED_PARENT = {
+        "AWS_SECRET_ACCESS_KEY": "sentinel-aws-secret",
+        "CODEX_HOME": "/sentinel/codex-home",
+        "DATABASE_PASSWORD": "sentinel-database-password",
+        "GITHUB_TOKEN": "sentinel-github-token",
+        "LINEAR_API_KEY": "sentinel-linear-key",
+        "OPENAI_API_KEY": "sentinel-openai-key",
+        "OWNER_CREDENTIAL_FILE": "/sentinel/credential",
+        "SESSION_COOKIE": "sentinel-session-cookie",
+        "SYMPHONY_LINEAR_ENV_FILE": "/sentinel/read.env",
+        "SYMPHONY_LINEAR_WRITE_ENV_FILE": "/sentinel/write.env",
+    }
+
+    def parent_environment_with_sentinels(self) -> dict[str, str]:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key in preview.SAFE_CHILD_ENVIRONMENT and value
+        }
+        environment.setdefault("HOME", str(Path.home()))
+        environment.setdefault("PATH", os.defpath)
+        environment.setdefault("SHELL", "/bin/sh")
+        environment.update(self.SECRET_SHAPED_PARENT)
+        return environment
+
     def prepare_reset_root(self, parent: Path) -> Path:
         data_root = parent / "state" / "preview"
         with mock.patch.object(preview, "discover_worktrees", return_value=(ROOT,)):
@@ -460,16 +485,336 @@ class PreviewCliTest(unittest.TestCase):
             "PATH": "/bin",
             "HOME": "/safe-home",
             "LINEAR_API_KEY": "should-not-pass",
+            "SYMPHONY_LINEAR_ENV_FILE": "/protected/read.env",
+            "SYMPHONY_LINEAR_WRITE_ENV_FILE": "/protected/write.env",
             "OPENAI_TOKEN": "should-not-pass",
+            "AWS_SECRET_ACCESS_KEY": "should-not-pass",
+            "DATABASE_PASSWORD": "should-not-pass",
+            "GITHUB_TOKEN": "should-not-pass",
+            "OWNER_CREDENTIAL_FILE": "/protected/credential",
+            "SESSION_COOKIE": "should-not-pass",
             "UNRELATED": "should-not-pass",
         }
         with mock.patch.dict(os.environ, fake_environment, clear=True):
             actual = preview.safe_child_environment(home=Path("/isolated-home"))
         self.assertEqual(actual["HOME"], "/isolated-home")
         self.assertEqual(actual["PATH"], "/bin")
-        self.assertNotIn("LINEAR_API_KEY", actual)
-        self.assertNotIn("OPENAI_TOKEN", actual)
-        self.assertNotIn("UNRELATED", actual)
+        for forbidden in fake_environment.keys() - preview.SAFE_CHILD_ENVIRONMENT:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, actual)
+
+    def test_run_command_omission_means_safe_environment_not_inheritance(self) -> None:
+        names = sorted(self.SECRET_SHAPED_PARENT)
+        script = (
+            "import os,sys; "
+            f"sys.exit(1 if any(name in os.environ for name in {names!r}) else 0)"
+        )
+
+        with mock.patch.dict(
+            os.environ, self.parent_environment_with_sentinels(), clear=True
+        ):
+            result = preview.run_command(
+                [sys.executable, "-c", script],
+                cwd=ROOT,
+            )
+
+        self.assertEqual(result.returncode, 0)
+
+    def test_run_command_rejects_an_explicit_forbidden_environment(self) -> None:
+        environment = preview.safe_child_environment()
+        environment["LINEAR_API_KEY"] = "sentinel-linear-key"
+
+        with self.assertRaisesRegex(preview.PreviewError, "forbidden variable"):
+            preview.run_command(
+                [sys.executable, "-c", "raise SystemExit(99)"],
+                cwd=ROOT,
+                environment=environment,
+            )
+
+    def test_live_preflight_codex_and_version_helpers_receive_only_safe_env(self) -> None:
+        captured: list[tuple[list[str], dict[str, str]]] = []
+        real_popen = preview.subprocess.Popen
+
+        def capture(*args: object, **kwargs: object):
+            command = [str(part) for part in args[0]]
+            environment = kwargs.get("env")
+            self.assertIsInstance(environment, dict)
+            captured.append((command, dict(environment)))
+            return real_popen(*args, **kwargs)
+
+        with (
+            mock.patch.dict(
+                os.environ, self.parent_environment_with_sentinels(), clear=True
+            ),
+            mock.patch.object(preview.subprocess, "Popen", side_effect=capture),
+        ):
+            report = preview.collect_preflight(
+                ROOT,
+                workflow=ROOT / "elixir" / "WORKFLOW.md",
+                base_url="http://127.0.0.1:4000",
+                require_browser=True,
+                require_live=True,
+                storage_state=None,
+            )
+
+        self.assertTrue(any(row["id"] == "codex" for row in report["checks"]))
+        self.assertTrue(
+            any(Path(command[0]).name == "codex" for command, _env in captured)
+        )
+        helper_names = {Path(command[0]).name for command, _env in captured}
+        self.assertTrue({"codex", "git", "mise", "node"}.issubset(helper_names))
+        self.assertGreaterEqual(len(captured), 3)
+        for command, environment in captured:
+            with self.subTest(command=command[0]):
+                self.assertLessEqual(
+                    set(environment), preview.ALLOWED_CHILD_ENVIRONMENT
+                )
+                self.assertTrue(
+                    self.SECRET_SHAPED_PARENT.keys().isdisjoint(environment)
+                )
+
+    def test_long_running_child_wrapper_never_inherits_parent_secrets(self) -> None:
+        names = sorted(self.SECRET_SHAPED_PARENT)
+        script = (
+            "import os,sys; "
+            f"sys.exit(1 if any(name in os.environ for name in {names!r}) else 0)"
+        )
+
+        with mock.patch.dict(
+            os.environ, self.parent_environment_with_sentinels(), clear=True
+        ):
+            process = preview.start_process(
+                [sys.executable, "-c", script],
+                cwd=ROOT,
+            )
+            self.assertEqual(process.wait(timeout=5.0), 0)
+
+    def test_all_process_and_exec_sites_use_the_validated_boundaries(self) -> None:
+        source = (ROOT / "scripts/preview/preview_cli.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(source.count("subprocess.Popen("), 2)
+        self.assertEqual(source.count("os.execvpe("), 1)
+        self.assertNotIn("env=None if environment is None", source)
+        self.assertIn(
+            "os.execvpe(command[0], command, validated_child_environment(environment))",
+            source,
+        )
+
+    def test_build_foundation_uses_only_the_strict_child_environment(self) -> None:
+        parent_environment = {
+            "HOME": "/owner-home",
+            "PATH": "/usr/bin:/bin",
+            "SHELL": "/bin/bash",
+            "SYMPHONY_LINEAR_ENV_FILE": "/protected/read.env",
+            "SYMPHONY_LINEAR_WRITE_ENV_FILE": "/protected/write.env",
+            "LINEAR_API_KEY": "should-not-pass",
+            "OPENAI_API_KEY": "should-not-pass",
+            "GITHUB_TOKEN": "should-not-pass",
+            "DATABASE_URL": "should-not-pass",
+        }
+        completed = SimpleNamespace(returncode=0)
+
+        with (
+            mock.patch.dict(os.environ, parent_environment, clear=True),
+            mock.patch.object(preview.shutil, "which", return_value="/usr/bin/mise"),
+            mock.patch.object(preview, "run_command", return_value=completed) as run,
+        ):
+            preview.build_foundation(ROOT)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            [
+                call.args[0][call.args[0].index("--") + 1 :]
+                for call in run.call_args_list
+            ],
+            [["mix", "setup"], ["mix", "build"]],
+        )
+        for call in run.call_args_list:
+            environment = call.kwargs["environment"]
+            command = call.args[0]
+            self.assertEqual(environment["HOME"], "/owner-home")
+            self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+            self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
+            self.assertEqual(
+                set(environment),
+                {"HOME", "PATH", "SHELL", "PYTHONDONTWRITEBYTECODE"},
+            )
+            self.assertEqual(
+                {
+                    part.removeprefix("--allow-env=")
+                    for part in command
+                    if part.startswith("--allow-env=")
+                },
+                preview.BUILD_CHILD_ENVIRONMENT,
+            )
+
+    def test_build_foundation_stops_on_setup_or_build_failure(self) -> None:
+        passed = SimpleNamespace(returncode=0)
+        failed = SimpleNamespace(returncode=1)
+
+        with (
+            mock.patch.object(preview.shutil, "which", return_value="/usr/bin/mise"),
+            mock.patch.object(preview, "run_command", return_value=failed) as run,
+            self.assertRaisesRegex(preview.PreviewBlocked, "dependency setup"),
+        ):
+            preview.build_foundation(ROOT)
+        self.assertEqual(run.call_count, 1)
+
+        with (
+            mock.patch.object(preview.shutil, "which", return_value="/usr/bin/mise"),
+            mock.patch.object(
+                preview, "run_command", side_effect=[passed, failed]
+            ) as run,
+            self.assertRaisesRegex(preview.PreviewBlocked, "runtime build"),
+        ):
+            preview.build_foundation(ROOT)
+        self.assertEqual(run.call_count, 2)
+
+    def test_launch_command_restricts_the_mise_runtime_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            runner = root / "elixir" / "bin" / "symphony"
+            runner.parent.mkdir(parents=True)
+            runner.write_text("runner\n", encoding="utf-8")
+            runner.chmod(0o700)
+            workflow = root / "elixir" / "WORKFLOW.md"
+            workflow.write_text("---\nserver: {}\n---\n", encoding="utf-8")
+            data_root = Path(temporary) / "private-state"
+
+            with mock.patch.object(
+                preview.shutil, "which", return_value="/usr/bin/mise"
+            ):
+                command = preview.launch_command(root, workflow, data_root, 4000)
+
+        self.assertEqual(
+            {
+                part.removeprefix("--allow-env=")
+                for part in command
+                if part.startswith("--allow-env=")
+            },
+            preview.RUNTIME_CHILD_ENVIRONMENT,
+        )
+        self.assertNotIn("SYMPHONY_LINEAR_ENV_FILE", " ".join(command))
+        self.assertNotIn("SYMPHONY_LINEAR_WRITE_ENV_FILE", " ".join(command))
+        self.assertNotIn("LINEAR_API_KEY", " ".join(command))
+
+    def test_clean_launch_mise_boundary_cannot_reintroduce_secrets(self) -> None:
+        command = preview.mise_exec_command(
+            "/usr/bin/mise",
+            preview.CLEAN_LAUNCH_CHILD_ENVIRONMENT,
+            ["mix", "build"],
+        )
+        allowed = {
+            part.removeprefix("--allow-env=")
+            for part in command
+            if part.startswith("--allow-env=")
+        }
+        self.assertEqual(allowed, preview.CLEAN_LAUNCH_CHILD_ENVIRONMENT)
+        self.assertTrue(self.SECRET_SHAPED_PARENT.keys().isdisjoint(allowed))
+
+    def test_production_beam_receives_no_parent_credentials_or_pointers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            runner = root / "elixir" / "bin" / "symphony"
+            runner.parent.mkdir(parents=True)
+            runner.write_text("runner\n", encoding="utf-8")
+            runner.chmod(0o700)
+            workflow = root / "elixir" / "WORKFLOW.md"
+            workflow.write_text("---\nserver: {}\n---\n", encoding="utf-8")
+            data_root = Path(temporary) / "private-state"
+            data_root.mkdir(mode=0o700)
+            command = ["/usr/bin/mise", "exec", "--", "./bin/symphony"]
+            args = SimpleNamespace(
+                data_root=str(data_root),
+                dry_run=False,
+                json=True,
+                live_preflight=False,
+                no_build=True,
+                port=4000,
+                workflow=None,
+            )
+            parent_environment = {
+                "HOME": "/owner-home",
+                "PATH": "/usr/bin:/bin",
+                "SHELL": "/bin/bash",
+                "SYMPHONY_LINEAR_ENV_FILE": "/protected/read.env",
+                "SYMPHONY_LINEAR_WRITE_ENV_FILE": "/protected/write.env",
+                "LINEAR_API_KEY": "should-not-pass",
+                "OPENAI_API_KEY": "should-not-pass",
+                "GITHUB_TOKEN": "should-not-pass",
+                "DATABASE_PASSWORD": "should-not-pass",
+                "SESSION_COOKIE": "should-not-pass",
+            }
+
+            with (
+                mock.patch.dict(os.environ, parent_environment, clear=True),
+                mock.patch.object(preview, "repository_root", return_value=root),
+                mock.patch.object(preview, "validate_workflow", return_value=workflow),
+                mock.patch.object(
+                    preview,
+                    "collect_preflight",
+                    return_value={"checks": [], "schemaVersion": 1, "status": "pass"},
+                ),
+                mock.patch.object(preview, "prepare_data_root", return_value=data_root),
+                mock.patch.object(preview, "launch_command", return_value=command),
+                mock.patch.object(
+                    preview.os, "execvpe", side_effect=RuntimeError("stop")
+                ) as execute,
+                self.assertRaisesRegex(RuntimeError, "stop"),
+            ):
+                preview.command_launch(args)
+
+        environment = execute.call_args.args[2]
+        self.assertEqual(environment["SYMPHONY_STUDIO_DATA_ROOT"], str(data_root))
+        self.assertEqual(environment["HOME"], "/owner-home")
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+        self.assertEqual(
+            set(environment),
+            {
+                "HOME",
+                "PATH",
+                "SHELL",
+                "PYTHONDONTWRITEBYTECODE",
+                "SYMPHONY_STUDIO_DATA_ROOT",
+            },
+        )
+
+    def test_browser_verification_rejects_session_material_and_live_write(self) -> None:
+        base = SimpleNamespace(
+            base_url="http://127.0.0.1:4000",
+            data_root="/private/unused",
+            grep=None,
+            json=True,
+            live_write=False,
+            live_write_ack=None,
+            storage_state="/sentinel/browser-session.json",
+            timeout=30.0,
+        )
+
+        with (
+            mock.patch.object(
+                preview, "prepare_data_root", side_effect=AssertionError("state access")
+            ),
+            mock.patch.object(
+                preview, "run_command", side_effect=AssertionError("browser child")
+            ),
+            self.assertRaisesRegex(preview.PreviewBlocked, "session material"),
+        ):
+            preview.command_verify(base)
+
+        base.storage_state = None
+        base.live_write = True
+        with (
+            mock.patch.object(
+                preview, "prepare_data_root", side_effect=AssertionError("state access")
+            ),
+            mock.patch.object(
+                preview, "run_command", side_effect=AssertionError("browser child")
+            ),
+            self.assertRaisesRegex(preview.PreviewBlocked, "out-of-process"),
+        ):
+            preview.command_verify(base)
 
     def test_command_runner_enforces_output_and_time_bounds(self) -> None:
         with self.assertRaisesRegex(preview.PreviewError, "output exceeded"):

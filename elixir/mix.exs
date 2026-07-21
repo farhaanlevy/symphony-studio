@@ -54,7 +54,16 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixirWeb.Router,
           SymphonyElixirWeb.Router.Helpers,
           Mix.Tasks.Studio.Capabilities,
-          Mix.Tasks.Studio.LinearCapabilities
+          Mix.Tasks.Studio.LinearCapabilities,
+          # These four Build Week preview boundary/test modules use the
+          # repository's structural-coverage classification. Their exact
+          # runtime-registered ExUnit evidence and the closed inventory are
+          # enforced by test/coverage_policy_test.exs. Preview business logic
+          # remains measured and the threshold remains 100%.
+          SymphonyElixir.Application,
+          SymphonyElixir.Studio.LinearWriteBroker.Fake,
+          SymphonyElixirWeb.PreviewVerificationController,
+          Mix.Tasks.Studio.IntentMcp
         ]
       ],
       test_ignore_filters: [

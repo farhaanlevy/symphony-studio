@@ -79,6 +79,23 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     end
   end
 
+  defmodule WriteTrapIntentService do
+    def approve_publication(_intent_id, _digest, _confirmation, _command_id, _opts) do
+      send(self(), {:production_write_callback, :approve_publication})
+      {:ok, %{}}
+    end
+
+    def publish_approved_plan(_intent_id, _command_id, _opts) do
+      send(self(), {:production_write_callback, :publish_approved_plan})
+      {:ok, %{}}
+    end
+
+    def start_first_ready(_intent_id, _confirmation, _command_id, _opts) do
+      send(self(), {:production_write_callback, :start_first_ready})
+      {:ok, %{}}
+    end
+  end
+
   setup do
     endpoint_config = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
 
@@ -575,32 +592,96 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     assert projection.page.outcome.reason =~ "sequence gap"
   end
 
-  test "Setup reads the sealed readiness artifact and fails closed for changed source" do
+  test "Setup binds a clean preview descendant to its accepted R0 foundation without claiming preview gates" do
+    fixture = setup_readiness_fixture()
+
     assert {:ok, page} = RuntimeStudioDataPort.load(:setup, %{})
     assert page.kind == :setup
-    assert page.verdict == :not_ready
-    assert page.reason =~ "different source revision"
+    assert page.verdict == :ready
+    assert page.verdict_label == "Candidate preflight ready"
+    assert page.current_revision == fixture.preview_revision
+    assert page.source_revision == fixture.foundation_revision
+    assert page.reason =~ "accepted R0 foundation is an ancestor"
+    assert page.reason =~ "not attested by the foundation artifact"
+    refute page.reason =~ "different source revision"
 
     compatibility = Enum.find(page.rows, &(&1.system == "Compatibility"))
     assert compatibility.state == :pass
     assert compatibility.value == "0.144.3"
 
     model = Enum.find(page.rows, &(&1.system == "Runtime selection"))
-    assert model.state == :fail
-    assert model.value == "Configured workflow is not GPT-5.6 Sol Ultra"
+    assert model.state == :pass
+    assert model.value == "Ultra reasoning verified"
 
-    repository = Enum.find(page.rows, &(&1.system == "Repository"))
-    assert repository.state == :fail
-    assert repository.remediation =~ "Regenerate readiness evidence"
+    candidate = Enum.find(page.rows, &(&1.system == "Repository"))
+    assert candidate.state == :pass
+    assert candidate.label == "Preview candidate · exact committed checkout"
+
+    foundation = Enum.find(page.rows, &(&1.system == "R0 foundation"))
+    assert foundation.state == :pass
+    assert foundation.label == "Accepted readiness ancestry"
+
+    candidate_gates = Enum.find(page.rows, &(&1.system == "Readiness evidence"))
+    assert candidate_gates.state == :warning
+    assert candidate_gates.value == "Final gate and review pending"
+    assert candidate_gates.remediation =~ "R0 artifact does not attest preview changes"
+  end
+
+  test "Setup rejects readiness evidence outside the preview candidate ancestry" do
+    setup_readiness_fixture(manifest_revision: String.duplicate("f", 40))
+
+    assert {:ok, page} = RuntimeStudioDataPort.load(:setup, %{})
+    assert page.verdict == :not_ready
+    assert page.reason =~ "not an ancestor of this preview candidate"
+
+    candidate = Enum.find(page.rows, &(&1.system == "Repository"))
+    assert candidate.state == :pass
+
+    foundation = Enum.find(page.rows, &(&1.system == "R0 foundation"))
+    assert foundation.state == :fail
+    assert foundation.remediation =~ "descendant of the accepted foundation"
+  end
+
+  test "Setup fails a dirty preview checkout without invalidating its accepted foundation ancestry" do
+    fixture = setup_readiness_fixture(dirty: true)
+
+    assert {:ok, page} = RuntimeStudioDataPort.load(:setup, %{})
+    assert page.verdict == :not_ready
+    assert page.current_revision == "#{fixture.preview_revision}+changes"
+    assert page.reason =~ "tracked or untracked changes"
+
+    candidate = Enum.find(page.rows, &(&1.system == "Repository"))
+    assert candidate.state == :fail
+    assert candidate.remediation =~ "exact committed preview checkout"
+
+    foundation = Enum.find(page.rows, &(&1.system == "R0 foundation"))
+    assert foundation.state == :pass
+  end
+
+  test "Setup fails an untracked preview source instead of calling the checkout exact" do
+    fixture = setup_readiness_fixture(untracked: true)
+
+    assert {:ok, page} = RuntimeStudioDataPort.load(:setup, %{})
+    assert page.verdict == :not_ready
+    assert page.current_revision == "#{fixture.preview_revision}+changes"
+
+    candidate = Enum.find(page.rows, &(&1.system == "Repository"))
+    assert candidate.state == :fail
+    assert candidate.label == "Preview candidate · exact committed checkout"
+
+    foundation = Enum.find(page.rows, &(&1.system == "R0 foundation"))
+    assert foundation.state == :pass
   end
 
   test "preserves canonical partial-publication and uncertain-start recovery receipts" do
-    configure_endpoint(studio_intent_service: StaticIntentService)
+    configure_endpoint(
+      studio_intent_service: StaticIntentService,
+      studio_linear_write_broker: {:candidate_in_process_broker, :must_not_be_injected}
+    )
 
     assert {:ok, page} = RuntimeStudioDataPort.load(:new_work, %{"intent" => "intent-errors"})
     assert_receive {:static_intent_service_options, opts}
-
-    assert {SymphonyElixir.Studio.LinearWriteBroker.Linear, %SymphonyElixir.Studio.LinearWriteBroker.Linear{}} = Keyword.fetch!(opts, :broker)
+    refute Keyword.has_key?(opts, :broker)
 
     assert page.publication.status == "partial"
 
@@ -622,6 +703,41 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     assert page.start.provider == "linear"
     assert page.start.idempotency_key == "start-key"
     assert page.start.last_error.code == "linear_timeout"
+  end
+
+  test "production web commands fail before any in-process write callback" do
+    refute RuntimeStudioDataPort.external_write_actions_enabled?()
+
+    configure_endpoint(
+      studio_intent_service: WriteTrapIntentService,
+      studio_linear_write_broker: {:candidate_in_process_broker, :must_not_be_injected}
+    )
+
+    context = %{
+      command_id: "command-host-bound",
+      intent_id: "intent-host-bound",
+      proposal_digest: "sha256:proposal"
+    }
+
+    commands = [
+      {:approve_publication, %{"proposal_digest" => "sha256:proposal"}},
+      {:publish_approved_plan, %{}},
+      {:start_first_ready, %{}}
+    ]
+
+    Enum.each(commands, fn {command, payload} ->
+      assert {:error,
+              %{
+                code: "external_write_broker_required",
+                details: %{},
+                message: message
+              }} = RuntimeStudioDataPort.command(command, payload, context)
+
+      assert message =~ "trusted out-of-process preview-write broker"
+      assert message =~ "disabled"
+    end)
+
+    refute_received {:production_write_callback, _command}
   end
 
   defp projection_fixture(event_builder, opts \\ []) do
@@ -792,6 +908,88 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
       |> Keyword.merge(overrides)
 
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, config)
+  end
+
+  defp setup_readiness_fixture(options \\ []) do
+    root = Path.join(System.tmp_dir!(), "studio-setup-readiness-#{System.unique_integer([:positive])}")
+    repository = Path.join(root, "repository")
+    readiness_path = Path.join(root, "implementation-readiness.json")
+    workflow_path = Path.join(root, "WORKFLOW.md")
+    original_workflow = SymphonyElixir.Workflow.workflow_file_path()
+
+    File.mkdir_p!(repository)
+    git!(repository, ["init", "--quiet"])
+    git!(repository, ["config", "user.name", "Symphony Studio Test"])
+    git!(repository, ["config", "user.email", "symphony-studio-test@example.invalid"])
+
+    File.write!(Path.join(repository, "foundation.txt"), "accepted foundation\n")
+    git!(repository, ["add", "foundation.txt"])
+    git!(repository, ["commit", "--quiet", "-m", "accepted foundation"])
+    foundation_revision = git!(repository, ["rev-parse", "HEAD"])
+
+    File.write!(Path.join(repository, "preview.txt"), "preview candidate\n")
+    git!(repository, ["add", "preview.txt"])
+    git!(repository, ["commit", "--quiet", "-m", "preview candidate"])
+    preview_revision = git!(repository, ["rev-parse", "HEAD"])
+
+    manifest_revision = Keyword.get(options, :manifest_revision, foundation_revision)
+    write_setup_readiness!(readiness_path, manifest_revision)
+
+    SymphonyElixir.TestSupport.write_workflow_file!(workflow_path,
+      tracker_kind: "linear",
+      tracker_project_slug: "symphony-studio-build-week-3f2698765546",
+      tracker_api_token: "non-secret-test-token",
+      codex_command: ~s(codex --config 'model="gpt-5.6-sol"' --config model_reasoning_effort=ultra app-server)
+    )
+
+    SymphonyElixir.Workflow.set_workflow_file_path(workflow_path)
+
+    if Keyword.get(options, :dirty, false) do
+      File.write!(Path.join(repository, "preview.txt"), "uncommitted preview change\n")
+    end
+
+    if Keyword.get(options, :untracked, false) do
+      File.write!(Path.join(repository, "untracked_runtime.ex"), "defmodule UntrackedRuntime do\nend\n")
+    end
+
+    configure_endpoint(studio_project_root: repository, studio_readiness_path: readiness_path)
+
+    on_exit(fn ->
+      SymphonyElixir.Workflow.set_workflow_file_path(original_workflow)
+      File.rm_rf(root)
+    end)
+
+    %{foundation_revision: foundation_revision, preview_revision: preview_revision}
+  end
+
+  defp write_setup_readiness!(path, foundation_revision) do
+    manifest = %{
+      "checkout" => %{"headCommit" => foundation_revision},
+      "runtime" => %{"overall" => "pass"},
+      "codex" => %{"version" => "0.144.3"},
+      "capabilities" => %{
+        "auth" => %{
+          "mode" => "chatgpt",
+          "referenceProfile" => %{"chatgptAuthentication" => true}
+        },
+        "linear" => %{
+          "configuredProjectBinding" => "linear-project-v1-0123456789abcdef",
+          "project" => %{"status" => "pass"}
+        },
+        "models" => [
+          %{"id" => "gpt-5.6-sol", "reasoningEfforts" => ["high", "ultra"]}
+        ]
+      }
+    }
+
+    File.write!(path, Jason.encode_to_iodata!(manifest))
+  end
+
+  defp git!(repository, arguments) do
+    case System.cmd("git", arguments, cd: repository, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {output, status} -> flunk("git #{Enum.join(arguments, " ")} failed (#{status}): #{output}")
+    end
   end
 
   defp running_entry do

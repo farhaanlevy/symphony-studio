@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed owner tooling for the Symphony Studio Build Week Preview.
 
-This module deliberately does not load credentials. Live authentication and
-Linear mutation remain the responsibility of the running Studio process. The
-tooling validates local boundaries, launches the production runtime, and
+This module deliberately does not load credentials. Live Linear mutation is
+disabled until a distinct trusted out-of-process preview-write broker exists.
+The tooling validates local boundaries, launches the production runtime, and
 drives verification only after explicit owner acknowledgements.
 """
 
@@ -119,6 +119,28 @@ SAFE_CHILD_ENVIRONMENT = frozenset(
         "USER",
     }
 )
+BUILD_CHILD_ENVIRONMENT = SAFE_CHILD_ENVIRONMENT | {
+    "MIX_HOME",
+    "PYTHONDONTWRITEBYTECODE",
+}
+RUNTIME_CHILD_ENVIRONMENT = BUILD_CHILD_ENVIRONMENT | {
+    "SYMPHONY_STUDIO_DATA_ROOT"
+}
+CLEAN_LAUNCH_CHILD_ENVIRONMENT = BUILD_CHILD_ENVIRONMENT | {
+    "MISE_DATA_DIR",
+    "MIX_ENV",
+}
+BROWSER_CHILD_ENVIRONMENT = SAFE_CHILD_ENVIRONMENT | {
+    "PYTHONDONTWRITEBYTECODE",
+    "SYMPHONY_PREVIEW_ARTIFACT_ROOT",
+    "SYMPHONY_PREVIEW_BASE_URL",
+    "SYMPHONY_PREVIEW_LIVE_WRITE",
+}
+ALLOWED_CHILD_ENVIRONMENT = (
+    RUNTIME_CHILD_ENVIRONMENT
+    | CLEAN_LAUNCH_CHILD_ENVIRONMENT
+    | BROWSER_CHILD_ENVIRONMENT
+)
 
 
 class PreviewError(RuntimeError):
@@ -203,12 +225,13 @@ def run_command(
     max_output_bytes: int = MAX_TEXT_BYTES,
 ) -> subprocess.CompletedProcess[bytes]:
     normalized = [str(part) for part in command]
+    child_environment = validated_child_environment(environment)
     try:
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             process = subprocess.Popen(
                 normalized,
                 cwd=cwd,
-                env=None if environment is None else dict(environment),
+                env=child_environment,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
@@ -258,6 +281,14 @@ def run_command(
 
 
 def safe_child_environment(*, home: Path | None = None) -> dict[str, str]:
+    """Return the complete environment permitted at preview child boundaries.
+
+    This is intentionally an allowlist rather than a denylist.  In particular,
+    no credential, credential pointer, token, session, or provider-specific
+    variable from the owner shell is inherited by candidate compilation or the
+    production BEAM.
+    """
+
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -269,6 +300,68 @@ def safe_child_environment(*, home: Path | None = None) -> dict[str, str]:
     environment.setdefault("SHELL", "/bin/sh")
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
+
+
+def validated_child_environment(
+    environment: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Return an explicit minimum child environment or fail closed.
+
+    An omitted environment means the safe base allowlist, never parent
+    inheritance. Explicit environments may add only the named non-secret
+    preview paths and flags required by build, launch, or browser verification.
+    """
+
+    candidate = safe_child_environment() if environment is None else dict(environment)
+    unexpected = set(candidate) - ALLOWED_CHILD_ENVIRONMENT
+    if unexpected:
+        raise PreviewError("child environment contains a forbidden variable")
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in candidate.items()):
+        raise PreviewError("child environment contains a non-string value")
+    return candidate
+
+
+def start_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str] | None = None,
+) -> subprocess.Popen[bytes]:
+    """Start one bounded long-running child without parent-env inheritance."""
+
+    return subprocess.Popen(
+        [str(part) for part in command],
+        cwd=cwd,
+        env=validated_child_environment(environment),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def mise_environment_allowlist(names: Iterable[str]) -> list[str]:
+    """Keep mise from reintroducing globally configured environment values."""
+
+    return [f"--allow-env={name}" for name in sorted(set(names))]
+
+
+def mise_exec_command(
+    mise: str,
+    environment_names: Iterable[str],
+    command: Sequence[str],
+) -> list[str]:
+    """Build the only supported mise subprocess boundary."""
+
+    return [
+        mise,
+        "exec",
+        "-C",
+        "elixir",
+        *mise_environment_allowlist(environment_names),
+        "--",
+        *command,
+    ]
 
 
 def parse_version(value: str, label: str) -> tuple[int, ...]:
@@ -577,11 +670,13 @@ def collect_preflight(
                 )
             )
         if storage_state is not None:
-            try:
-                validate_protected_file(storage_state, root, "browser storage state")
-                checks.append(check_row("browser_storage_state", "pass", "protected file"))
-            except PreviewError as error:
-                checks.append(check_row("browser_storage_state", "blocked", str(error)))
+            checks.append(
+                check_row(
+                    "browser_storage_state",
+                    "blocked",
+                    "session material is not accepted by read-only preview verification",
+                )
+            )
     status = "pass" if all(row["status"] == "pass" for row in checks) else "blocked"
     return {"checks": checks, "schemaVersion": SCHEMA_VERSION, "status": status}
 
@@ -622,14 +717,21 @@ def build_foundation(root: Path) -> None:
     mise = shutil.which("mise")
     if mise is None:
         raise PreviewBlocked("mise is required to build the preview runtime")
-    result = run_command(
-        [mise, "exec", "-C", "elixir", "--", "mix", "build"],
-        cwd=root,
-        timeout=900.0,
-        max_output_bytes=32 * 1024 * 1024,
+    environment = safe_child_environment()
+    steps = (
+        (["mix", "setup"], "preview dependency setup failed"),
+        (["mix", "build"], "preview runtime build failed"),
     )
-    if result.returncode != 0:
-        raise PreviewBlocked("preview runtime build failed")
+    for command, failure in steps:
+        result = run_command(
+            mise_exec_command(mise, BUILD_CHILD_ENVIRONMENT, command),
+            cwd=root,
+            environment=environment,
+            timeout=900.0,
+            max_output_bytes=32 * 1024 * 1024,
+        )
+        if result.returncode != 0:
+            raise PreviewBlocked(failure)
 
 
 def launch_command(root: Path, workflow: Path, data_root: Path, port: int) -> list[str]:
@@ -639,20 +741,19 @@ def launch_command(root: Path, workflow: Path, data_root: Path, port: int) -> li
     runner = root / "elixir/bin/symphony"
     if not runner.is_file() or not os.access(runner, os.X_OK):
         raise PreviewBlocked("preview runtime is not built")
-    return [
+    return mise_exec_command(
         mise,
-        "exec",
-        "-C",
-        "elixir",
-        "--",
-        "./bin/symphony",
-        "--i-understand-that-this-will-be-running-without-the-usual-guardrails",
-        "--logs-root",
-        str(data_root / "logs"),
-        "--port",
-        str(port),
-        str(workflow),
-    ]
+        RUNTIME_CHILD_ENVIRONMENT,
+        [
+            "./bin/symphony",
+            "--i-understand-that-this-will-be-running-without-the-usual-guardrails",
+            "--logs-root",
+            str(data_root / "logs"),
+            "--port",
+            str(port),
+            str(workflow),
+        ],
+    )
 
 
 def command_launch(args: argparse.Namespace) -> int:
@@ -692,9 +793,9 @@ def command_launch(args: argparse.Namespace) -> int:
         emit(value, as_json=args.json)
         return PASS
     print(f"Symphony Studio owner preview: {base_url}", flush=True)
-    environment = os.environ.copy()
+    environment = safe_child_environment()
     environment["SYMPHONY_STUDIO_DATA_ROOT"] = str(data_root)
-    os.execvpe(command[0], command, environment)
+    os.execvpe(command[0], command, validated_child_environment(environment))
     raise AssertionError("exec returned unexpectedly")
 
 
@@ -1333,7 +1434,7 @@ def command_clean_launch(args: argparse.Namespace) -> int:
         environment["MISE_DATA_DIR"] = str(mise_data)
         for command in (("mix", "setup"), ("mix", "build")):
             result = run_command(
-                [mise, "exec", "-C", "elixir", "--", *command],
+                mise_exec_command(mise, CLEAN_LAUNCH_CHILD_ENVIRONMENT, command),
                 cwd=source,
                 environment=environment,
                 timeout=args.build_timeout,
@@ -1342,28 +1443,23 @@ def command_clean_launch(args: argparse.Namespace) -> int:
             if result.returncode != 0:
                 raise PreviewBlocked(f"clean-launch {' '.join(command)} failed")
         port = choose_loopback_port()
-        command = [
+        command = mise_exec_command(
             mise,
-            "exec",
-            "-C",
-            "elixir",
-            "--",
-            "./bin/symphony",
-            "--i-understand-that-this-will-be-running-without-the-usual-guardrails",
-            "--logs-root",
-            str(logs),
-            "--port",
-            str(port),
-            str(workflow),
-        ]
-        process = subprocess.Popen(
+            CLEAN_LAUNCH_CHILD_ENVIRONMENT,
+            [
+                "./bin/symphony",
+                "--i-understand-that-this-will-be-running-without-the-usual-guardrails",
+                "--logs-root",
+                str(logs),
+                "--port",
+                str(port),
+                str(workflow),
+            ],
+        )
+        process = start_process(
             command,
             cwd=source,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            environment=environment,
         )
         try:
             state = wait_for_http(
@@ -1392,19 +1488,19 @@ def command_clean_launch(args: argparse.Namespace) -> int:
 def command_verify(args: argparse.Namespace) -> int:
     root = repository_root()
     base_url = validate_loopback_url(args.base_url)
-    storage_state = (
-        validate_protected_file(Path(args.storage_state), root, "browser storage state")
-        if args.storage_state
-        else None
-    )
+    if args.storage_state:
+        raise PreviewBlocked(
+            "browser session material is not accepted by read-only preview verification"
+        )
+    if args.live_write:
+        raise PreviewBlocked(
+            "live browser write verification requires a trusted out-of-process preview-write broker"
+        )
     artifact_root = prepare_data_root(Path(args.data_root), root) / "evidence"
     browser_root = root / "tests/preview/browser"
     package = browser_root / "node_modules/@playwright/test/package.json"
     if not package.is_file():
         raise PreviewBlocked("browser dependencies are unavailable; run npm ci first")
-    if args.live_write:
-        if args.live_write_ack != "publish-one-dedicated-demo-issue":
-            raise PreviewBlocked("live golden path requires the exact write acknowledgement")
     driver_home = artifact_root.parent / "browser-home"
     driver_home.mkdir(mode=0o700, exist_ok=True)
     os.chmod(driver_home, 0o700)
@@ -1416,8 +1512,6 @@ def command_verify(args: argparse.Namespace) -> int:
             "SYMPHONY_PREVIEW_LIVE_WRITE": "1" if args.live_write else "0",
         }
     )
-    if storage_state is not None:
-        environment["SYMPHONY_PREVIEW_STORAGE_STATE"] = str(storage_state)
     command = [
         shutil.which("npm") or "npm",
         "exec",

@@ -21,16 +21,18 @@ Integrated source commits:
 ## Implemented candidate
 
 - One Intent Service backs production LiveView and the local STDIO MCP liaison.
-  MCP is strictly non-mutating: attach, submit, clarify, present, and status are
-  available; approval, publication, and start remain trusted-local-UI actions.
+  Attach, submit, clarify, and present persist owner-local planning state;
+  status reads it. MCP has no approval, publication, start, or Linear mutation
+  authority.
 - New Work accepts bounded prompt or pasted Markdown, asks at most two
-  clarifications, presents three to five proposed tasks and side effects, and
-  requires explicit approval before publication.
-- A fail-closed Linear broker permits only approved Backlog issue creation,
-  required blocker relations, and one selected first-ready transition to Todo.
-  It requires a distinct protected write credential plus protected R0 query
-  authority for constant-time inequality proof. It cannot reuse the R0
-  credential or mutate `SYM-1`/`SYM-2`.
+  clarifications, and presents three to five proposed tasks and side effects.
+  This candidate then renders the external-broker blocker; it does not expose
+  an approval, publication, resume, or Start control that can only fail.
+- Production Linear write is hard-disabled and uses the unavailable broker.
+  The exact-mutation in-process adapter remains test/prototype code only because
+  loading either credential into candidate BEAM would violate accepted R0
+  isolation. Re-enabling it requires a distinct trusted out-of-process broker;
+  the R0 broker is not broadened and `SYM-1`/`SYM-2` remain denied.
 - Symphony's existing poll/admission path remains scheduler authority.
 - Runtime events project into production Mission Control and Run Detail.
   Completion selects only the latest admitted attempt and requires gap-free
@@ -45,12 +47,16 @@ Integrated source commits:
 
 ## Current evidence
 
-- integrated runtime/service/controller suite: 94 tests, zero failures;
-- focused production-route suite: 8 tests, zero failures;
-- preview CLI: 20 tests, zero failures;
+- focused recovery and production-UI repair suite: 27 tests, zero failures;
+- Setup/readiness, DataPort, and Dashboard suite: 31 tests, zero failures;
+- preview CLI, strict child environment, reset, and launch boundaries: 31
+  tests, zero failures;
+- full Elixir test execution: 732 tests, zero failures, two intentional skips;
+- honest measured coverage: 86.96% against the unchanged 100% threshold, so
+  the complete candidate gate is failed rather than hidden;
 - Playwright harness contract: 4 tests, zero failures;
-- public specs and strict Credo: 152 source files, zero findings;
-- public-artifact audit: 2,177 files, zero findings;
+- public specs and strict Credo: 154 source files, zero findings;
+- public-artifact audit: 2,179 files, zero findings;
 - rendered production routes: desktop and mobile HTTP success, no browser
   console/page errors, no Axe WCAG A/AA violations, visible keyboard focus;
 - production New Work smoke: one clarification, five proposed tasks, explicit
@@ -63,14 +69,30 @@ The first fresh independent exact-commit review of
 `fd9cd006949facc7ba1e9cb5dc99ae9130e681ad` rejected mixed-attempt completion as
 P1 and identified acceptance-impacting P2 gaps in probe/test schema alignment,
 state/cursor truth, MCP consent provenance, credential distinctness, model
-attestation, and documented source naming. The current repair removes MCP
-writes, enforces credential inequality, aligns the browser contract, and makes
-completion current-attempt and revision bound. Its targeted tests and
-replacement final review are required before acceptance.
+attestation, and documented source naming. Revision 70 removed MCP external
+actions, aligned the browser contract, and made completion current-attempt and
+revision bound.
+
+The replacement review of `4eddff9032e5d41605bfefdc47538cabab7bcb82`
+returned NO-GO with two P1 and one P2: candidate build/runtime received
+credential selectors and both values; blocked/partial/uncertain UI retries
+reused a stale command ID; and “non-mutating MCP” was false because planning
+tools persist owner-local state. Its complete gate passed schema/readiness and
+714 Elixir tests with zero failures, then correctly failed the 100% structural
+coverage policy at 86.29%. Those findings and the coverage classification are
+the only authorized repair scope for the next candidate.
+
+The subsequent uncommitted repair review found and the candidate repaired two
+additional P1 gaps: unsanitized helper-child environments and crash-orphaned
+publication/start claims. It also removed dead external-action controls and
+stale UI/MCP claims. The same review rejected the attempted 20-module coverage
+classification as too broad; only four boundary/test modules remain excluded.
+The resulting honest 86.96% coverage result keeps the final preview gate red.
 
 ## Remaining release evidence
 
-- provision the separately scoped preview-write credential outside Git;
+- implement and independently review the separate trusted out-of-process
+  preview-write broker; do not provide a credential to this candidate;
 - create one new safe demonstration issue through the approved production path;
 - complete real Backlog publication, blocker relations, selected Todo
   transition, Symphony admission, isolated GPT-5.6 Sol Ultra execution,
@@ -78,6 +100,8 @@ replacement final review are required before acceptance.
   handoff;
 - run the final state matrix, exact-commit clean launch, public audit, fresh
   independent review, checksum, and provenance record;
+- raise measured preview coverage to the unchanged 100% policy without broad
+  exclusions, or retain the failed gate as an explicit submission limitation;
 - resolve only verified P0/P1 or acceptance-impacting P2 findings.
 
 R0-07 and protected `v0.1.0` publication remain a parallel release train and

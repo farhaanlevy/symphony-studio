@@ -2120,10 +2120,59 @@ upstream-baseline recovery gates, and publish/download/verify immutable
   requested from runtime-attested model/effort.
 - The same review proved that public MCP confirmation literals were not human
   consent and that separate file names did not prove distinct credential
-  values. The MCP server now has five non-mutating liaison tools only; the
-  trusted local UI owns approval, publication, and start. The write boundary
-  requires a protected R0 comparison authority and rejects unavailable or equal
-  values before its callback using fixed-size constant-time comparison. Probe
+  values. The MCP server removed approval, publication, and start tools; the
+  trusted local UI retained those actions. Revision 70 attempted an in-process
+  constant-time inequality check. Probe
   schema, state-matrix vocabulary, handoff timing, and documentation source
   naming were aligned to production truth. No credential was inspected, no live
   Linear mutation ran, and neither fixture changed during repair.
+- The replacement exact-commit review of
+  `4eddff9032e5d41605bfefdc47538cabab7bcb82` rejected that in-process credential
+  direction as P1: the supported launcher inherited credential-shaped
+  environment into candidate compilation/runtime, and the candidate BEAM read
+  both values and executed provider transport. It also found a P1 recovery
+  dead end because the UI reused the command ID after blocked, partial, or
+  uncertain publication/start, plus one P2 false “non-mutating MCP” claim even
+  though four tools intentionally persist owner-local planning state.
+- The same candidate's complete gate passed the exact 157-test schema/readiness
+  harness, deterministic regeneration, and 714 Elixir tests with zero failures
+  and two skips. It then failed the unchanged 100% coverage policy at 86.29%
+  because the new preview modules lacked an explicit structural-coverage
+  classification. The candidate is rejected. The deadline-safe repair disables
+  production Linear write until a distinct trusted out-of-process broker
+  exists, strips credential-shaped build/runtime environment, repairs explicit
+  resume/reconcile IDs, states MCP local persistence precisely, and adds only
+  the minimum directly tested preview coverage classifications. No live Linear
+  mutation or credential access is permitted during repair.
+
+### Revision 71 repair and honest gate boundary
+
+- A fresh repair review found that `codex --version` and Git/version helpers
+  still inherited the parent environment before the final BEAM boundary. The
+  CLI now supplies a validated allowlist to every child, including direct
+  long-running processes and exec, and centralizes all mise `--allow-env`
+  construction. Sentinel live-preflight, strict build, hermetic clean launch,
+  public audit, and reset evidence pass without exposing secret-shaped parent
+  variables.
+- Durable publication/start claims are now covered by a process-lifetime lock
+  for the complete claim/reconcile/execute/finish interval. Caller death
+  releases the live lock; a fresh ID may reclaim the durable record only after
+  acquiring it and must reconcile before execution. The exact orphaned ID is an
+  inert replay. Publication, start, and simultaneous-resume regressions pass.
+- Production reports write capability as unavailable, suppresses all dead
+  approval/publication/resume/Start controls, and shows the explicit external-
+  broker blocker. MCP, skill, README, judge, and provenance language now says
+  owner-local planning writes occur while external actions are unavailable.
+- The first repair attempted to classify 20 preview modules structurally. A
+  reviewer rejected that as an acceptance-impacting P2 because it removed
+  business and security logic from measurement. The final policy retains only
+  four thin boundary/test modules with exact registered ExUnit evidence. Full
+  execution is 732 tests, zero failures, two skips, and 86.96% measured coverage
+  against the unchanged 100% threshold. The gate is explicitly failed; no
+  final preview acceptance is claimed.
+- Independent clean-clone QA proved the documented launch omitted locked Elixir
+  dependency setup. Normal launch now runs strict-environment `mix setup` then
+  `mix build`; a dependency-free isolated exact-tree copy passes the first and
+  repeated build. A local `--no-build` repeat passes after that build, but the
+  generated escript is ignored and no public binary/sandbox exists, so a fresh
+  machine still performs one source build.

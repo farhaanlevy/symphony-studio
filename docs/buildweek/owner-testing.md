@@ -2,9 +2,9 @@
 
 This is the fail-closed owner and judge verification path for the clearly
 labelled Symphony Studio Build Week Preview. A passing harness contract proves
-only that the verification oracles work. The preview is ready only when the
-live golden path, state matrix, clean launch, public-artifact audit, and final
-review all pass against one committed candidate.
+only that the verification oracles work. The current owner-testable subset is
+read-only. A later completed golden-path preview would additionally require the
+live path, state matrix, and external-broker evidence against one commit.
 
 ## Current support boundary
 
@@ -49,12 +49,18 @@ The application binds to loopback and its verification endpoint is GET-only.
 Never put a raw credential, browser storage state, or protected
 environment-file path in shell history, Git, screenshots, evidence, or a
 command argument. Live task publication remains disabled unless the separate
-preview-write credential contract is satisfied and the protected R0 query
-authority is simultaneously available for the in-memory distinctness check.
+trusted out-of-process preview-write broker is implemented and reviewed. Do not
+provide either Linear credential or pointer to this preview process; launch and
+build children deliberately remove credential-shaped environment entries.
 
 Run the non-secret preflight:
 
 ```bash
+cd elixir
+mise trust
+mise install
+mise exec -- mix setup
+cd ..
 ./scripts/preview/run preflight --live --json
 ```
 
@@ -66,7 +72,14 @@ Launch the production runtime on loopback:
 
 Open `http://127.0.0.1:4000/setup`. The launcher uses the production Symphony
 runtime and the committed workflow; it does not start a demo-only application.
-Keep the terminal open while testing.
+Normal launch also repeats the locked setup before its build, so the explicit
+command above is idempotent. Keep the terminal open while testing.
+
+After one successful build, the same checkout may use
+`./scripts/preview/run launch --live-preflight --no-build --port 4000` to avoid
+rebuilding during repeated judge inspection. A fresh machine still requires one
+source build: this candidate provides no public binary, hosted sandbox, demo
+account, or transferable no-build artifact.
 
 ## Verification modes
 
@@ -102,21 +115,17 @@ explicit unavailable-run failure route. A state the real run never enters has
 no synthetic fixture: missing authoritative run evidence is reported as
 `BLOCKED`, never counted as passing.
 
-### One explicitly authorized live golden path
+### Live golden path is blocked in this candidate
 
-The live mode publishes the approved 3-5 task proposal and starts its first
-ready task. Run it only with the dedicated, separately scoped preview-write
-authority and the exact acknowledgement:
+The committed golden-path specification describes the required future order,
+but the current production preview refuses live publication. Do not supply a
+credential or run the live-write mode. Enabling it requires a distinct trusted
+out-of-process broker that owns both credentials, proves they differ, executes
+the exact typed Linear operations itself, and exposes only bounded commands and
+content-free receipts to the candidate runtime.
 
-```bash
-./scripts/preview/run verify \
-  --base-url http://127.0.0.1:4000 \
-  --live-write \
-  --live-write-ack publish-one-dedicated-demo-issue \
-  --json
-```
-
-The test proves this order from the authoritative Studio projection:
+Once that boundary exists, the test must prove this order from the authoritative
+Studio projection:
 
 1. inspect the current project and submit the safe owner-intent fixture;
 2. answer no more than two high-value questions;
@@ -128,13 +137,15 @@ The test proves this order from the authoritative Studio projection:
 7. accept completion only after required checks, detached review, current
    sealed evidence, delivery reference, and confirmed tracker handoff.
 
-The test writes a private handoff and screenshot/evidence records under the
-external preview data root. It never stores credentials or browser state there.
+The future test writes a private handoff and screenshot/evidence records under
+the external preview data root. It never stores credentials or browser state
+there.
 
 The local STDIO MCP integration is intentionally limited to attach, submit,
-answer, present, and status. It cannot approve, publish, or start work. Perform
-those three human-authority actions only through the trusted local Studio UI;
-then use MCP status to observe the same canonical intent state.
+answer, present, and status. The first four operations persist owner-local
+planning state; none can approve, publish, start, or mutate Linear. The trusted
+local UI remains the intended human-authority surface, but its external actions
+stay blocked until the separate broker exists.
 
 ## Deterministic demo and reset
 
@@ -194,10 +205,11 @@ npm --prefix tests/preview/browser run test:contract
 ./scripts/preview/run clean-launch --execute --json
 ```
 
-Then run the live golden path and state matrix once, followed by the required
-fresh independent review and checksum/provenance record. A material repair
-requires the affected targeted checks and one final coherent candidate gate;
-cosmetic findings do not justify repeating external work.
+For this read-only candidate, record the live golden path and dependent state
+matrix as blocked, then run the required fresh independent review and
+checksum/provenance record. A material repair requires the affected targeted
+checks and one final coherent candidate gate; cosmetic findings do not justify
+repeating external work.
 
 The audit scans tracked and candidate-untracked public files for secret-shaped
 content, protected browser material, local developer paths, oversized files,
@@ -211,17 +223,18 @@ home and empty memory tracker, starts the production loopback runtime, reads
 its authoritative state endpoint, and terminates the process group. It uses no
 Linear credential and performs zero external mutation.
 
-## Manual owner checklist
+## Current five-minute owner checklist
 
 - Setup truthfully identifies the repository, dedicated Linear project, Codex
   authentication, pinned compatibility, requested GPT-5.6 Sol Ultra policy,
   separately attested effective runtime selection when available, and any
   blocker. A missing dependency does not render as ready.
 - New Work accepts the Markdown intent, asks at most two useful questions,
-  shows 3-5 tasks and exact side effects, and performs no write before approval.
-- Reloading or repeating approval does not duplicate Linear issues.
-- The first published issue begins in Backlog and moves into Symphony admission
-  only after the explicit Start action.
+  shows 3-5 tasks and exact proposed side effects, and performs no Linear write.
+- The proposal surface shows the external-broker blocker instead of an
+  approval, publication, resume, or Start control that can only fail.
+- The local STDIO MCP liaison can attach, submit, clarify, present, and read
+  durable owner-local planning status; it exposes no external action tool.
 - Mission Control shows identifier, objective, real phase, elapsed time,
   meaningful activity, genuine usage when available, and next action/blocker.
 - Run Detail shows objective, criteria, plan, commands, changed files, checks,
@@ -239,6 +252,10 @@ Linear credential and performs zero external mutation.
   fail or explicitly block the suite.
 - No credential, storage state, private path, raw response, recording, or
   thumbnail appears in Git, release assets, screenshots, or evidence.
+
+Duplicate-free Backlog publication, a selected Todo transition, Symphony
+admission, and the resulting execution are future golden-path claim gates, not
+steps in this candidate's owner checklist.
 
 ## Required application integration contract
 
