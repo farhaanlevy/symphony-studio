@@ -34,6 +34,45 @@ The exact upstream base and downstream change classification are recorded in
 [`docs/architecture/fork-policy.md`](docs/architecture/fork-policy.md), and
 [`docs/architecture/patch-ledger.md`](docs/architecture/patch-ledger.md).
 
+## Build Week Preview
+
+The public branch `release/v0.2.0-buildweek-preview.1` is an owner-testable,
+local-only prerelease. It is not complete `v1.0.0` or `v1.1.0`. The current
+candidate provides the production New Work, Setup, Mission Control, and Run
+Detail routes; a canonical intent service shared with the local STDIO MCP
+server; a fail-closed Linear write boundary; and an authoritative runtime-event
+projection. Without the separately scoped preview-write credential, the UI
+remains read-only and shows that blocker instead of fabricating a successful
+run.
+
+On Linux x86_64 with `git`, `mise`, Python 3.10+, Node.js 18+, and Codex CLI
+0.144.3:
+
+```bash
+git clone --branch release/v0.2.0-buildweek-preview.1 \
+  https://github.com/farhaanlevy/symphony-studio.git
+cd symphony-studio
+mise trust
+mise install
+./scripts/preview/run preflight --live --json
+./scripts/preview/run launch --live-preflight --port 4000
+```
+
+Open `http://127.0.0.1:4000/setup`. For the optional read-only browser check,
+install the locked test dependencies once and run:
+
+```bash
+npm --prefix tests/preview/browser ci
+npm --prefix tests/preview/browser run install-browser
+SYMPHONY_PREVIEW_BASE_URL=http://127.0.0.1:4000 \
+  npm --prefix tests/preview/browser run test:owner-readonly
+```
+
+The exact owner checklist, deterministic local reset, supported boundary, and
+honest remaining blockers are in
+[`docs/buildweek/owner-testing.md`](docs/buildweek/owner-testing.md) and
+[`docs/buildweek/preview-limitations.md`](docs/buildweek/preview-limitations.md).
+
 ## Running Symphony
 
 ### Requirements

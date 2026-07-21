@@ -11,6 +11,11 @@ For the current source:
 - the fail-closed owner CLI, browser oracle, golden-path specification, state
   matrix, safe demo intent, and public-artifact checks exist;
 - the harness-contract and Python unit tests pass without external mutation;
+- production New Work, Setup, Mission Control, and Run Detail routes are wired
+  to the current Intent Service and authoritative process-local event
+  projection;
+- the loopback GET-only verification endpoint and credential-free desktop and
+  mobile owner route checks pass without external mutation;
 - the clean-launch gate mechanics pass against the committed R0 foundation:
   private exact-HEAD extraction, public-source audit, clean build, loopback
   runtime response, and an empty memory tracker with zero external mutation;
@@ -18,13 +23,18 @@ For the current source:
   rejects ambiguous or corrupt state, removes only that local intent and its
   exact prior receipt, and publishes a strict zero-Linear-mutation receipt;
 - no demonstration issue has been created, moved, edited, or reused;
-- no live Linear write, real Codex run, authoritative Studio browser route,
-  screenshot, integrated-preview clean-launch pass, or golden-path pass is
-  claimed by this verification-only workstream;
-- missing production UI/service integration produces an explicit `BLOCKED`
-  result; skips are counted as blocked by the evidence reporter.
+- a real intent was submitted through the production New Work route, one
+  clarification was resolved, and a five-task proposal rendered with zero
+  confirmed Linear mutations;
+- no live Linear write, demonstration issue, real Codex run, completed golden
+  path, or integrated-preview clean-launch result is claimed yet;
+- unavailable live dependencies and missing run evidence render blocked or
+  incomplete; they never become a mock success.
 
-The preview release must not ship while those integration blockers remain.
+The public branch may be owner-tested as an honestly labelled prerelease while
+the live-write and end-to-end completion blockers remain visible. It must not
+be described as a completed golden path or published as the final preview
+release until its required candidate evidence passes.
 
 ## Deliberate preview scope
 
@@ -50,8 +60,10 @@ administration, disabled coming-soon controls, and speculative abstractions.
 - A separately scoped preview-write authority is required for approved task
   publication and the minimum lifecycle transitions. The R0 read-only
   credential is not broadened or replaced.
-- Browser verification requires application-issued pairing state stored as an
-  owner-only mode-0600 file outside Git. The harness has no bypass.
+- Read-only browser verification requires no credential or pairing and is
+  limited to the loopback production server. Optional browser storage state,
+  when supplied for a future authenticated surface, must be an owner-only
+  mode-0600 regular file outside Git.
 - Automated axe checks, keyboard tests, four responsive widths, screenshots,
   and a manual checklist cover preview-critical accessibility and presentation;
   they are not a claim of exhaustive assistive-technology certification.
@@ -67,16 +79,18 @@ administration, disabled coming-soon controls, and speculative abstractions.
 - Raw recordings, narration, editor projects, final video, and thumbnails stay
   outside Git and GitHub Release assets.
 
-## Known release-blocking integrations
+## Remaining release blockers
 
-Before the first preview release, replace this section with the exact resolved
+Before the first preview release, resolve these items with current
 commit/evidence references or retain each item as a blocker:
 
-- production Intent Service and approved idempotent Backlog publication;
-- authoritative Studio persistence/projection and paired verification endpoint;
-- production New Work, Setup, Mission Control, and Run Detail routes;
 - live rehearsal of the exact-intent local reset against the integrated store;
-- dedicated demo write authority and safe application-produced pairing state;
+- dedicated preview-write authority and one safe demonstration issue distinct
+  from `SYM-1` and `SYM-2`;
+- approved idempotent Backlog publication, dependency creation, and the single
+  selected first-ready transition to Todo against the dedicated project;
+- real Symphony admission, isolated GPT-5.6 Sol Ultra execution, deterministic
+  validation, detached review, evidence sealing, delivery, and tracker handoff;
 - real golden-path result, four-viewport state matrix, clean launch,
   public-artifact audit, fresh independent review, and checksum/provenance.
 

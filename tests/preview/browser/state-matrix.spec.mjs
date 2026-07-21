@@ -6,7 +6,6 @@ import { captureEvidence, readHandoff, readProbe, requireStateRun } from "./prev
 import { expect, test } from "./preview-fixtures.mjs";
 
 test("Setup exposes real repository, Linear, Codex, model, and readiness state", async ({ page }, testInfo) => {
-  test.skip(!process.env.SYMPHONY_PREVIEW_STORAGE_STATE, "BLOCKED: paired browser state is unavailable");
   await page.goto("/setup");
   await expect(page.getByRole("heading", { name: /Setup/, level: 1 })).toBeVisible();
   for (const testId of [

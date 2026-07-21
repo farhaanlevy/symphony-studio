@@ -576,20 +576,12 @@ def collect_preflight(
                     "run npm ci in tests/preview/browser",
                 )
             )
-        if storage_state is None:
-            checks.append(
-                check_row(
-                    "paired_browser_state",
-                    "blocked",
-                    "owner-provided paired storage state is required",
-                )
-            )
-        else:
+        if storage_state is not None:
             try:
-                validate_protected_file(storage_state, root, "paired browser state")
-                checks.append(check_row("paired_browser_state", "pass", "protected file"))
+                validate_protected_file(storage_state, root, "browser storage state")
+                checks.append(check_row("browser_storage_state", "pass", "protected file"))
             except PreviewError as error:
-                checks.append(check_row("paired_browser_state", "blocked", str(error)))
+                checks.append(check_row("browser_storage_state", "blocked", str(error)))
     status = "pass" if all(row["status"] == "pass" for row in checks) else "blocked"
     return {"checks": checks, "schemaVersion": SCHEMA_VERSION, "status": status}
 
@@ -1400,8 +1392,10 @@ def command_clean_launch(args: argparse.Namespace) -> int:
 def command_verify(args: argparse.Namespace) -> int:
     root = repository_root()
     base_url = validate_loopback_url(args.base_url)
-    storage_state = validate_protected_file(
-        Path(args.storage_state), root, "paired browser state"
+    storage_state = (
+        validate_protected_file(Path(args.storage_state), root, "browser storage state")
+        if args.storage_state
+        else None
     )
     artifact_root = prepare_data_root(Path(args.data_root), root) / "evidence"
     browser_root = root / "tests/preview/browser"
@@ -1420,9 +1414,10 @@ def command_verify(args: argparse.Namespace) -> int:
             "SYMPHONY_PREVIEW_ARTIFACT_ROOT": str(artifact_root),
             "SYMPHONY_PREVIEW_BASE_URL": base_url,
             "SYMPHONY_PREVIEW_LIVE_WRITE": "1" if args.live_write else "0",
-            "SYMPHONY_PREVIEW_STORAGE_STATE": str(storage_state),
         }
     )
+    if storage_state is not None:
+        environment["SYMPHONY_PREVIEW_STORAGE_STATE"] = str(storage_state)
     command = [
         shutil.which("npm") or "npm",
         "exec",
@@ -1536,7 +1531,7 @@ def parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify", help="run the authoritative Playwright preview suite")
     verify.add_argument("--base-url", default="http://127.0.0.1:4000")
     verify.add_argument("--data-root", default=str(default_data_root()))
-    verify.add_argument("--storage-state", required=True)
+    verify.add_argument("--storage-state")
     verify.add_argument("--live-write", action="store_true")
     verify.add_argument("--live-write-ack")
     verify.add_argument("--grep")

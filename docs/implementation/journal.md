@@ -2081,3 +2081,31 @@ attestor without weakening protection, open the one release PR, enable
 merge-commit auto-merge, verify the exact protected merge, run package and
 upstream-baseline recovery gates, and publish/download/verify immutable
 `v0.1.0` before accepting R0-07.
+
+## 2026-07-21 — emergency Build Week Preview integration
+
+- The deadline override separates an honestly labelled public preview from the
+  protected `v0.1.0` train. Release 0 evidence and the staged R0-07 candidate
+  remain preserved; the preview is not described as stable Release 1 or 1.1.
+- The three isolated preview workstreams were integrated from commits
+  `a314149e119d467c025f3b39a75ca6bfc19f56d1`,
+  `53654ed2c49fa80e4ea6046286b07a983f96b073`, and
+  `a68529917723db86cf101aa615bd0f5e91d4b75a` onto the accepted foundation.
+- The resulting production path shares one Intent Service between LiveView and
+  the local STDIO MCP surface, introduces the separately credentialed and
+  exact-mutation Linear broker, preserves normal Symphony admission, and
+  projects real runtime events into Mission Control and Run Detail.
+- The write credential remains absent. No live Linear mutation was attempted,
+  no demonstration issue was created, and `SYM-1`/`SYM-2` were not modified.
+  Read-only owner testing therefore shows an explicit dependency blocker while
+  still exercising real routes, intent inspection, clarification, proposal,
+  accessibility, and runtime truth.
+- Current targeted evidence is 94 integrated Elixir tests, 20 preview CLI
+  tests, four browser-harness controls, public specs, strict Credo with no
+  findings, a 2,177-file public audit with no findings, desktop/mobile browser
+  checks with no console/page/Axe failure, and a production New Work smoke that
+  produced a five-task proposal after one clarification with zero mutations.
+- Remaining release evidence is the exact-commit clean launch, live credentialed
+  golden path, state matrix, public audit, fresh independent review, checksum,
+  and provenance. The public owner-testable branch may be used before those
+  live blockers clear only with the documented prerelease limitations.

@@ -95,6 +95,11 @@ class PreviewCliTest(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(preview.PreviewError):
                 preview.validate_loopback_url(invalid)
 
+    def test_read_only_verify_does_not_require_browser_storage_state(self) -> None:
+        args = preview.parser().parse_args(["verify"])
+        self.assertIsNone(args.storage_state)
+        self.assertFalse(args.live_write)
+
     def test_fixture_issues_can_never_be_reset(self) -> None:
         for identifier in ("SYM-1", "sym-2", " SYM-1 "):
             with self.subTest(identifier=identifier), self.assertRaises(

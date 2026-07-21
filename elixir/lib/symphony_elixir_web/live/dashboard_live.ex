@@ -1017,6 +1017,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp setup_test_id("Codex authentication"), do: "setup-codex-auth"
   defp setup_test_id("Compatibility"), do: "setup-codex-compatibility"
   defp setup_test_id("Runtime selection"), do: "setup-model-policy"
+  defp setup_test_id("Readiness evidence"), do: "setup-readiness"
   defp setup_test_id(_system), do: nil
   defp decision_banner_class(state), do: "decision-banner state-#{css_state(state)}"
   defp outcome_class(:complete), do: "outcome-section complete"
@@ -1035,14 +1036,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp state_symbol(_state), do: "○"
 
   defp css_state(state), do: state |> to_string() |> String.replace("_", "-")
-
-  defp setup_test_id("Repository"), do: "setup-repository"
-  defp setup_test_id("Linear project"), do: "setup-linear-project"
-  defp setup_test_id("Codex authentication"), do: "setup-codex-auth"
-  defp setup_test_id("Compatibility"), do: "setup-codex-compatibility"
-  defp setup_test_id("Runtime selection"), do: "setup-model-policy"
-  defp setup_test_id("Readiness evidence"), do: "setup-readiness"
-  defp setup_test_id(_system), do: nil
 
   defp action_error_class(%{uncertain: true}), do: "action-alert uncertain"
   defp action_error_class(_error), do: "action-alert danger"

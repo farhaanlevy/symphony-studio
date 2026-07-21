@@ -16,8 +16,7 @@ review all pass against one committed candidate.
 - Network surface: loopback HTTP only. The owner preview command rejects a
   non-loopback or credential-bearing URL.
 - Data and evidence: an owner-owned mode-0700 directory outside every Git
-  worktree. Browser state and handoff files are owner-owned mode-0600 regular
-  files outside Git.
+  worktree. Handoff files are owner-owned mode-0600 regular files outside Git.
 - Tracker: the dedicated Symphony Studio project and team `SYM`. The R0
   fixtures `SYM-1` and `SYM-2` are permanently excluded from demo/reset logic.
 
@@ -45,10 +44,12 @@ lockfile; do not update these packages during candidate verification.
 
 ## Preflight and launch
 
-First provision the preview through the repository's protected credential and
-local-pairing procedures. Never put a raw credential, browser storage state, or
-protected environment-file path in shell history, Git, screenshots, evidence,
-or a command argument.
+The read-only owner path requires no Linear credential and no browser pairing.
+The application binds to loopback and its verification endpoint is GET-only.
+Never put a raw credential, browser storage state, or protected
+environment-file path in shell history, Git, screenshots, evidence, or a
+command argument. Live task publication remains disabled unless the separate
+preview-write credential contract is satisfied.
 
 Run the non-secret preflight:
 
@@ -66,10 +67,6 @@ Open `http://127.0.0.1:4000/setup`. The launcher uses the production Symphony
 runtime and the committed workflow; it does not start a demo-only application.
 Keep the terminal open while testing.
 
-The required browser pairing state must be exported by the application to an
-owner-only mode-0600 file outside all repositories. This verifier does not
-manufacture, weaken, or bypass pairing.
-
 ## Verification modes
 
 ### Harness contract (safe at any time)
@@ -81,22 +78,26 @@ npm --prefix tests/preview/browser run test:contract
 This executes only negative and positive controls for the screenshot oracle
 and fixture guards. It performs no Linear or Studio mutation.
 
-### Read-only state matrix
+### Read-only owner route check
 
-Use the application-produced paired browser state:
+With the runtime still open in the first terminal, run in a second terminal:
 
 ```bash
-./scripts/preview/run verify \
-  --storage-state /absolute/outside-git/paired-browser-state.json \
-  --base-url http://127.0.0.1:4000 \
-  --json
+SYMPHONY_PREVIEW_BASE_URL=http://127.0.0.1:4000 \
+  npm --prefix tests/preview/browser run test:owner-readonly
 ```
 
-The suite verifies Setup, Mission Control, Run Detail, keyboard operation,
-WCAG A/AA automated checks, reconnect replay, and loading, blocked, failure,
-and completed truth at 1440, 1024, 390, and 360 CSS-pixel widths. Missing
-authoritative state fixtures are reported as `BLOCKED`; they are never counted
-as passing.
+This credential-free suite verifies the real Setup, Mission Control, and Run
+Detail routes at desktop and mobile widths, reads the authoritative projection,
+checks keyboard focus, runs WCAG A/AA automated checks, and fails on browser
+console, page, or request errors. If no run has been admitted, Mission Control
+truthfully renders its empty state instead of inventing completion.
+
+The broader state matrix runs after the live golden path creates a private
+handoff. It verifies reconnect replay and loading, blocked, failure, and
+completed truth at 1440, 1024, 390, and 360 CSS-pixel widths. Missing
+authoritative run evidence is reported as `BLOCKED`; it is never counted as
+passing.
 
 ### One explicitly authorized live golden path
 
@@ -106,7 +107,6 @@ authority and the exact acknowledgement:
 
 ```bash
 ./scripts/preview/run verify \
-  --storage-state /absolute/outside-git/paired-browser-state.json \
   --base-url http://127.0.0.1:4000 \
   --live-write \
   --live-write-ack publish-one-dedicated-demo-issue \
@@ -231,9 +231,9 @@ Linear credential and performs zero external mutation.
 
 ## Required application integration contract
 
-The verifier intentionally blocks until the production application provides a
-paired, read-only `GET /api/preview/v1/verification` projection backed by the
-Studio store. It must return schema version 1, `authoritative: true`,
+The production application provides a loopback-only, read-only
+`GET /api/preview/v1/verification` projection backed by the Studio store. It
+returns schema version 1, `authoritative: true`,
 `mode: "live"`, `source: "studio_store"`, the exact dedicated project/team,
 dependency readiness, intent/publication/start state, run truth, and optional
 authoritative fixture run IDs for state coverage.
