@@ -203,7 +203,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   defp verification_run_payload(run, mission) do
     page = run_page(run, mission)
-    evidence = Enum.find(page.evidence, &(&1.current and &1.sealed))
+    evidence = newest_current_evidence(page.evidence)
 
     %{
       checks: %{required: aggregate_check_status(page.checks), results: page.checks},
@@ -215,10 +215,12 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
         sealed: not is_nil(evidence)
       },
       issueIdentifier: run.issue_identifier,
-      model: verification_model(run.conductor),
+      model: page.proof_model,
       objective: run.objective,
       phase: run.phase,
-      reasoningEffort: verification_reasoning_effort(run.conductor),
+      reasoningEffort: page.proof_reasoning_effort,
+      requestedModel: verification_model(run.conductor),
+      requestedReasoningEffort: verification_reasoning_effort(run.conductor),
       review: page.review,
       runId: run.id,
       state: run.state,
@@ -337,6 +339,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       attempt: Map.get(entry, :attempt),
       attempt_id: Map.get(entry, :attempt_id),
       raw_state: Map.get(entry, :state),
+      runtime_present: true,
       workspace_path: Map.get(entry, :workspace_path),
       last_event_sequence: Map.get(entry, :last_event_sequence, 0)
     }
@@ -353,7 +356,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       freshness: mission.freshness,
       run:
         run
-        |> Map.drop([:contract, :events, :proof])
+        |> Map.drop([:contract, :events, :proof, :runtime_present])
         |> Map.put(:phase_rail, phase_rail(run.phase, run.state)),
       acceptance_criteria: contract.acceptance_criteria,
       scope: contract.scope,
@@ -366,7 +369,9 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       evidence: proof.evidence,
       outcome: proof.outcome,
       delivery: proof.delivery,
-      tracker_handoff: proof.tracker_handoff
+      tracker_handoff: proof.tracker_handoff,
+      proof_model: proof.actual_model,
+      proof_reasoning_effort: proof.actual_reasoning_effort
     }
   end
 
@@ -420,6 +425,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       attempt: nil,
       attempt_id: admission["attempt_id"],
       raw_state: nil,
+      runtime_present: false,
       workspace_path: nil,
       last_event_sequence: 0
     }
@@ -428,15 +434,21 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   defp enrich_runtime_run(run, intents) do
     intent = matching_intent(run, intents)
     contract = contract_from_intent(intent, run)
-    events = replay_events(run.id)
-    proof = proof_from_events(events)
+    replay = replay_events(run.id)
+    {attempt_id, attempt_current?} = current_attempt(run, replay.events)
+    runtime_cursor = valid_sequence(run.last_event_sequence)
+    replay_complete? = replay.complete? and runtime_cursor <= replay.latest_sequence
+    proof = proof_from_events(replay.events, attempt_id, replay_complete?, attempt_current?)
     {state, phase} = projected_state(run.state, proof)
     latest = List.first(proof.activity)
+    last_event_sequence = max(runtime_cursor, replay.latest_sequence)
 
     run
     |> Map.put(:contract, contract)
-    |> Map.put(:events, events)
+    |> Map.put(:events, replay.events)
     |> Map.put(:proof, proof)
+    |> Map.put(:attempt_id, attempt_id)
+    |> Map.put(:last_event_sequence, last_event_sequence)
     |> Map.put(:objective, contract.objective)
     |> Map.put(:state, state)
     |> Map.put(:state_label, state_label(state))
@@ -510,27 +522,99 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   defp replay_events(run_id) when is_binary(run_id) do
     case EventSink.replay(event_sink(), run_id, 0, @event_replay_limit) do
-      {:ok, %{events: events}} -> events
-      {:error, _reason} -> []
+      {:ok, page} ->
+        normalize_replay_page(page)
+
+      {:error, {_kind, details}} when is_map(details) ->
+        %{events: [], latest_sequence: valid_sequence(details[:latest_sequence]), complete?: false}
+
+      {:error, _reason} ->
+        empty_replay()
     end
   end
 
-  defp replay_events(_run_id), do: []
+  defp replay_events(_run_id), do: empty_replay()
 
-  defp proof_from_events(events) do
+  defp normalize_replay_page(%{
+         events: events,
+         earliest_sequence: earliest_sequence,
+         latest_sequence: latest_sequence,
+         requested_after: 0
+       })
+       when is_list(events) do
+    latest_sequence = valid_sequence(latest_sequence)
+    sequences = Enum.map(events, & &1.sequence)
+
+    complete? =
+      replay_sequences_complete?(sequences, earliest_sequence, latest_sequence) and
+        length(events) <= @event_replay_limit
+
+    %{events: events, latest_sequence: latest_sequence, complete?: complete?}
+  end
+
+  defp normalize_replay_page(_page), do: empty_replay()
+
+  defp replay_sequences_complete?([], _earliest_sequence, 0), do: true
+
+  defp replay_sequences_complete?(sequences, 1, latest_sequence)
+       when is_integer(latest_sequence) and latest_sequence > 0 and latest_sequence <= @event_replay_limit do
+    length(sequences) == latest_sequence and
+      Enum.with_index(sequences, 1) |> Enum.all?(fn {sequence, expected} -> sequence == expected end)
+  end
+
+  defp replay_sequences_complete?(_sequences, _earliest_sequence, _latest_sequence), do: false
+
+  defp empty_replay, do: %{events: [], latest_sequence: 0, complete?: false}
+
+  defp current_attempt(run, events) do
+    replay_attempt_id =
+      events
+      |> Enum.reduce(nil, fn
+        %Event{type: "worker.attempt.started", attempt_id: attempt_id}, _latest -> attempt_id
+        _event, latest -> latest
+      end)
+
+    cond do
+      is_binary(replay_attempt_id) and run.runtime_present and is_binary(run.attempt_id) ->
+        {replay_attempt_id, replay_attempt_id == run.attempt_id}
+
+      is_binary(replay_attempt_id) ->
+        {replay_attempt_id, true}
+
+      is_binary(run.attempt_id) ->
+        {run.attempt_id, true}
+
+      true ->
+        {nil, false}
+    end
+  end
+
+  defp valid_sequence(value) when is_integer(value) and value >= 0, do: value
+  defp valid_sequence(_value), do: 0
+
+  defp proof_from_events(events, attempt_id, replay_complete?, attempt_current?) do
     initial = %{
       activity: [],
+      actual_model: nil,
+      actual_reasoning_effort: nil,
+      attempt_id: attempt_id,
+      attempt_current?: attempt_current?,
       changes: [],
       checks: %{},
       commands: [],
       completion_event?: false,
+      completion_revision: nil,
       delivery: nil,
       evidence: [],
+      replay_complete?: replay_complete?,
       review: %{status: :not_run, detached: false, findings: [], source_revision: nil, completed_at: nil},
-      tracker_handoff: %{status: :not_confirmed, confirmed_at: nil}
+      tracker_handoff: %{status: :not_confirmed, source_revision: nil, confirmed_at: nil}
     }
 
-    reduced = Enum.reduce(events, initial, &reduce_event/2)
+    current_events =
+      if is_binary(attempt_id), do: Enum.filter(events, &(&1.attempt_id == attempt_id)), else: []
+
+    reduced = Enum.reduce(current_events, initial, &reduce_event/2)
     checks = reduced.checks |> Map.values() |> Enum.sort_by(&{&1.completed_at || "", &1.command})
     review = Map.update!(reduced.review, :findings, &Enum.reverse/1)
     evidence = Enum.reverse(reduced.evidence)
@@ -565,6 +649,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
     |> maybe_record_delivery(type, payload)
     |> maybe_record_handoff(type, payload, event)
     |> maybe_record_completion(type, payload)
+    |> maybe_record_model_attestation(type, payload)
   end
 
   defp activity_row(event, payload) do
@@ -627,6 +712,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       command: command,
       status: normalize_check_status(type, payload["status"], event["severity"]),
       summary: bounded_text(payload["summary"], 500, event_label(type)),
+      source_revision: immutable_revision(payload["source_revision"] || payload["revision"]),
       completed_at: event["occurred_at"]
     }
 
@@ -650,7 +736,8 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       proof.review
       | status: :active,
         detached: payload["detached"] == true,
-        source_revision: safe_reference(payload["source_revision"]),
+        findings: [],
+        source_revision: immutable_revision(payload["source_revision"] || payload["revision"]),
         completed_at: event["occurred_at"]
     })
   end
@@ -660,7 +747,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       proof.review
       | status: normalize_review_status(payload["status"]),
         detached: payload["detached"] == true,
-        source_revision: safe_reference(payload["source_revision"]),
+        source_revision: immutable_revision(payload["source_revision"] || payload["revision"]),
         completed_at: event["occurred_at"]
     })
   end
@@ -670,66 +757,89 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   defp maybe_record_evidence(proof, "evidence.sealed", payload) do
     reference = safe_reference(payload["manifest_hash"] || payload["manifest_id"])
 
-    if reference do
-      evidence = %{
-        label: "Evidence manifest",
-        summary: if(payload["current"] == true, do: "Current sealed evidence", else: "Historical evidence"),
-        reference: reference,
-        current: payload["current"] == true,
-        sealed: payload["sealed"] == true
-      }
+    evidence = %{
+      label: "Evidence manifest",
+      summary: if(payload["current"] == true, do: "Current sealed evidence", else: "Historical evidence"),
+      reference: reference,
+      current: payload["current"] == true,
+      sealed: payload["sealed"] == true,
+      source_revision: immutable_revision(payload["source_revision"] || payload["revision"]),
+      status: normalize_evidence_status(payload["status"])
+    }
 
-      Map.update!(proof, :evidence, &[evidence | &1])
-    else
-      proof
-    end
+    Map.update!(proof, :evidence, &[evidence | &1])
   end
 
   defp maybe_record_evidence(proof, _type, _payload), do: proof
 
   defp maybe_record_delivery(proof, "delivery.recorded", payload) do
-    commit = safe_reference(payload["commit"])
+    commit = immutable_revision(payload["commit"])
     pull_request = safe_external_url(payload["pull_request"])
 
-    if commit || pull_request do
-      %{proof | delivery: %{commit: commit, pull_request: pull_request}}
-    else
+    %{
       proof
-    end
+      | delivery: %{
+          commit: commit,
+          commit_supplied: Map.has_key?(payload, "commit"),
+          pull_request: pull_request,
+          source_revision: immutable_revision(payload["source_revision"] || payload["revision"] || payload["commit"]),
+          status: normalize_delivery_status(payload["status"])
+        }
+    }
   end
 
   defp maybe_record_delivery(proof, _type, _payload), do: proof
 
   defp maybe_record_handoff(proof, "tracker.handoff.confirmed", payload, event) do
-    if payload["status"] in [nil, "confirmed", "pass", "passed"] do
-      %{proof | tracker_handoff: %{status: :confirmed, confirmed_at: event["occurred_at"]}}
-    else
+    %{
       proof
-    end
+      | tracker_handoff: %{
+          status: normalize_handoff_status(payload["status"]),
+          source_revision: immutable_revision(payload["source_revision"] || payload["revision"]),
+          confirmed_at: event["occurred_at"]
+        }
+    }
   end
 
   defp maybe_record_handoff(proof, _type, _payload, _event), do: proof
 
   defp maybe_record_completion(proof, "run.completed", payload) do
-    %{proof | completion_event?: payload["status"] in [nil, "completed", "pass", "passed"]}
+    %{
+      proof
+      | completion_event?: payload["status"] in ["completed", "pass", "passed", "success"],
+        completion_revision: immutable_revision(payload["source_revision"] || payload["revision"])
+    }
   end
 
   defp maybe_record_completion(proof, _type, _payload), do: proof
 
+  defp maybe_record_model_attestation(proof, type, payload)
+       when type in ["codex.session.started", "codex.turn.started"] do
+    %{
+      proof
+      | actual_model: bounded_text(payload["model"], 128, nil),
+        actual_reasoning_effort: bounded_text(payload["reasoning_effort"] || payload["reasoningEffort"], 64, nil)
+    }
+  end
+
+  defp maybe_record_model_attestation(proof, _type, _payload), do: proof
+
   defp outcome(proof, delivery, tracker_handoff) do
-    checks_passed? = proof.checks != [] and Enum.all?(proof.checks, &(&1.status == :passed))
-    review_passed? = proof.review.status == :passed and proof.review.detached
-    evidence_current? = Enum.any?(proof.evidence, &(&1.current and &1.sealed))
-    delivery_recorded? = is_map(delivery) and (is_binary(delivery.commit) or is_binary(delivery.pull_request))
-    handoff_confirmed? = tracker_handoff.status == :confirmed
+    evidence = newest_current_evidence(proof.evidence)
 
     conditions = [
-      {checks_passed?, "runtime proof does not include checks that passed"},
-      {review_passed?, "detached independent review has not passed"},
-      {evidence_current?, "current sealed evidence is unavailable"},
-      {delivery_recorded?, "commit or pull-request delivery is unavailable"},
-      {handoff_confirmed?, "tracker handoff is unconfirmed"},
-      {proof.completion_event?, "the completion reducer has not emitted run.completed"}
+      {proof.replay_complete?, "runtime event replay is unavailable, truncated, or contains a sequence gap"},
+      {is_binary(proof.attempt_id), "the current admitted attempt is unavailable"},
+      {proof.attempt_current?, "the runtime snapshot and latest admitted attempt do not agree"},
+      {proof.actual_model == "gpt-5.6-sol", "the current attempt does not attest GPT-5.6 Sol execution"},
+      {proof.actual_reasoning_effort == "ultra", "the current attempt does not attest Ultra reasoning"},
+      {checks_passed?(proof.checks), "runtime proof does not include checks that passed"},
+      {review_passed?(proof.review), "detached independent review has not passed without unresolved findings"},
+      {evidence_current?(evidence), "current sealed evidence is unavailable"},
+      {delivery_recorded?(delivery), "successful immutable-revision delivery is unavailable"},
+      {tracker_handoff.status == :confirmed, "tracker handoff is unconfirmed"},
+      {proof.completion_event?, "the completion reducer has not emitted an explicitly successful run.completed"},
+      {revision_bound?(proof, evidence, delivery, tracker_handoff), "completion proof is not bound to one immutable source revision"}
     ]
 
     case Enum.reject(conditions, &elem(&1, 0)) do
@@ -744,6 +854,71 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
         %{status: :incomplete, reason: "Incomplete: " <> reason <> "."}
     end
   end
+
+  defp checks_passed?([]), do: false
+  defp checks_passed?(checks), do: Enum.all?(checks, &(&1.status == :passed))
+
+  defp review_passed?(review) do
+    review.status == :passed and review.detached and
+      Enum.all?(review.findings, &review_finding_resolved?/1)
+  end
+
+  defp evidence_current?(evidence) when is_map(evidence) do
+    evidence.current and evidence.sealed and evidence.status == :sealed and is_binary(evidence.reference)
+  end
+
+  defp evidence_current?(_evidence), do: false
+
+  defp newest_current_evidence(evidence) do
+    evidence |> Enum.reverse() |> Enum.find(&evidence_current?/1)
+  end
+
+  defp delivery_recorded?(delivery) when is_map(delivery) do
+    delivery.status == :recorded and delivery_revision_bound?(delivery)
+  end
+
+  defp delivery_recorded?(_delivery), do: false
+
+  defp revision_bound?(proof, evidence, delivery, tracker_handoff)
+       when is_map(evidence) and is_map(delivery) do
+    source_revision = delivery.source_revision
+
+    is_binary(source_revision) and
+      delivery_revision_bound?(delivery) and
+      Enum.all?(proof.checks, &(&1.source_revision == source_revision)) and
+      proof.review.source_revision == source_revision and
+      evidence.source_revision == source_revision and
+      delivery.source_revision == source_revision and
+      tracker_handoff.source_revision == source_revision and
+      proof.completion_revision == source_revision
+  end
+
+  defp revision_bound?(_proof, _evidence, _delivery, _tracker_handoff), do: false
+
+  defp delivery_revision_bound?(%{commit: commit, source_revision: source_revision})
+       when is_binary(commit) do
+    commit == source_revision
+  end
+
+  defp delivery_revision_bound?(%{
+         commit: nil,
+         commit_supplied: false,
+         pull_request: pull_request,
+         source_revision: source_revision
+       }) do
+    is_binary(pull_request) and is_binary(source_revision)
+  end
+
+  defp delivery_revision_bound?(_delivery), do: false
+
+  defp review_finding_resolved?(%{disposition: disposition}) when is_binary(disposition) do
+    disposition
+    |> String.trim()
+    |> String.downcase()
+    |> then(&(&1 in ["closed", "dismissed", "fixed", "resolved", "verified"]))
+  end
+
+  defp review_finding_resolved?(_finding), do: false
 
   defp projected_state(_runtime_state, %{outcome: %{status: :complete}}), do: {:completed, :outcome}
 
@@ -822,7 +997,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   defp event_result(_type, "critical", _payload), do: :failed
 
   defp event_result(type, _severity, payload) do
-    normalize_status(payload["status"], if(String.ends_with?(type, ".completed"), do: :passed, else: :active))
+    normalize_status(payload["status"], if(String.ends_with?(type, ".completed"), do: :incomplete, else: :active))
   end
 
   defp event_effect(type) when type in ["delivery.recorded", "tracker.handoff.confirmed"], do: :external_write
@@ -831,11 +1006,22 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   defp normalize_check_status("quality.check.started", _status, _severity), do: :active
   defp normalize_check_status(_type, _status, severity) when severity in ["error", "critical"], do: :failed
-  defp normalize_check_status(_type, status, _severity), do: normalize_status(status, :passed)
+  defp normalize_check_status(_type, status, _severity) when status in ["pass", "passed", "success"], do: :passed
+  defp normalize_check_status(_type, status, _severity) when status in ["blocked", "fail", "failed", "error"], do: :failed
+  defp normalize_check_status(_type, _status, _severity), do: :incomplete
 
   defp normalize_review_status(status) when status in ["pass", "passed", "clean"], do: :passed
   defp normalize_review_status(status) when status in ["blocked", "fail", "failed", "rejected"], do: :failed
   defp normalize_review_status(_status), do: :incomplete
+
+  defp normalize_evidence_status(status) when status in ["sealed", "confirmed", "pass", "passed", "success"], do: :sealed
+  defp normalize_evidence_status(_status), do: :incomplete
+
+  defp normalize_delivery_status(status) when status in ["recorded", "confirmed", "pass", "passed", "success"], do: :recorded
+  defp normalize_delivery_status(_status), do: :incomplete
+
+  defp normalize_handoff_status(status) when status in ["confirmed", "pass", "passed", "success"], do: :confirmed
+  defp normalize_handoff_status(_status), do: :not_confirmed
 
   defp normalize_status(status, _default) when status in ["pass", "passed", "complete", "completed", "success"], do: :passed
   defp normalize_status(status, _default) when status in ["active", "running", "started", "pending"], do: :active
@@ -860,6 +1046,13 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   end
 
   defp safe_reference(_value), do: nil
+
+  defp immutable_revision(value) when is_binary(value) do
+    value = String.trim(value)
+    if Regex.match?(~r/\A[0-9a-f]{40,64}\z/, value), do: value
+  end
+
+  defp immutable_revision(_value), do: nil
 
   defp bounded_text(value, max, fallback) when is_binary(value) do
     if String.valid?(value) and String.trim(value) != "" do

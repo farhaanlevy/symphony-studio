@@ -36,7 +36,7 @@ test("owner intent reaches an evidence-backed completed run through real service
   const proposal = await readProbe(page);
   expect(proposal.intent.status).toBe("proposed");
   expect(proposal.intent.publication).toMatchObject({ confirmedWrites: 0, status: "not_started" });
-  expect(proposal.intent.mutationAudit).toMatchObject({ linearMutations: 0 });
+  expect(proposal.intent.publication.linearIssues).toEqual([]);
   await captureEvidence(page, testInfo, "proposal-before-approval", {
     acceptanceCriterion: "The owner sees scope and side effects before external mutation",
     assertions: ["3-5 tasks", "zero confirmed writes", "explicit approval"],
@@ -56,12 +56,14 @@ test("owner intent reaches an evidence-backed completed run through real service
   );
   expect(published.intent.publication.idempotencyStatus).toBe("confirmed");
   expect(published.intent.publication.confirmedWrites).toBe(taskCount);
-  expect(published.intent.publication.duplicateIssues).toBe(0);
   expect(published.intent.publication.linearIssues).toHaveLength(taskCount);
+  const issueIdentifiers = [];
   for (const issue of published.intent.publication.linearIssues) {
-    validateDemoIssue(issue.identifier);
-    expect(issue.state).toBe("Backlog");
+    issueIdentifiers.push(validateDemoIssue(issue.issue_identifier));
+    expect(issue.issue_id).toEqual(expect.any(String));
+    expect(issue.task_id).toEqual(expect.any(String));
   }
+  expect(new Set(issueIdentifiers).size).toBe(taskCount);
 
   await page.getByRole("button", { name: "Start first ready task" }).click();
   const admitted = await waitForProbe(
@@ -74,12 +76,11 @@ test("owner intent reaches an evidence-backed completed run through real service
   const runId = admitted.intent.start.runId;
   expect(admitted.run).toMatchObject({
     issueIdentifier,
-    model: "gpt-5.6-sol",
-    reasoningEffort: "ultra",
+    requestedModel: "gpt-5.6-sol",
+    requestedReasoningEffort: "ultra",
     runId,
     workspace: { isolated: true },
   });
-  writeHandoff({ issueIdentifier, runId, stateRunIds: admitted.stateRunIds });
 
   await page.goto("/mission-control");
   const runRow = page.getByTestId("mission-run").filter({ hasText: issueIdentifier });
@@ -108,14 +109,17 @@ test("owner intent reaches an evidence-backed completed run through real service
     2_400_000,
   );
   expect(completed.run.checks).toMatchObject({ required: "passed" });
+  expect(completed.run.model).toBe("gpt-5.6-sol");
+  expect(completed.run.reasoningEffort).toBe("ultra");
   expect(completed.run.review).toMatchObject({ detached: true, status: "passed" });
   expect(completed.run.evidence).toMatchObject({ current: true, sealed: true });
   expect(completed.run.trackerHandoff).toMatchObject({ status: "confirmed" });
   expect(completed.run.delivery.commit ?? completed.run.delivery.pullRequest).toBeTruthy();
+  writeHandoff({ issueIdentifier, runId, stateRunIds: completed.stateRunIds });
   await expect(page.getByTestId("run-completion-reason")).toContainText(/checks|review|evidence/i);
   await captureEvidence(page, testInfo, "evidence-backed-outcome", {
     acceptanceCriterion: "Completion requires checks, detached review, evidence, and tracker confirmation",
-    assertions: ["required checks passed", "review passed", "evidence sealed", "handoff confirmed"],
+    assertions: ["current-attempt GPT-5.6 Sol Ultra attested", "required checks passed", "review passed", "evidence sealed", "handoff confirmed"],
     fixture: issueIdentifier,
     interactions: ["published approved plan", "started first ready task", "opened Run Detail"],
   });

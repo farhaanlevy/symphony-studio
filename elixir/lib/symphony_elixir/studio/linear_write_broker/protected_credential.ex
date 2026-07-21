@@ -6,9 +6,11 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential do
   Loads the separate Studio Linear write credential through a protected file.
 
   The pointer is intentionally command-scoped and the key is passed only to the
-  supplied in-memory callback. Neither the pointer nor the key is returned in an
-  error, logged, copied into application configuration, or read from the
-  query-only `LINEAR_API_KEY` environment variable.
+  supplied in-memory callback. Before that callback, the module requires the R0
+  query credential through its protected pointer or supported environment and
+  proves the two values differ with a fixed-size constant-time comparison.
+  Neither pointer nor key is returned in an error, logged, hashed, persisted, or
+  copied into application configuration.
   """
 
   import Bitwise
@@ -18,6 +20,8 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential do
 
   @pointer_name "SYMPHONY_LINEAR_WRITE_ENV_FILE"
   @assignment_name "SYMPHONY_LINEAR_WRITE_API_KEY"
+  @query_pointer_name "SYMPHONY_LINEAR_ENV_FILE"
+  @query_assignment_name "LINEAR_API_KEY"
   @max_file_bytes 4 * 1_024
   @max_key_bytes 1_024
 
@@ -30,6 +34,8 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential do
           | :linear_write_credential_file_unsafe
           | :linear_write_credential_file_changed
           | :linear_write_credential_content_invalid
+          | :linear_write_credential_comparison_unavailable
+          | :linear_write_credential_not_distinct
 
   @doc "Validates the protected write-credential file without returning its key or path."
   @spec validate() :: :ok | {:error, error()}
@@ -41,8 +47,13 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential do
   @spec with_api_key((String.t() -> result)) :: result | {:error, error()} when result: term()
   def with_api_key(fun) when is_function(fun, 1) do
     with {:ok, path} <- pointer_path(),
-         {:ok, key} <- read_key(path) do
+         {:ok, key} <- read_key(path, @assignment_name),
+         {:ok, query_key} <- query_key(),
+         false <- constant_time_equal?(key, query_key) do
       fun.(key)
+    else
+      true -> {:error, :linear_write_credential_not_distinct}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -71,20 +82,6 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential do
           {:ok, _different} -> {:error, :linear_write_credential_path_unsafe}
           {:error, _reason} -> {:error, :linear_write_credential_file_missing}
         end
-    end
-  end
-
-  defp read_key(path) do
-    with :ok <- outside_git(path),
-         {:ok, before_stat} <- safe_file_stat(path),
-         {:ok, body} <- bounded_read(path, before_stat.size),
-         {:ok, after_stat} <- safe_file_stat(path),
-         true <- same_file?(before_stat, after_stat),
-         {:ok, key} <- parse_assignment(body) do
-      {:ok, key}
-    else
-      false -> {:error, :linear_write_credential_file_changed}
-      {:error, _reason} = error -> error
     end
   end
 
@@ -136,8 +133,22 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential do
     Enum.all?(fields, &(Map.fetch!(left, &1) == Map.fetch!(right, &1)))
   end
 
-  defp parse_assignment(body) do
-    prefix = @assignment_name <> "="
+  defp read_key(path, assignment_name) do
+    with :ok <- outside_git(path),
+         {:ok, before_stat} <- safe_file_stat(path),
+         {:ok, body} <- bounded_read(path, before_stat.size),
+         {:ok, after_stat} <- safe_file_stat(path),
+         true <- same_file?(before_stat, after_stat),
+         {:ok, key} <- parse_assignment(body, assignment_name) do
+      {:ok, key}
+    else
+      false -> {:error, :linear_write_credential_file_changed}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp parse_assignment(body, assignment_name) do
+    prefix = assignment_name <> "="
 
     case body do
       <<^prefix::binary, key::binary>> -> validate_key(strip_single_trailing_newline(key))
@@ -158,6 +169,45 @@ defmodule SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential do
     else
       {:error, :linear_write_credential_content_invalid}
     end
+  end
+
+  defp query_key do
+    case System.get_env(@query_pointer_name) do
+      value when is_binary(value) -> query_key_from_pointer(value)
+      _missing -> query_key_from_environment()
+    end
+  end
+
+  defp query_key_from_pointer(value) do
+    with {:ok, path} <- validate_pointer(value),
+         {:ok, key} <- read_key(path, @query_assignment_name) do
+      {:ok, key}
+    else
+      _unavailable -> {:error, :linear_write_credential_comparison_unavailable}
+    end
+  end
+
+  defp query_key_from_environment do
+    case System.get_env(@query_assignment_name) do
+      value when is_binary(value) ->
+        case validate_key(value) do
+          {:ok, key} -> {:ok, key}
+          {:error, _reason} -> {:error, :linear_write_credential_comparison_unavailable}
+        end
+
+      _missing ->
+        {:error, :linear_write_credential_comparison_unavailable}
+    end
+  end
+
+  defp constant_time_equal?(left, right) do
+    Plug.Crypto.secure_compare(comparison_frame(left), comparison_frame(right))
+  end
+
+  defp comparison_frame(value) do
+    length = byte_size(value)
+    padding = @max_key_bytes - length
+    <<length::unsigned-integer-size(16), value::binary, 0::size(padding * 8)>>
   end
 
   defp outside_git(path) do

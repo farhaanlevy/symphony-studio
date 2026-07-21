@@ -6,15 +6,14 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
   Local newline-delimited JSON-RPC STDIO server for the canonical Intent Service.
 
   Standard output contains protocol messages only. The server supports the MCP
-  initialization lifecycle and the eight public intent tools; it performs no
-  model calls. The precompiled CLI binds the dedicated least-privilege Linear
-  adapter, while direct `run/1` and test exchanges remain fail-closed unless a
-  broker is explicitly injected.
+  initialization lifecycle and five non-mutating intent-liaison tools; it
+  performs no model calls. Approval, Linear publication, and start are
+  intentionally unavailable here because an MCP/model caller cannot attest
+  human consent. Those actions remain at the trusted local Studio boundary.
   """
 
   alias SymphonyElixir.Studio.Intent.Canonical
   alias SymphonyElixir.Studio.IntentService
-  alias SymphonyElixir.Studio.LinearWriteBroker.Linear
 
   @protocol_version "2025-11-25"
   @supported_versions ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
@@ -220,15 +219,8 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
       exact_keys?(arguments, ["command_id", "intent_id", "use_recommended_defaults"])
   end
 
-  defp valid_tool_arguments?(name, arguments)
-       when name in ["studio_present_proposal", "studio_publish_approved_plan"],
-       do: exact_keys?(arguments, ["command_id", "intent_id"])
-
-  defp valid_tool_arguments?("studio_approve_publication", arguments),
-    do: exact_keys?(arguments, ["command_id", "confirmation", "intent_id", "proposal_digest"])
-
-  defp valid_tool_arguments?("studio_start_first_ready", arguments),
-    do: exact_keys?(arguments, ["command_id", "confirmation", "intent_id"])
+  defp valid_tool_arguments?("studio_present_proposal", arguments),
+    do: exact_keys?(arguments, ["command_id", "intent_id"])
 
   defp valid_tool_arguments?("studio_get_intent_status", arguments),
     do: exact_keys?(arguments, ["intent_id"])
@@ -268,29 +260,6 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
 
   defp dispatch_tool("studio_present_proposal", arguments, opts) do
     IntentService.present_proposal(arguments["intent_id"], arguments["command_id"], opts)
-  end
-
-  defp dispatch_tool("studio_approve_publication", arguments, opts) do
-    IntentService.approve_publication(
-      arguments["intent_id"],
-      arguments["proposal_digest"],
-      arguments["confirmation"],
-      arguments["command_id"],
-      opts
-    )
-  end
-
-  defp dispatch_tool("studio_publish_approved_plan", arguments, opts) do
-    IntentService.publish_approved_plan(arguments["intent_id"], arguments["command_id"], opts)
-  end
-
-  defp dispatch_tool("studio_start_first_ready", arguments, opts) do
-    IntentService.start_first_ready(
-      arguments["intent_id"],
-      arguments["confirmation"],
-      arguments["command_id"],
-      opts
-    )
   end
 
   defp dispatch_tool("studio_get_intent_status", arguments, opts) do
@@ -376,42 +345,6 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
         local_annotations()
       ),
       tool(
-        "studio_approve_publication",
-        "Approve Backlog Publication",
-        "Record approval only when the human supplies exact confirmation publish_linear_backlog and the exact presented proposal digest.",
-        object_schema(
-          %{
-            "command_id" => command_id_schema(),
-            "confirmation" => %{"const" => "publish_linear_backlog"},
-            "intent_id" => id_schema("intent_"),
-            "proposal_digest" => %{"pattern" => "^[0-9a-f]{64}$", "type" => "string"}
-          },
-          ["intent_id", "proposal_digest", "confirmation", "command_id"]
-        ),
-        local_annotations()
-      ),
-      tool(
-        "studio_publish_approved_plan",
-        "Publish Approved Plan",
-        "Reconcile exact idempotency markers and publish through the dedicated least-privilege broker. Partial, blocked, or uncertain outcomes remain visible and resumable.",
-        intent_command_schema(),
-        external_annotations()
-      ),
-      tool(
-        "studio_start_first_ready",
-        "Start First Ready",
-        "After complete publication, transition exactly one deterministic ready issue to Todo only with exact confirmation start_first_ready, then wait for a real Symphony admission event.",
-        object_schema(
-          %{
-            "command_id" => command_id_schema(),
-            "confirmation" => %{"const" => "start_first_ready"},
-            "intent_id" => id_schema("intent_")
-          },
-          ["intent_id", "confirmation", "command_id"]
-        ),
-        external_annotations()
-      ),
-      tool(
         "studio_get_intent_status",
         "Get Intent Status",
         "Read the durable intent projection, including clarification, proposal, approval, publication uncertainty, start, and Symphony admission linkage.",
@@ -474,15 +407,6 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
     }
   end
 
-  defp external_annotations do
-    %{
-      "destructiveHint" => true,
-      "idempotentHint" => true,
-      "openWorldHint" => true,
-      "readOnlyHint" => false
-    }
-  end
-
   defp known_tool?(name), do: Enum.any?(tools(), &(&1["name"] == name))
 
   defp tool_result(structured, is_error) do
@@ -513,26 +437,23 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
   end
 
   defp server_instructions do
-    "Inspect and clarify before planning. Present the full proposal and digest before approval. Never infer publication consent: studio_approve_publication requires the human's exact publish_linear_backlog confirmation. Publication may remain blocked, partial, or uncertain. Never infer start consent: studio_start_first_ready separately requires start_first_ready. After transition, wait for a real Symphony worker.attempt.started admission event. SYM-1 and SYM-2 are permanently denied."
+    "Inspect and clarify before planning, then present the full proposal and digest. This MCP liaison cannot approve, publish, or start work; those actions require an explicit human action in the trusted local Studio interface. Query status here after the host acts. SYM-1 and SYM-2 remain permanently denied."
   end
 
   defp service_options(opts) do
-    allowed = [:broker, :data_root, :store]
+    allowed = [:data_root, :store]
     keys = Keyword.keys(opts)
 
     if Keyword.keyword?(opts) and Enum.all?(keys, &(&1 in allowed)) and
          length(keys) == MapSet.size(MapSet.new(keys)) do
-      {:ok, opts}
+      {:ok, Keyword.put(opts, :origin, :mcp)}
     else
       {:error, "invalid options"}
     end
   end
 
   defp production_cli_options(args) do
-    case cli_options(args) do
-      {:ok, opts} -> {:ok, Keyword.put(opts, :broker, Linear.target())}
-      other -> other
-    end
+    cli_options(args)
   end
 
   defp cli_options(args) do
@@ -569,14 +490,14 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
   defp cli_help do
     """
     Run the precompiled Symphony Studio Intent MCP server over STDIO with the
-    dedicated least-privilege Linear adapter.
+    non-mutating intent liaison.
 
       studio_intent_mcp [--data-root /absolute/owner-local/path]
 
     Compile the Elixir project before launching. Standard output is reserved
     for newline-delimited MCP JSON-RPC messages while the server is running.
-    The separate protected Linear credential is read only during a bounded
-    broker request; missing or invalid credential configuration fails closed.
+    Approval, Linear publication, and start are deliberately unavailable over
+    MCP and remain bound to explicit actions in the trusted local Studio UI.
     """
     |> String.trim()
   end

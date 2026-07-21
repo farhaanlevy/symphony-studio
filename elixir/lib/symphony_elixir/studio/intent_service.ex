@@ -6,9 +6,11 @@ defmodule SymphonyElixir.Studio.IntentService do
   Canonical Intent Service shared by future Studio UI and local STDIO MCP.
 
   The service owns read-only project grounding, one clarification batch,
-  deterministic proposal presentation, digest-bound approval, resumable
-  brokered publication, first-ready start, and linkage to an actual Symphony
-  admission event. It never uses the existing query-only Linear credential.
+  deterministic proposal presentation, host-bound approval, resumable brokered
+  publication, first-ready start, and linkage to an actual Symphony admission
+  event. External mutations are available only to the trusted local host
+  boundary; the user-facing MCP liaison is explicitly denied. The service never
+  uses the existing query-only Linear credential.
   """
 
   alias SymphonyElixir.Event
@@ -128,7 +130,7 @@ defmodule SymphonyElixir.Studio.IntentService do
     end
   end
 
-  @doc "Binds exact publication confirmation to the proposal that was actually presented."
+  @doc "Records proposal-bound approval from the trusted local host boundary."
   @spec approve_publication(String.t(), String.t(), String.t(), String.t(), keyword()) :: result()
   def approve_publication(intent_id, proposal_digest, confirmation, command_id, opts \\ []) do
     request = %{
@@ -141,7 +143,8 @@ defmodule SymphonyElixir.Studio.IntentService do
     with :ok <- validate_command_id(command_id),
          true <- confirmation == @publish_confirmation,
          true <- valid_digest?(proposal_digest),
-         {:ok, context} <- context(opts) do
+         {:ok, context} <- context(opts),
+         :ok <- require_trusted_host(context) do
       atomic_command(
         context,
         intent_id,
@@ -166,13 +169,14 @@ defmodule SymphonyElixir.Studio.IntentService do
     end
   end
 
-  @doc "Publishes an approved plan idempotently through the injected typed broker."
+  @doc "Publishes a host-approved plan idempotently through the injected typed broker."
   @spec publish_approved_plan(String.t(), String.t(), keyword()) :: result()
   def publish_approved_plan(intent_id, command_id, opts \\ []) do
     request = %{"command_id" => command_id, "intent_id" => intent_id}
 
     with :ok <- validate_command_id(command_id),
          {:ok, context} <- context(opts),
+         :ok <- require_trusted_host(context),
          {:ok, :new} <- ensure_command_new(context.store, intent_id, "studio_publish_approved_plan", command_id, request),
          :ok <- initialize_publication(context, intent_id),
          :ok <- publication_loop(context, intent_id, 0),
@@ -185,7 +189,7 @@ defmodule SymphonyElixir.Studio.IntentService do
     end
   end
 
-  @doc "Transitions one deterministic ready task to Todo after separate exact confirmation."
+  @doc "Transitions one ready task to Todo after separate trusted-host confirmation."
   @spec start_first_ready(String.t(), String.t(), String.t(), keyword()) :: result()
   def start_first_ready(intent_id, confirmation, command_id, opts \\ []) do
     request = %{
@@ -197,6 +201,7 @@ defmodule SymphonyElixir.Studio.IntentService do
     with :ok <- validate_command_id(command_id),
          true <- confirmation == @start_confirmation,
          {:ok, context} <- context(opts),
+         :ok <- require_trusted_host(context),
          {:ok, :new} <- ensure_command_new(context.store, intent_id, "studio_start_first_ready", command_id, request),
          {:ok, selection} <- initialize_start(context, intent_id, confirmation),
          :ok <- run_start_transition(context, intent_id, selection),
@@ -1257,17 +1262,19 @@ defmodule SymphonyElixir.Studio.IntentService do
   defp canonical_project_root(_path), do: {:error, :invalid_project_root}
 
   defp context(opts) when is_list(opts) do
-    allowed = [:broker, :clock, :data_root, :inspector_opts, :store]
+    allowed = [:broker, :clock, :data_root, :inspector_opts, :origin, :store]
 
     with true <- Keyword.keyword?(opts),
          true <- unique_allowed_options?(opts, allowed),
          {:ok, store} <- resolve_store(opts),
          broker <- Keyword.get(opts, :broker, LinearWriteBroker.default_target()),
+         origin <- Keyword.get(opts, :origin, :trusted_host),
+         true <- origin in [:mcp, :trusted_host],
          clock <- Keyword.get(opts, :clock, &DateTime.utc_now/0),
          true <- is_function(clock, 0),
          inspector_opts <- Keyword.get(opts, :inspector_opts, []),
          true <- is_list(inspector_opts) and Keyword.keyword?(inspector_opts) do
-      {:ok, %{broker: broker, clock: clock, inspector_opts: inspector_opts, store: store}}
+      {:ok, %{broker: broker, clock: clock, inspector_opts: inspector_opts, origin: origin, store: store}}
     else
       false -> {:error, :invalid_intent_service_options}
       {:error, reason} -> {:error, reason}
@@ -1276,6 +1283,16 @@ defmodule SymphonyElixir.Studio.IntentService do
   end
 
   defp context(_opts), do: {:error, :invalid_intent_service_options}
+
+  defp require_trusted_host(%{origin: :trusted_host}), do: :ok
+
+  defp require_trusted_host(_context) do
+    {:error,
+     error(
+       :trusted_host_authorization_required,
+       "Approval, publication, and start are available only through the trusted local Studio interface."
+     )}
+  end
 
   defp resolve_store(opts) do
     case {Keyword.get(opts, :store), Keyword.get(opts, :data_root)} do

@@ -59,7 +59,11 @@ administration, disabled coming-soon controls, and speculative abstractions.
   `SYM-2` remain protected R0 read-only fixtures and are never demo/reset data.
 - A separately scoped preview-write authority is required for approved task
   publication and the minimum lifecycle transitions. The R0 read-only
-  credential is not broadened or replaced.
+  credential is not broadened or replaced; it must be simultaneously available
+  only so Studio can prove the two credential values differ before any write.
+- The STDIO MCP surface is a non-mutating Intent Liaison. It can attach, submit,
+  clarify, present, and query status. Approval, publication, and start are
+  trusted-local-UI actions until a single-use human-attested host receipt exists.
 - Read-only browser verification requires no credential or pairing and is
   limited to the loopback production server. Optional browser storage state,
   when supplied for a future authenticated surface, must be an owner-only
@@ -69,9 +73,14 @@ administration, disabled coming-soon controls, and speculative abstractions.
   they are not a claim of exhaustive assistive-technology certification.
 - Usage is shown only when the runtime genuinely reports it. Missing usage is
   labelled unavailable rather than estimated.
+- GPT-5.6 Sol Ultra and Ultra effort are shown as requested policy until an
+  exact-current-attempt runtime event attests the effective selection. A
+  configured command or worker admission alone is not execution proof.
 - Completion remains fail-closed: required checks, detached review, current
-  sealed evidence, delivery reference, and tracker handoff must agree. Partial
-  or stale state renders incomplete.
+  sealed evidence, delivery reference, tracker handoff, terminal status, and
+  actual GPT-5.6 Sol Ultra/Ultra runtime attestation must agree for one current
+  attempt and immutable source revision. Partial, stale, mixed-attempt, or
+  configured-only state renders incomplete.
 - Demo reset is local-only and must run while the preview process is stopped.
   It removes one exact local Intent Store record and its bound reset receipt;
   it does not reverse or delete Linear history, remove general evidence, or
@@ -91,6 +100,8 @@ commit/evidence references or retain each item as a blocker:
   selected first-ready transition to Todo against the dedicated project;
 - real Symphony admission, isolated GPT-5.6 Sol Ultra execution, deterministic
   validation, detached review, evidence sealing, delivery, and tracker handoff;
+- production emission of the complete revision-bound validation, review,
+  evidence, delivery, handoff, terminal, and model-attestation event sequence;
 - real golden-path result, four-viewport state matrix, clean launch,
   public-artifact audit, fresh independent review, and checksum/provenance.
 

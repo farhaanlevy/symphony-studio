@@ -2109,3 +2109,21 @@ upstream-baseline recovery gates, and publish/download/verify immutable
   golden path, state matrix, public audit, fresh independent review, checksum,
   and provenance. The public owner-testable branch may be used before those
   live blockers clear only with the documented prerelease limitations.
+- The first fresh exact-commit review of
+  `fd9cd006949facc7ba1e9cb5dc99ae9130e681ad` found no P0, one P1 false-completion
+  path, and acceptance-impacting P2 gaps. Runtime proof previously mixed events
+  across retries, accepted implicit statuses and mismatched revisions, could
+  regress its replay cursor, and presented configured model policy as execution
+  evidence. The repair reduces only the latest admitted attempt, requires a
+  complete ordered replay and explicit outcomes, rejects unresolved findings,
+  binds every completion artifact to one immutable revision, and separates
+  requested from runtime-attested model/effort.
+- The same review proved that public MCP confirmation literals were not human
+  consent and that separate file names did not prove distinct credential
+  values. The MCP server now has five non-mutating liaison tools only; the
+  trusted local UI owns approval, publication, and start. The write boundary
+  requires a protected R0 comparison authority and rejects unavailable or equal
+  values before its callback using fixed-size constant-time comparison. Probe
+  schema, state-matrix vocabulary, handoff timing, and documentation source
+  naming were aligned to production truth. No credential was inspected, no live
+  Linear mutation ran, and neither fixture changed during repair.

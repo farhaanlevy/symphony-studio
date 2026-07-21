@@ -49,7 +49,8 @@ The application binds to loopback and its verification endpoint is GET-only.
 Never put a raw credential, browser storage state, or protected
 environment-file path in shell history, Git, screenshots, evidence, or a
 command argument. Live task publication remains disabled unless the separate
-preview-write credential contract is satisfied.
+preview-write credential contract is satisfied and the protected R0 query
+authority is simultaneously available for the in-memory distinctness check.
 
 Run the non-secret preflight:
 
@@ -94,10 +95,12 @@ console, page, or request errors. If no run has been admitted, Mission Control
 truthfully renders its empty state instead of inventing completion.
 
 The broader state matrix runs after the live golden path creates a private
-handoff. It verifies reconnect replay and loading, blocked, failure, and
-completed truth at 1440, 1024, 390, and 360 CSS-pixel widths. Missing
-authoritative run evidence is reported as `BLOCKED`; it is never counted as
-passing.
+handoff. It verifies reconnect replay and the current production state domain
+(`active`, `queued`, `blocked`, `validating`, `reviewing`, `completed`, and
+`incomplete`) at 1440, 1024, 390, and 360 CSS-pixel widths. It also verifies an
+explicit unavailable-run failure route. A state the real run never enters has
+no synthetic fixture: missing authoritative run evidence is reported as
+`BLOCKED`, never counted as passing.
 
 ### One explicitly authorized live golden path
 
@@ -120,12 +123,18 @@ The test proves this order from the authoritative Studio projection:
 3. inspect 3-5 proposed tasks and side effects with zero Linear writes;
 4. explicitly approve duplicate-free, idempotent Backlog publication;
 5. start the first ready task and observe Symphony admission;
-6. observe an isolated GPT-5.6 Sol Ultra run in Mission Control and Run Detail;
+6. observe the requested GPT-5.6 Sol Ultra policy, then require exact-current-
+   attempt runtime evidence before claiming the effective model and effort;
 7. accept completion only after required checks, detached review, current
    sealed evidence, delivery reference, and confirmed tracker handoff.
 
 The test writes a private handoff and screenshot/evidence records under the
 external preview data root. It never stores credentials or browser state there.
+
+The local STDIO MCP integration is intentionally limited to attach, submit,
+answer, present, and status. It cannot approve, publish, or start work. Perform
+those three human-authority actions only through the trusted local Studio UI;
+then use MCP status to observe the same canonical intent state.
 
 ## Deterministic demo and reset
 
@@ -205,7 +214,8 @@ Linear credential and performs zero external mutation.
 ## Manual owner checklist
 
 - Setup truthfully identifies the repository, dedicated Linear project, Codex
-  authentication, pinned compatibility, GPT-5.6 Sol Ultra policy, and any
+  authentication, pinned compatibility, requested GPT-5.6 Sol Ultra policy,
+  separately attested effective runtime selection when available, and any
   blocker. A missing dependency does not render as ready.
 - New Work accepts the Markdown intent, asks at most two useful questions,
   shows 3-5 tasks and exact side effects, and performs no write before approval.
@@ -221,8 +231,9 @@ Linear credential and performs zero external mutation.
   sequence without inventing progress.
 - Tab and Enter reach and activate the primary route actions at desktop and
   mobile widths; focus is visible; no essential content clips or overlaps.
-- Loading, blocked, failure, and completed routes remain visually distinct and
-  match the authoritative probe for the same run ID.
+- Every state produced by a real run remains visually distinct and matches the
+  authoritative probe for the same run ID; an unavailable run renders an
+  explicit failure and never completion.
 - Browser console errors, uncaught page errors, unexpected failed requests,
   axe violations, black/transparent screenshots, and missing state evidence
   fail or explicitly block the suite.
@@ -232,11 +243,11 @@ Linear credential and performs zero external mutation.
 ## Required application integration contract
 
 The production application provides a loopback-only, read-only
-`GET /api/preview/v1/verification` projection backed by the Studio store. It
-returns schema version 1, `authoritative: true`,
-`mode: "live"`, `source: "studio_store"`, the exact dedicated project/team,
-dependency readiness, intent/publication/start state, run truth, and optional
-authoritative fixture run IDs for state coverage.
+`GET /api/preview/v1/verification` composite projection backed by the Symphony
+orchestrator, Intent Store, and runtime EventSink. It returns schema version 1,
+`authoritative: true`, `mode: "live"`, `source: "symphony_runtime"`, the exact
+dedicated project/team, dependency readiness, intent/publication/start state,
+run truth, and optional authoritative run IDs for state coverage.
 
 The live golden path additionally requires production routes `/work/new`,
 `/setup`, `/mission-control`, and `/runs/:run_id`, plus stable accessible names

@@ -20,19 +20,24 @@ Integrated source commits:
 
 ## Implemented candidate
 
-- One Intent Service backs both production LiveView and the local STDIO MCP
-  server.
+- One Intent Service backs production LiveView and the local STDIO MCP liaison.
+  MCP is strictly non-mutating: attach, submit, clarify, present, and status are
+  available; approval, publication, and start remain trusted-local-UI actions.
 - New Work accepts bounded prompt or pasted Markdown, asks at most two
   clarifications, presents three to five proposed tasks and side effects, and
   requires explicit approval before publication.
 - A fail-closed Linear broker permits only approved Backlog issue creation,
   required blocker relations, and one selected first-ready transition to Todo.
-  It requires a distinct protected write credential and cannot reuse the R0
-  read-only credential or mutate `SYM-1`/`SYM-2`.
+  It requires a distinct protected write credential plus protected R0 query
+  authority for constant-time inequality proof. It cannot reuse the R0
+  credential or mutate `SYM-1`/`SYM-2`.
 - Symphony's existing poll/admission path remains scheduler authority.
 - Runtime events project into production Mission Control and Run Detail.
-  Completion requires deterministic checks, detached review, current sealed
-  evidence, delivery, confirmed tracker handoff, and a terminal run event.
+  Completion selects only the latest admitted attempt and requires gap-free
+  replay, explicit successful checks, detached review without unresolved
+  findings, current sealed evidence, immutable delivery, confirmed tracker
+  handoff, terminal success, and actual model/effort attestation bound to the
+  same source revision.
 - Setup reports active repository, Linear, Codex, compatibility, model policy,
   and readiness truth. Missing live authority renders blocked.
 - Launch, exact local reset, browser checks, public audit, and clean-launch
@@ -53,6 +58,15 @@ Integrated source commits:
 
 No live Linear mutation has been executed, no demonstration issue exists, and
 neither protected fixture has changed.
+
+The first fresh independent exact-commit review of
+`fd9cd006949facc7ba1e9cb5dc99ae9130e681ad` rejected mixed-attempt completion as
+P1 and identified acceptance-impacting P2 gaps in probe/test schema alignment,
+state/cursor truth, MCP consent provenance, credential distinctness, model
+attestation, and documented source naming. The current repair removes MCP
+writes, enforces credential inequality, aligns the browser contract, and makes
+completion current-attempt and revision bound. Its targeted tests and
+replacement final review are required before acceptance.
 
 ## Remaining release evidence
 

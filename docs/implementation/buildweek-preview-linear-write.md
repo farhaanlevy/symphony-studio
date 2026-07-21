@@ -12,6 +12,12 @@ The protected file contract is deliberately separate:
   single-link, current-user-owned file with mode `0600`;
 - the file contains exactly one non-empty
   `SYMPHONY_LINEAR_WRITE_API_KEY=` assignment;
+- the same launch must also provide the protected R0 query credential through
+  `SYMPHONY_LINEAR_ENV_FILE`, or through the already supported bounded
+  `LINEAR_API_KEY` environment boundary;
+- before any write callback, Studio validates both authorities and compares
+  fixed-size in-memory frames in constant time; unavailable comparison or equal
+  credential values fails closed;
 - the pointer and key are never logged, returned, copied to application
   configuration, or exposed to model/shell children.
 
@@ -20,7 +26,8 @@ The recommended location is
 mode `0700`. The launch process should set the pointer command-locally rather
 than exporting it from a shell profile.
 
-The production adapter is explicitly injected as:
+The production adapter is explicitly injected only at the trusted local Studio
+host boundary as:
 
 ```elixir
 broker = SymphonyElixir.Studio.LinearWriteBroker.Linear.target()
@@ -44,6 +51,12 @@ responses become `uncertain`; a retry queries the same deterministic UUID
 instead of creating a duplicate. Relation and transition writes additionally
 prove that their endpoints are Studio-created issues for the exact approved
 intent and proposal digest. `SYM-1` and `SYM-2` are denied before mutation.
+
+The local STDIO MCP server intentionally exposes no approval, publication, or
+start tool and has no production write broker. A Codex thread can attach,
+submit, clarify, present, and query status, while the owner must perform the
+proposal-bound approval, publication, and separate Start action in the trusted
+local Studio UI.
 
 Automated tests use an injected in-memory GraphQL transport. They execute no
 live Linear mutation and never load a real credential.

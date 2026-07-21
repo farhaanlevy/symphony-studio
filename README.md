@@ -39,11 +39,14 @@ The exact upstream base and downstream change classification are recorded in
 The public branch `release/v0.2.0-buildweek-preview.1` is an owner-testable,
 local-only prerelease. It is not complete `v1.0.0` or `v1.1.0`. The current
 candidate provides the production New Work, Setup, Mission Control, and Run
-Detail routes; a canonical intent service shared with the local STDIO MCP
-server; a fail-closed Linear write boundary; and an authoritative runtime-event
-projection. Without the separately scoped preview-write credential, the UI
-remains read-only and shows that blocker instead of fabricating a successful
-run.
+Detail routes; a canonical intent service shared with a non-mutating local
+STDIO MCP liaison; a fail-closed Linear write boundary owned by the trusted
+local UI; and an authoritative runtime-event projection. Without both the
+separately scoped preview-write credential and protected R0 read authority for
+the required distinctness check, the UI remains read-only and shows that
+blocker instead of fabricating a successful run. The MCP liaison can attach,
+submit, clarify, present, and report status, but cannot approve, publish, or
+start work.
 
 On Linux x86_64 with `git`, `mise`, Python 3.10+, Node.js 18+, and Codex CLI
 0.144.3:

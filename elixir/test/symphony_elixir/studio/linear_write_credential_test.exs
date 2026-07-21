@@ -7,10 +7,15 @@ defmodule SymphonyElixir.Studio.LinearWriteCredentialTest do
   alias SymphonyElixir.Studio.LinearWriteBroker.ProtectedCredential
 
   @pointer "SYMPHONY_LINEAR_WRITE_ENV_FILE"
+  @query_pointer "SYMPHONY_LINEAR_ENV_FILE"
 
   setup do
     previous_pointer = System.get_env(@pointer)
+    previous_query_pointer = System.get_env(@query_pointer)
     previous_query_key = System.get_env("LINEAR_API_KEY")
+    System.delete_env(@pointer)
+    System.delete_env(@query_pointer)
+    System.delete_env("LINEAR_API_KEY")
     unique = System.unique_integer([:positive, :monotonic])
     root = Path.join(System.tmp_dir!(), "symphony-linear-write-credential-#{unique}")
     File.mkdir_p!(root)
@@ -18,6 +23,7 @@ defmodule SymphonyElixir.Studio.LinearWriteCredentialTest do
 
     on_exit(fn ->
       restore_env(@pointer, previous_pointer)
+      restore_env(@query_pointer, previous_query_pointer)
       restore_env("LINEAR_API_KEY", previous_query_key)
       File.rm_rf(root)
     end)
@@ -27,7 +33,9 @@ defmodule SymphonyElixir.Studio.LinearWriteCredentialTest do
 
   test "accepts exactly one owner-only assignment and reveals it only to the callback", ctx do
     path = protected_file(ctx.root, "SYMPHONY_LINEAR_WRITE_API_KEY=test-write-key\n")
+    query_path = protected_file(ctx.root, "LINEAR_API_KEY=test-query-key\n", "query.env")
     System.put_env(@pointer, path)
+    System.put_env(@query_pointer, query_path)
 
     assert :ok = ProtectedCredential.validate()
 
@@ -36,6 +44,39 @@ defmodule SymphonyElixir.Studio.LinearWriteCredentialTest do
                assert key == "test-write-key"
                :key_was_in_memory
              end)
+  end
+
+  test "rejects an equal protected query credential before invoking the callback", ctx do
+    path = protected_file(ctx.root, "SYMPHONY_LINEAR_WRITE_API_KEY=same-test-key\n")
+    query_path = protected_file(ctx.root, "LINEAR_API_KEY=same-test-key\n", "query.env")
+    System.put_env(@pointer, path)
+    System.put_env(@query_pointer, query_path)
+    callback = make_ref()
+
+    assert {:error, :linear_write_credential_not_distinct} =
+             ProtectedCredential.with_api_key(fn _key -> send(self(), callback) end)
+
+    refute_received ^callback
+  end
+
+  test "blocks write readiness when no query comparison authority is available", ctx do
+    path = protected_file(ctx.root, "SYMPHONY_LINEAR_WRITE_API_KEY=uncompared-test-key\n")
+    System.put_env(@pointer, path)
+    callback = make_ref()
+
+    assert {:error, :linear_write_credential_comparison_unavailable} =
+             ProtectedCredential.with_api_key(fn _key -> send(self(), callback) end)
+
+    refute_received ^callback
+  end
+
+  test "accepts distinct protected write and query values", ctx do
+    path = protected_file(ctx.root, "SYMPHONY_LINEAR_WRITE_API_KEY=distinct-write-test-key\n")
+    query_path = protected_file(ctx.root, "LINEAR_API_KEY=distinct-query-test-key\n", "query.env")
+    System.put_env(@pointer, path)
+    System.put_env(@query_pointer, query_path)
+
+    assert :distinct = ProtectedCredential.with_api_key(fn _key -> :distinct end)
   end
 
   test "never falls back to the query-only environment key" do

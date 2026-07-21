@@ -160,11 +160,13 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     {:ok, store} = Store.open(root: root)
     run_id = Identity.uuid4()
     attempt_id = Identity.uuid4()
+    revision = String.duplicate("c", 40)
 
     intent = %{
       "schema_version" => 1,
       "intent_id" => "intent_authoritative_run",
       "source" => %{"content" => "Fallback source objective"},
+      "lifecycle_state" => "admitted",
       "proposal" => %{
         "tasks" => [
           %{
@@ -180,6 +182,16 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
         "issue_id" => "issue-authoritative",
         "issue_identifier" => "SYM-99"
       },
+      "publication" => %{
+        "status" => "complete",
+        "tasks" => %{
+          "task-visible-change" => %{
+            "issue_id" => "issue-authoritative",
+            "issue_identifier" => "SYM-99",
+            "status" => "confirmed"
+          }
+        }
+      },
       "admission" => %{"run_id" => run_id, "attempt_id" => attempt_id}
     }
 
@@ -189,24 +201,41 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     target = {Memory, sink}
 
     events = [
-      event(run_id, attempt_id, 1, "quality.check.completed", %{
+      event(run_id, attempt_id, 1, "codex.session.started", %{
+        "model" => "gpt-5.6-sol",
+        "reasoning_effort" => "ultra"
+      }),
+      event(run_id, attempt_id, 2, "quality.check.completed", %{
         "check_id" => "targeted",
         "command" => "mix test test/symphony_elixir_web/studio_data_port_test.exs",
-        "status" => "passed"
+        "status" => "passed",
+        "source_revision" => revision
       }),
-      event(run_id, attempt_id, 2, "review.completed", %{
+      event(run_id, attempt_id, 3, "review.completed", %{
         "status" => "passed",
         "detached" => true,
-        "source_revision" => String.duplicate("a", 40)
+        "source_revision" => revision
       }),
-      event(run_id, attempt_id, 3, "evidence.sealed", %{
+      event(run_id, attempt_id, 4, "evidence.sealed", %{
         "manifest_hash" => "sha256:" <> String.duplicate("b", 64),
         "current" => true,
-        "sealed" => true
+        "sealed" => true,
+        "status" => "sealed",
+        "source_revision" => revision
       }),
-      event(run_id, attempt_id, 4, "delivery.recorded", %{"commit" => String.duplicate("c", 40)}),
-      event(run_id, attempt_id, 5, "tracker.handoff.confirmed", %{"status" => "confirmed"}),
-      event(run_id, attempt_id, 6, "run.completed", %{"status" => "completed"})
+      event(run_id, attempt_id, 5, "delivery.recorded", %{
+        "commit" => revision,
+        "source_revision" => revision,
+        "status" => "recorded"
+      }),
+      event(run_id, attempt_id, 6, "tracker.handoff.confirmed", %{
+        "status" => "confirmed",
+        "source_revision" => revision
+      }),
+      event(run_id, attempt_id, 7, "run.completed", %{
+        "status" => "completed",
+        "source_revision" => revision
+      })
     ]
 
     Enum.each(events, fn item -> assert {:ok, :appended} = EventSink.append(target, item) end)
@@ -249,7 +278,7 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
              status: :passed,
              detached: true,
              findings: [],
-             source_revision: String.duplicate("a", 40),
+             source_revision: revision,
              completed_at: "2026-07-21T12:00:00.000Z"
            }
 
@@ -262,8 +291,18 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     assert probe.source == "symphony_runtime"
     assert probe.project == %{slugId: "symphony-studio-build-week-3f2698765546", teamKey: "SYM"}
     assert probe.run.runId == run_id
+    assert probe.run.state == :completed
     assert probe.run.checks.required == "passed"
     assert probe.run.review.status == :passed
+    assert probe.run.model == "gpt-5.6-sol"
+    assert probe.run.reasoningEffort == "ultra"
+    assert Map.has_key?(probe.run, :requestedModel)
+    assert Map.has_key?(probe.run, :requestedReasoningEffort)
+    assert probe.stateRunIds == %{"completed" => run_id}
+
+    assert probe.intent.publication.linearIssues == [
+             %{issue_id: "issue-authoritative", issue_identifier: "SYM-99", task_id: "task-visible-change"}
+           ]
 
     assert probe.run.evidence == %{
              current: true,
@@ -272,6 +311,268 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
            }
 
     assert probe.run.completion.status == "completed"
+  end
+
+  test "does not combine completion proof across attempts" do
+    projection =
+      projection_fixture(fn ids ->
+        revision = String.duplicate("d", 40)
+        specs = completed_proof_specs(revision)
+
+        prior_specs = Enum.take(specs, 4)
+        current_specs = [List.first(specs) | Enum.drop(specs, 4)]
+
+        events_from_specs(ids.run_id, ids.prior_attempt_id, prior_specs, 1) ++
+          events_from_specs(ids.run_id, ids.current_attempt_id, current_specs, 5)
+      end)
+
+    assert projection.page.outcome.status == :incomplete
+    assert projection.page.run.state == :active
+    assert projection.page.outcome.reason =~ "does not include checks"
+  end
+
+  test "a later admitted retry invalidates an older completed attempt" do
+    projection =
+      projection_fixture(
+        fn ids ->
+          revision = String.duplicate("e", 40)
+
+          events_from_specs(ids.run_id, ids.prior_attempt_id, completed_proof_specs(revision), 1) ++
+            [event(ids.run_id, ids.current_attempt_id, 8, "worker.attempt.started", %{"retry_attempt" => 2})]
+        end,
+        runtime_attempt: :prior
+      )
+
+    assert projection.page.run.attempt_id == projection.current_attempt_id
+    assert projection.page.run.state == :active
+    assert projection.page.outcome.status == :incomplete
+    refute projection.probe.run.completion.status == "completed"
+  end
+
+  test "rejects completion proof bound to mismatched revisions" do
+    projection =
+      projection_fixture(fn ids ->
+        revision = String.duplicate("f", 40)
+
+        specs =
+          completed_proof_specs(revision)
+          |> List.update_at(2, fn {type, payload} ->
+            {type, Map.put(payload, "source_revision", String.duplicate("a", 40))}
+          end)
+
+        events_from_specs(ids.run_id, ids.current_attempt_id, specs, 1)
+      end)
+
+    assert projection.page.outcome.status == :incomplete
+    assert projection.page.outcome.reason =~ "one immutable source revision"
+  end
+
+  test "missing and unknown proof statuses fail closed" do
+    cases = [
+      {:missing_check_status, 1, fn payload -> Map.delete(payload, "status") end},
+      {:unknown_delivery_status, 4, &Map.put(&1, "status", "maybe")}
+    ]
+
+    Enum.each(cases, fn {_label, index, update_payload} ->
+      projection =
+        projection_fixture(fn ids ->
+          revision = String.duplicate("b", 40)
+
+          specs =
+            completed_proof_specs(revision)
+            |> List.update_at(index, fn {type, payload} -> {type, update_payload.(payload)} end)
+
+          events_from_specs(ids.run_id, ids.current_attempt_id, specs, 1)
+        end)
+
+      assert projection.page.outcome.status == :incomplete
+      refute projection.probe.run.completion.status == "completed"
+    end)
+  end
+
+  test "unresolved review findings prevent completion" do
+    projection =
+      projection_fixture(fn ids ->
+        revision = String.duplicate("9", 40)
+        specs = completed_proof_specs(revision)
+
+        specs =
+          List.insert_at(specs, 3, {
+            "review.finding",
+            %{"severity" => "P2", "title" => "Acceptance gap", "disposition" => "Open"}
+          })
+
+        events_from_specs(ids.run_id, ids.current_attempt_id, specs, 1)
+      end)
+
+    assert projection.page.review.findings == [
+             %{severity: "P2", title: "Acceptance gap", disposition: "Open"}
+           ]
+
+    assert projection.page.outcome.status == :incomplete
+    assert projection.page.outcome.reason =~ "without unresolved findings"
+  end
+
+  test "configured worker admission does not attest the actual model or reasoning effort" do
+    projection =
+      projection_fixture(fn ids ->
+        [
+          event(ids.run_id, ids.current_attempt_id, 1, "worker.attempt.started", %{
+            "model" => "gpt-5.6-sol",
+            "reasoning_effort" => "ultra"
+          })
+        ]
+      end)
+
+    assert projection.probe.run.model == nil
+    assert projection.probe.run.reasoningEffort == nil
+    assert Map.has_key?(projection.probe.run, :requestedModel)
+    assert Map.has_key?(projection.probe.run, :requestedReasoningEffort)
+    assert projection.page.outcome.status == :incomplete
+    assert projection.page.outcome.reason =~ "does not attest GPT-5.6 Sol"
+  end
+
+  test "a current-attempt session attestation must name the exact model and reasoning effort" do
+    projection =
+      projection_fixture(fn ids ->
+        revision = String.duplicate("6", 40)
+
+        specs =
+          completed_proof_specs(revision)
+          |> List.update_at(0, fn {type, payload} ->
+            {type, Map.put(payload, "model", "gpt-5.6-terra")}
+          end)
+
+        events_from_specs(ids.run_id, ids.current_attempt_id, specs, 1)
+      end)
+
+    assert projection.probe.run.model == "gpt-5.6-terra"
+    assert projection.probe.run.reasoningEffort == "ultra"
+    assert projection.page.outcome.status == :incomplete
+    assert projection.page.outcome.reason =~ "does not attest GPT-5.6 Sol"
+  end
+
+  test "verification selects the same newest qualifying evidence as completion" do
+    projection =
+      projection_fixture(fn ids ->
+        revision = String.duplicate("5", 40)
+
+        newest =
+          {"evidence.sealed",
+           %{
+             "current" => true,
+             "manifest_hash" => "sha256:" <> String.duplicate("7", 64),
+             "sealed" => true,
+             "source_revision" => revision,
+             "status" => "sealed"
+           }}
+
+        specs = List.insert_at(completed_proof_specs(revision), 4, newest)
+        events_from_specs(ids.run_id, ids.current_attempt_id, specs, 1)
+      end)
+
+    assert projection.page.outcome.status == :complete
+
+    assert projection.probe.run.evidence == %{
+             current: true,
+             reference: "sha256:" <> String.duplicate("7", 64),
+             sealed: true
+           }
+  end
+
+  test "accepts PR-only delivery only when it is bound to the immutable source revision" do
+    projection =
+      projection_fixture(fn ids ->
+        revision = String.duplicate("4", 40)
+
+        specs =
+          completed_proof_specs(revision)
+          |> List.update_at(4, fn {type, payload} ->
+            {type,
+             payload
+             |> Map.delete("commit")
+             |> Map.put("pull_request", "https://github.com/example/symphony-studio/pull/42")}
+          end)
+
+        events_from_specs(ids.run_id, ids.current_attempt_id, specs, 1)
+      end)
+
+    assert projection.page.outcome.status == :complete
+    assert projection.page.delivery.commit == nil
+    assert projection.page.delivery.pull_request == "https://github.com/example/symphony-studio/pull/42"
+
+    unbound =
+      projection_fixture(fn ids ->
+        revision = String.duplicate("3", 40)
+
+        specs =
+          completed_proof_specs(revision)
+          |> List.update_at(4, fn {type, payload} ->
+            {type,
+             payload
+             |> Map.delete("commit")
+             |> Map.delete("source_revision")
+             |> Map.put("pull_request", "https://github.com/example/symphony-studio/pull/43")}
+          end)
+
+        events_from_specs(ids.run_id, ids.current_attempt_id, specs, 1)
+      end)
+
+    assert unbound.page.outcome.status == :incomplete
+    assert unbound.page.outcome.reason =~ "immutable"
+  end
+
+  test "keeps the latest EventSink sequence when an active run becomes intent-only" do
+    projection =
+      projection_fixture(
+        fn ids ->
+          [
+            event(ids.run_id, ids.current_attempt_id, 1, "worker.attempt.started", %{}),
+            event(ids.run_id, ids.current_attempt_id, 2, "codex.notification", %{"summary" => "Running"})
+          ]
+        end,
+        runtime_last_event_sequence: 1
+      )
+
+    assert projection.page.run.last_event_sequence == 2
+    assert projection.probe.sequence == 2
+
+    orchestrator = unique_orchestrator(:IntentOnly)
+    start_static_orchestrator!(orchestrator, runtime_snapshot([]))
+
+    configure_endpoint(
+      orchestrator: orchestrator,
+      snapshot_timeout_ms: 100,
+      studio_intent_data_root: projection.root,
+      studio_event_sink: projection.target
+    )
+
+    assert {:ok, mission} = RuntimeStudioDataPort.load(:mission_control, %{})
+    assert [intent_only] = mission.runs
+    assert intent_only.id == projection.run_id
+    assert intent_only.last_event_sequence == 2
+
+    assert {:ok, probe} = RuntimeStudioDataPort.verification(%{"run_id" => projection.run_id})
+    assert probe.sequence == 2
+  end
+
+  test "fails completion closed when retained replay has a sequence gap" do
+    projection =
+      projection_fixture(
+        fn ids ->
+          [
+            event(ids.run_id, ids.current_attempt_id, 1, "worker.attempt.started", %{}),
+            event(ids.run_id, ids.current_attempt_id, 2, "codex.notification", %{}),
+            event(ids.run_id, ids.current_attempt_id, 3, "codex.notification", %{})
+          ]
+        end,
+        sink_options: [max_events_per_run: 2],
+        runtime_last_event_sequence: 3
+      )
+
+    assert projection.page.run.last_event_sequence == 3
+    assert projection.page.outcome.status == :incomplete
+    assert projection.page.outcome.reason =~ "sequence gap"
   end
 
   test "Setup reads the sealed readiness artifact and fails closed for changed source" do
@@ -321,6 +622,167 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     assert page.start.provider == "linear"
     assert page.start.idempotency_key == "start-key"
     assert page.start.last_error.code == "linear_timeout"
+  end
+
+  defp projection_fixture(event_builder, opts \\ []) do
+    unique = System.unique_integer([:positive])
+    root = Path.join(System.tmp_dir!(), "studio-data-port-projection-#{unique}")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    run_id = Identity.uuid4()
+    prior_attempt_id = Identity.uuid4()
+    current_attempt_id = Identity.uuid4()
+
+    ids = %{
+      run_id: run_id,
+      prior_attempt_id: prior_attempt_id,
+      current_attempt_id: current_attempt_id
+    }
+
+    intent = %{
+      "schema_version" => 1,
+      "intent_id" => "intent_projection_#{unique}",
+      "lifecycle_state" => "admitted",
+      "source" => %{"content" => "Verify authoritative completion"},
+      "proposal" => %{
+        "tasks" => [
+          %{
+            "id" => "task-authoritative",
+            "title" => "Verify authoritative completion",
+            "acceptance_criteria" => ["Completion is fail closed"],
+            "source_refs" => ["elixir/lib/symphony_elixir_web/studio_data_port.ex"]
+          }
+        ]
+      },
+      "start" => %{
+        "task_id" => "task-authoritative",
+        "issue_id" => "issue-authoritative",
+        "issue_identifier" => "SYM-99"
+      },
+      "admission" => %{"run_id" => run_id, "attempt_id" => current_attempt_id}
+    }
+
+    {:ok, store} = Store.open(root: root)
+    assert {:ok, ^intent, :created} = Store.create_intent(store, intent)
+
+    sink_options = Keyword.get(opts, :sink_options, [])
+
+    sink =
+      start_supervised!(%{
+        id: {:projection_memory, unique},
+        start: {Memory, :start_link, [sink_options]}
+      })
+
+    target = {Memory, sink}
+    events = event_builder.(ids)
+    Enum.each(events, fn item -> assert {:ok, :appended} = EventSink.append(target, item) end)
+
+    last_event_sequence =
+      Keyword.get_lazy(opts, :runtime_last_event_sequence, fn ->
+        events |> Enum.map(& &1.sequence) |> Enum.max(fn -> 0 end)
+      end)
+
+    runtime_attempt_id =
+      case Keyword.get(opts, :runtime_attempt, :current) do
+        :prior -> prior_attempt_id
+        :current -> current_attempt_id
+      end
+
+    entry =
+      running_entry()
+      |> Map.merge(%{
+        issue_id: "issue-authoritative",
+        identifier: "SYM-99",
+        run_id: run_id,
+        attempt_id: runtime_attempt_id,
+        last_event_sequence: last_event_sequence
+      })
+
+    orchestrator = unique_orchestrator(:Projection)
+    start_static_orchestrator!(orchestrator, runtime_snapshot([entry]))
+
+    configure_endpoint(
+      orchestrator: orchestrator,
+      snapshot_timeout_ms: 100,
+      studio_intent_data_root: root,
+      studio_event_sink: target
+    )
+
+    assert {:ok, page} = RuntimeStudioDataPort.load(:run_detail, %{"run_id" => run_id})
+    assert {:ok, probe} = RuntimeStudioDataPort.verification(%{"run_id" => run_id})
+
+    %{
+      current_attempt_id: current_attempt_id,
+      page: page,
+      probe: probe,
+      root: root,
+      run_id: run_id,
+      target: target
+    }
+  end
+
+  defp completed_proof_specs(revision) do
+    [
+      {"codex.session.started", %{"model" => "gpt-5.6-sol", "reasoning_effort" => "ultra"}},
+      {"quality.check.completed",
+       %{
+         "check_id" => "required",
+         "command" => "mix test",
+         "source_revision" => revision,
+         "status" => "passed"
+       }},
+      {"review.completed",
+       %{
+         "detached" => true,
+         "source_revision" => revision,
+         "status" => "passed"
+       }},
+      {"evidence.sealed",
+       %{
+         "current" => true,
+         "manifest_hash" => "sha256:" <> String.duplicate("8", 64),
+         "sealed" => true,
+         "source_revision" => revision,
+         "status" => "sealed"
+       }},
+      {"delivery.recorded",
+       %{
+         "commit" => revision,
+         "source_revision" => revision,
+         "status" => "recorded"
+       }},
+      {"tracker.handoff.confirmed", %{"source_revision" => revision, "status" => "confirmed"}},
+      {"run.completed", %{"source_revision" => revision, "status" => "completed"}}
+    ]
+  end
+
+  defp events_from_specs(run_id, attempt_id, specs, start_sequence) do
+    specs
+    |> Enum.with_index(start_sequence)
+    |> Enum.map(fn {{type, payload}, sequence} ->
+      event(run_id, attempt_id, sequence, type, payload)
+    end)
+  end
+
+  defp runtime_snapshot(running) do
+    %{
+      running: running,
+      blocked: [],
+      retrying: [],
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      rate_limits: nil
+    }
+  end
+
+  defp unique_orchestrator(suffix) do
+    Module.concat(__MODULE__, "#{suffix}Orchestrator#{System.unique_integer([:positive])}")
+  end
+
+  defp start_static_orchestrator!(name, snapshot) do
+    start_supervised!(%{
+      id: {:static_orchestrator, name},
+      start: {StaticOrchestrator, :start_link, [[name: name, snapshot: snapshot]]}
+    })
   end
 
   defp configure_endpoint(overrides) do

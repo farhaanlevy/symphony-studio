@@ -109,21 +109,15 @@
       ],
       "matrixSha256": "f102c992bc99faaa7442f1bc22b6f41cce70e0f1a5d2ba56e99a8dabafdd8b25",
       "schemaBundleSha256": "5044e15b8aa187e7deec44ee16b0848a4f9a20aa25e6ec66f10c1d5bcc40141a",
-      "sourceFileCount": 164,
+      "sourceFileCount": 184,
       "sourceHashAlgorithm": "sha256-text-lf-binary-raw-relative-path-v2",
-      "sourceSha256": "159532bdbb4c42b7ce18a12296708680d7d5a21c3c3d16dfba11b5aac3df3e72",
+      "sourceSha256": "80338b26fe7809e7ba6419976579a5b045e62c954f081301c09f40987266a429",
       "testCount": 549,
       "testedAt": "2026-07-21"
     },
     "fixtures": "pass",
-    "overall": "pass",
-    "runtimeCapabilities": "pass",
-    "runtimeEvidence": {
-      "hashAlgorithm": "sha256-canonical-json-v1",
-      "readinessManifestSha256": "35888d910a70a803b7f6a2ef70555a6e98ff0a7f6a083fb8f47b4de4eaef2dd8",
-      "schemaManifestBasisSha256": "8dd34c7fbccc840ea22cb9e2fd3612e277b4796bc88e669b40d9080c38f25537",
-      "sourceSha256": "4f4c290986ed2bb10dde60f6b84f65a28fdf720547a74f3f31a1b1f919aeb73e"
-    },
+    "overall": "pending_r0_06",
+    "runtimeCapabilities": "not_run",
     "schemaContract": "pass",
     "testedAt": "2026-07-21",
     "transportConformance": "pass"

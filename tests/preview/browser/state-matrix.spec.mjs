@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import AxeBuilder from "@axe-core/playwright";
-import { captureEvidence, readHandoff, readProbe, requireStateRun } from "./preview-contract.mjs";
+import { captureEvidence, readHandoff, readProbe } from "./preview-contract.mjs";
 import { expect, test } from "./preview-fixtures.mjs";
 
 test("Setup exposes real repository, Linear, Codex, model, and readiness state", async ({ page }, testInfo) => {
@@ -69,14 +69,19 @@ test("browser disconnect shows reconnecting and replays authoritative state", as
   expect(after.run.runId).toBe(handoff.runId);
 });
 
-for (const state of ["loading", "blocked", "failure", "completed"]) {
-  test(`${state} state is derived from authoritative run truth`, async ({ page }, testInfo) => {
-    const handoff = readHandoff();
-    test.skip(!handoff, "BLOCKED: no authoritative preview run handoff exists");
-    const runId = requireStateRun(test, handoff, state);
+test("current run states are derived from authoritative projection truth", async ({ page }, testInfo) => {
+  const handoff = readHandoff();
+  test.skip(!handoff, "BLOCKED: no authoritative preview run handoff exists");
+  const entries = Object.entries(handoff.stateRunIds ?? {});
+  expect(entries.length).toBeGreaterThan(0);
+  expect(handoff.stateRunIds.completed).toBe(handoff.runId);
+
+  for (const [state, runId] of entries) {
+    expect(["active", "queued", "blocked", "validating", "reviewing", "completed", "incomplete"]).toContain(state);
     await page.goto(`/runs/${runId}`);
     const probe = await readProbe(page);
     expect(probe.run.runId).toBe(runId);
+    expect(probe.run.state).toBe(state);
     if (state === "completed") {
       expect(probe.run.completion).toMatchObject({ status: "completed" });
       expect(probe.run.trackerHandoff).toMatchObject({ status: "confirmed" });
@@ -90,5 +95,19 @@ for (const state of ["loading", "blocked", "failure", "completed"]) {
       assertions: ["probe run ID matches", "completion truth is fail-closed"],
       fixture: runId,
     });
+  }
+});
+
+test("an unavailable run renders a clear failure without manufactured completion", async ({ page }, testInfo) => {
+  const runId = "00000000-0000-4000-8000-000000000000";
+  await page.goto(`/runs/${runId}`);
+  await expect(page.getByRole("heading", { name: "Snapshot unavailable", level: 1 })).toBeVisible();
+  await expect(page.getByText("Completed", { exact: true })).toHaveCount(0);
+  const probe = await readProbe(page);
+  expect(probe.run).toBeNull();
+  await captureEvidence(page, testInfo, "truth-unavailable", {
+    acceptanceCriterion: "An unknown run remains an explicit failure state",
+    assertions: ["production route unavailable state", "no manufactured completion"],
+    fixture: runId,
   });
-}
+});

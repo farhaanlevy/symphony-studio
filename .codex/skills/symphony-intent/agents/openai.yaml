@@ -1,4 +1,4 @@
 interface:
   display_name: "Symphony Intent"
-  short_description: "Plan and publish approved Symphony backlogs"
-  default_prompt: "Use $symphony-intent to turn this product intent into an approved, dependency-aware Symphony backlog."
+  short_description: "Plan and inspect Symphony work safely"
+  default_prompt: "Use $symphony-intent to turn this product intent into a dependency-aware proposal, then show me the trusted-host action needed to publish it."

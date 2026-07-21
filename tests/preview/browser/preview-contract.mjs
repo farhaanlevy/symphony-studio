@@ -51,6 +51,8 @@ export async function readProbe(page) {
     const url = new URL(pathValue, window.location.origin);
     const intent = new URL(window.location.href).searchParams.get("intent");
     if (intent) url.searchParams.set("intent", intent);
+    const run = window.location.pathname.match(/^\/runs\/([^/]+)$/);
+    if (run) url.searchParams.set("run_id", decodeURIComponent(run[1]));
     const response = await fetch(url, {
       credentials: "same-origin",
       headers: { Accept: "application/json" },
@@ -95,11 +97,14 @@ export function validateDemoIssue(identifier) {
 
 export function writeHandoff(value) {
   const issueIdentifier = validateDemoIssue(value.issueIdentifier);
+  if (value.stateRunIds?.completed !== value.runId) {
+    throw new Error("preview handoff requires authoritative completed-run truth");
+  }
   atomicPrivateJSON(handoffPath, {
     issueIdentifier,
     runId: value.runId,
     schemaVersion: 1,
-    stateRunIds: { completed: value.runId, ...(value.stateRunIds ?? {}) },
+    stateRunIds: value.stateRunIds,
   });
 }
 
@@ -179,10 +184,4 @@ export async function captureEvidence(page, testInfo, caseId, metadata = {}) {
     viewport,
   });
   await testInfo.attach(`${caseId}-screenshot`, { body: payload, contentType: "image/png" });
-}
-
-export function requireStateRun(test, handoff, state) {
-  const runId = handoff?.stateRunIds?.[state];
-  test.skip(!runId, `BLOCKED: authoritative ${state} run ID is unavailable`);
-  return runId;
 }

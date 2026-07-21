@@ -85,6 +85,17 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
                opts
              )
 
+    mcp_opts = Keyword.put(opts, :origin, :mcp)
+
+    assert {:error, %{code: :trusted_host_authorization_required}} =
+             IntentService.approve_publication(
+               intent_id,
+               digest,
+               "publish_linear_backlog",
+               "approve-mcp-denied",
+               mcp_opts
+             )
+
     {:ok, approved} =
       IntentService.approve_publication(
         intent_id,
@@ -95,6 +106,11 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
       )
 
     assert approved["lifecycle_state"] == "approved"
+
+    assert {:error, %{code: :trusted_host_authorization_required}} =
+             IntentService.publish_approved_plan(intent_id, "publish-mcp-denied", mcp_opts)
+
+    assert Fake.calls(ctx.broker) == []
 
     {:ok, published} = IntentService.publish_approved_plan(intent_id, "publish-1", opts)
     assert published["publication"]["status"] == "complete"
@@ -108,6 +124,14 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
 
     assert {:error, %{code: :confirmation_mismatch}} =
              IntentService.start_first_ready(intent_id, "yes", "start-wrong", opts)
+
+    assert {:error, %{code: :trusted_host_authorization_required}} =
+             IntentService.start_first_ready(
+               intent_id,
+               "start_first_ready",
+               "start-mcp-denied",
+               mcp_opts
+             )
 
     {:ok, waiting} =
       IntentService.start_first_ready(
