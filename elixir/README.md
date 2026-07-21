@@ -119,6 +119,20 @@ third-party-notice packaging is a Release 0 R0-07 gate.
 
 ## Run
 
+Published Release 0 archives include a prebuilt escript. Verify its exact
+public build identity without starting the runtime. The supported stable
+installation is documented in
+[`docs/releases/v0.1.0/release-notes.md`](../docs/releases/v0.1.0/release-notes.md);
+the source clone below is the development path, not the clean-package proof:
+
+```bash
+./bin/symphony --version
+```
+
+The output includes version, protected-main commit, upstream base, Codex
+compatibility hash, and build provenance. Development builds say
+`0.1.0-dev`/`development` and must not be represented as published artifacts.
+
 ```bash
 git clone https://github.com/farhaanlevy/symphony-studio.git
 cd symphony-studio/elixir

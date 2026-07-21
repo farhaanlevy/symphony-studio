@@ -12,6 +12,9 @@ defmodule SymphonyElixir.Codex.SchemaBundle do
   @version_file Path.expand("../../../priv/codex_schema/CODEX_VERSION", __DIR__)
   @external_resource @version_file
   @version @version_file |> File.read!() |> String.trim()
+  @max_json_bytes 1_048_576
+
+  alias SymphonyElixir.PathSafety
 
   @type json_object :: %{optional(String.t()) => term()}
 
@@ -20,14 +23,22 @@ defmodule SymphonyElixir.Codex.SchemaBundle do
 
   @spec bundle_path() :: String.t()
   def bundle_path do
-    :symphony_elixir
-    |> :code.priv_dir()
-    |> to_string()
-    |> Path.join("codex_schema/#{@version}")
+    code_bundle = code_bundle_path()
+
+    if safe_bundle_directory?(code_bundle) do
+      code_bundle
+    else
+      package_bundle_path() || code_bundle
+    end
   end
 
+  @spec manifest_bytes() :: {:ok, binary()} | {:error, term()}
+  def manifest_bytes, do: load_bytes("manifest.json")
+
   @spec manifest() :: {:ok, json_object()} | {:error, term()}
-  def manifest, do: load_json("manifest.json")
+  def manifest do
+    with {:ok, contents} <- manifest_bytes(), do: decode_json(contents)
+  end
 
   @spec matrix() :: {:ok, json_object()} | {:error, term()}
   def matrix, do: load_json("method-field-matrix.json")
@@ -47,11 +58,25 @@ defmodule SymphonyElixir.Codex.SchemaBundle do
   end
 
   defp load_json(relative_path) do
+    with {:ok, contents} <- load_bytes(relative_path), do: decode_json(contents)
+  end
+
+  defp load_bytes(relative_path) do
     with {:ok, path} <- safe_path(relative_path),
-         {:ok, contents} <- File.read(path),
-         {:ok, value} when is_map(value) <- Jason.decode(contents) do
-      {:ok, value}
+         {:ok, %File.Stat{type: :regular, size: size}}
+         when is_integer(size) and size > 0 and size <= @max_json_bytes <- File.lstat(path),
+         {:ok, contents} when byte_size(contents) == size <- File.read(path) do
+      {:ok, contents}
     else
+      {:ok, %File.Stat{}} -> {:error, :unsafe_schema_file}
+      {:ok, _contents} -> {:error, :schema_file_changed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode_json(contents) do
+    case Jason.decode(contents) do
+      {:ok, value} when is_map(value) -> {:ok, value}
       {:ok, _other} -> {:error, :expected_json_object}
       {:error, reason} -> {:error, reason}
     end
@@ -71,6 +96,48 @@ defmodule SymphonyElixir.Codex.SchemaBundle do
 
       true ->
         {:ok, expanded}
+    end
+  end
+
+  defp code_bundle_path do
+    case :code.priv_dir(:symphony_elixir) do
+      path when is_list(path) ->
+        path
+        |> IO.chardata_to_string()
+        |> Path.join("codex_schema/#{@version}")
+
+      _other ->
+        Path.join(["priv", "codex_schema", @version])
+    end
+  end
+
+  defp package_bundle_path do
+    script =
+      :escript.script_name()
+      |> IO.chardata_to_string()
+      |> Path.expand()
+
+    bin_directory = Path.dirname(script)
+    package_root = Path.dirname(bin_directory)
+    candidate = Path.join(package_root, "priv/codex_schema/#{@version}")
+
+    with "bin" <- Path.basename(bin_directory),
+         {:ok, %File.Stat{type: :regular}} <- File.lstat(script),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(package_root),
+         true <- safe_bundle_directory?(candidate) do
+      candidate
+    else
+      _other -> nil
+    end
+  end
+
+  defp safe_bundle_directory?(path) do
+    with {:ok, canonical} <- PathSafety.canonicalize(path),
+         true <- canonical == Path.expand(path),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(path) do
+      true
+    else
+      _other -> false
     end
   end
 end

@@ -1965,3 +1965,119 @@ reviews all satisfy the checkpoint acceptance boundary.
   completion, review, persistence, or UI.
 - R0-07 still owns release automation and publication. Release 1 remains
   locked until R0-06 and R0-07 are accepted and `v0.1.0` is published.
+
+## 2026-07-21 — R0-06 acceptance and R0-07 protected release train
+
+### Accepted prerequisite
+
+- R0-06 passed its final host-exclusive publisher, exact pair verification,
+  installed Codex check, no-model smoke, hygiene/archive checks, and two fresh
+  reviews with no P0-P3 finding. Commit
+  `25f4d78e1eb3102dd8d1aa72413988b36b72fd71` and tree
+  `2f6aaea5bb6f61e2e78dfde9aea2623353f82c11` are pushed to
+  `origin/release/v0.1.0`.
+- The final Linear broker executed exactly nine fixed queries and zero
+  mutations. Neither fixture changed, and no credential, selector/path, raw
+  response, or private identity entered public evidence.
+
+### R0-07 decisions
+
+- Keep candidate and review manifests outside Git. A manifest cannot contain
+  the SHA of the commit that contains itself; exact-head canonical JSON is
+  instead hash-bound to the PR, trusted attestor, workflow dispatch, and final
+  release assets.
+- Treat the candidate Actions job as evidence, not authority. Branch protection
+  must accept `studio/release-gate` only from a dedicated external GitHub App;
+  the general Actions App ID `15368` remains explicitly rejected because a
+  candidate can create the same check context.
+- Build only from the exact protected-main merge commit. Strip secret-shaped
+  variables from build children, embed only public provenance, normalize the
+  escript archive, reproduce the outer archive, and require exact clean-install
+  version output before any remote release write.
+- Create a draft, attach the complete hash inventory and final manifest,
+  download and rehash every asset, attest those exact immutable-candidate
+  bytes, and only then publish with repository release immutability enabled.
+  The external publication receipt carries the actual publication timestamp;
+  a later run reconciles only exact matching state and never moves or reuses a
+  tag.
+- Claim Debian 12 / Linux x86_64 only. Release 0 has no database migration and
+  proves return to locked upstream commit
+  `4cbe3a9699a73b862466c0b157ceca0c1985d6d7` by exact source hashes.
+- Keep the Build Week Preview separate from `v0.1.0`; Release 0 remains the
+  original Symphony runner and observability experience.
+
+### Targeted evidence
+
+- `python3 scripts/release/test_release.py -q`: 45 tests, zero failures on the
+  current candidate.
+- CLI targeted suite: 10 tests, zero failures. A fresh real escript also loads
+  the package-adjacent, source-bound Codex manifest, matrix, representative
+  schema, green compatibility identity, and build-bound artifact digest before
+  returning exact public provenance from `--version`.
+- `mix specs.check`: pass.
+- Workflow YAML parsing, checksum-verified actionlint 1.7.12, and
+  `git diff --check`: pass.
+- A disposable exact-tree synthetic protected-merge rehearsal built the
+  archive twice, clean-extracted it using the Python 3.11-compatible bounded
+  extractor, ran its embedded `--version`, verified the package inventory, and
+  proved the upstream-baseline receipt. Archive SHA-256 was
+  `27a5392d5704c679f5a61f6581b0b98b75d68c6a278939de359db080042ee53f`;
+  this is historical targeted evidence, not final exact-head acceptance. It is
+  superseded because material publication, actual-runner, retry, attestation,
+  safe-revert, and independent-build repairs changed the candidate.
+- Live Doctor truthfully blocks while the tree is under development and while
+  the dedicated required-check App is not yet configured. Repository release
+  immutability is enabled; no release, tag, PR, or protection bypass is claimed.
+
+### R0-07 pre-acceptance repair provenance
+
+The implementation audit was a repair review, not either required final
+exact-tree review. It identified and the candidate repairs address:
+
+- evidence loss after an irreversible publication command through progressive
+  atomic success/failure receipts preserved under `always()`;
+- impossible pre-publication time/status causality through typed manifest
+  pointers resolved by the final canonical attestation predicate;
+- protected retry when `main` advances, while package bytes remain bound to the
+  original merge and exact workflow blob;
+- durable candidate-manifest attachment in both the PR and latest trusted
+  CheckRun;
+- real loopback HTTP runner startup, deterministic zero-work state, and full
+  process-group cleanup rather than a version-only smoke;
+- an initially explored automatic-revert credential path was removed after the
+  security audit proved repository Actions could expose a GitHub App private
+  key to candidate-controlled workflows; post-merge failures now preserve a
+  bounded action-required receipt, and any manual revert state blocks without
+  automated PR mutation;
+- immediate tag, asset, checksum, provenance, and custom-predicate
+  verification;
+- dispatch ordering and workflow provenance across protected-main retries;
+- progressive publication handoff state `release_pending_publication`;
+- actual independent escript compilation rather than archiving one build twice;
+  and
+- unprivileged Debian clean installation rather than a root-only runner path.
+
+The repaired independent-build rehearsal then failed closed on residual OTP 28
+map-order nondeterminism in pinned dependency compile-time code. Subsequent
+exact hash-gated build-only dependency patches reproduce byte-identical escript
+and archive inputs. The lock-bound runtime closure, license notices, package
+inventory, and SPDX SBOM now pass targeted validation. The security audit also
+removed the rejected repository-secret/automatic-revert direction and added a
+reviewed out-of-band trusted CheckRun attestor whose public source digest is
+`fd204268d41548ef4fc419e1c799ecd95c35a723d56d46213900359cc48a93fa`.
+Its owner-only external seal validates the exact single-repository/minimum-
+permission App installation and owner-approved workflow, review, and complete-
+gate hashes before its sole idempotent CheckRun mutation. Current targeted
+evidence is 45/45 release-tool tests, 22/22 attestor tests, 10/10 CLI tests,
+public specs, `git diff --check`, and checksum-verified actionlint 1.7.12 over
+all four workflows. No release acceptance is claimed until one coherent
+package/clean-install rehearsal, the exact-tree complete gate, and two fresh
+reviews pass.
+
+### Remaining acceptance
+
+Complete the final exact-tree gate and fresh reviews, configure the dedicated
+attestor without weakening protection, open the one release PR, enable
+merge-commit auto-merge, verify the exact protected merge, run package and
+upstream-baseline recovery gates, and publish/download/verify immutable
+`v0.1.0` before accepting R0-07.

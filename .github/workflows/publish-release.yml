@@ -1,0 +1,582 @@
+name: publish-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact immutable semantic version
+        required: true
+        type: string
+      merged_sha:
+        description: Exact protected-main merge commit
+        required: true
+        type: string
+      pull_request_number:
+        description: Protected release pull request number
+        required: true
+        type: number
+      candidate_manifest_sha256:
+        description: SHA-256 of canonical candidate manifest
+        required: true
+        type: string
+      candidate_manifest_base64:
+        description: Canonical candidate manifest transported without repository self-reference
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-v0.1.0
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: verify protected merge and build package
+    if: github.ref == 'refs/heads/main' && inputs.version == 'v0.1.0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      failure_kind: ${{ steps.classify.outputs.failure_kind }}
+      package_artifact_name: ${{ steps.package_artifact.outputs.name }}
+    env:
+      CANDIDATE_SHA256: ${{ inputs.candidate_manifest_sha256 }}
+      MERGED_SHA: ${{ inputs.merged_sha }}
+      PR_NUMBER: ${{ inputs.pull_request_number }}
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout exact protected-main merge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ env.MERGED_SHA }}
+
+      - name: Verify dispatch identity and protected-main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$MERGED_SHA" in
+            *[!0-9a-f]*|'') exit 78 ;;
+          esac
+          case "$CANDIDATE_SHA256" in
+            *[!0-9a-f]*|'') exit 78 ;;
+          esac
+          test "${#MERGED_SHA}" = "40"
+          test "${#CANDIDATE_SHA256}" = "64"
+          case "$GITHUB_SHA" in
+            *[!0-9a-f]*|'') exit 78 ;;
+          esac
+          test "${#GITHUB_SHA}" = "40"
+          test "$(git rev-parse HEAD)" = "$MERGED_SHA"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$MERGED_SHA" origin/main
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ""
+
+      - name: Decode and verify canonical candidate manifest
+        env:
+          CANDIDATE_BASE64: ${{ inputs.candidate_manifest_base64 }}
+        run: |
+          scripts/release/release.py decode-manifest \
+            --base64 "$CANDIDATE_BASE64" \
+            --sha256 "$CANDIDATE_SHA256" \
+            --output "$RUNNER_TEMP/release-candidate-manifest.json"
+          scripts/release/verify candidate \
+            --manifest "$RUNNER_TEMP/release-candidate-manifest.json" \
+            --no-ref-check
+          scripts/release/verify workflow-source \
+            --candidate "$RUNNER_TEMP/release-candidate-manifest.json" \
+            --merged-sha "$MERGED_SHA" \
+            --workflow-sha "$GITHUB_SHA"
+
+      - name: Bind candidate to protected PR and trusted check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_CHECK_APP_ID: ${{ vars.TRUSTED_CHECK_APP_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$TRUSTED_CHECK_APP_ID" in
+            *[!0-9]*|'') exit 78 ;;
+          esac
+          test "$TRUSTED_CHECK_APP_ID" -gt 0
+          scripts/release/verify protected-merge \
+            --candidate "$RUNNER_TEMP/release-candidate-manifest.json" \
+            --merged-sha "$MERGED_SHA" \
+            --pr-number "$PR_NUMBER" \
+            --trusted-check-app-id "$TRUSTED_CHECK_APP_ID"
+
+      - name: Set up exact mise tools
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: true
+          cache: true
+          sha256: d31578a16ae2708385249b439c95533068e04b9507a118e905aa6768905671fc
+          version: 2026.7.11
+          working_directory: elixir
+
+      - name: Install exact Codex compatibility pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global --prefix "$RUNNER_TEMP/codex-pin" @openai/codex@0.144.3
+          printf '%s\n' "$RUNNER_TEMP/codex-pin/bin" >> "$GITHUB_PATH"
+          test "$("$RUNNER_TEMP/codex-pin/bin/codex" --version)" = "codex-cli 0.144.3"
+
+      - name: Run exact merged-commit quality gate
+        id: quality_gate
+        working-directory: elixir
+        run: make all
+
+      - name: Build and verify deterministic package
+        id: package_build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          set +e
+          output=$(
+            scripts/release/publish prepare \
+              --candidate "$RUNNER_TEMP/release-candidate-manifest.json" \
+              --merged-sha "$MERGED_SHA" \
+              --pr-number "$PR_NUMBER" \
+              --output-dir "$RUNNER_TEMP/release-assets" &&
+            scripts/release/verify package \
+              --directory "$RUNNER_TEMP/release-assets" &&
+            if test "$(git status --porcelain=v1 --untracked-files=all)" != ""; then
+              printf '%s\n' packaging_worktree_modified
+              exit 78
+            fi
+          2>&1)
+          status=$?
+          set -e
+          printf '%s' "$output"
+          if test "$status" -ne 0; then
+            case "$output" in
+              *candidate_*_mismatch*|*merged_*_mismatch*|*merged_tree_*|*packaging_worktree_*|*protected_merge_*|*public_archive_*|*public_artifact_*|*release_tree_record_*|*release_tree_path_too_large*|*unsupported_release_tree_entry*|*release_tree_file_too_large*|*release_tree_file_count_exceeded*|*release_tree_total_size_exceeded*|*package_source_invalid*|*package_source_too_large*|*package_source_total_size_exceeded*|*unsafe_package_archive_*|*runtime_dependency_*|*dependency_build_patch_*|*symphony_priv_*|*codex_schema_bundle_*|*escript_runtime_*|*installed_version_*|*package_runtime_dependency_*|*package_notice*|*package_sbom_*)
+                failure_kind=merged-integrity ;;
+              *) failure_kind=packaging-only ;;
+            esac
+            printf 'failure_kind=%s\n' "$failure_kind" >> "$GITHUB_OUTPUT"
+            exit "$status"
+          fi
+          printf 'failure_kind=none\n' >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified package
+        id: package_artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'name=release-package-%s-attempt-%s\n' \
+            "$MERGED_SHA" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve verified package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.package_artifact.outputs.name }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/release-assets/
+
+      - name: Classify build outcome
+        if: ${{ always() }}
+        id: classify
+        env:
+          PACKAGE_FAILURE_KIND: ${{ steps.package_build.outputs.failure_kind }}
+          PACKAGE_OUTCOME: ${{ steps.package_build.outcome }}
+          QUALITY_OUTCOME: ${{ steps.quality_gate.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test "$QUALITY_OUTCOME" = failure; then
+            kind=environment-or-evidence
+          elif test "$PACKAGE_OUTCOME" = failure; then
+            case "$PACKAGE_FAILURE_KIND" in
+              merged-integrity|packaging-only) kind="$PACKAGE_FAILURE_KIND" ;;
+              *) kind=environment-or-evidence ;;
+            esac
+          elif test "$QUALITY_OUTCOME" = success && test "$PACKAGE_OUTCOME" = success; then
+            kind=none
+          else
+            kind=environment-or-evidence
+          fi
+          printf 'failure_kind=%s\n' "$kind" >> "$GITHUB_OUTPUT"
+
+  clean_install:
+    name: clean install on Debian 12 x86_64
+    if: github.ref == 'refs/heads/main' && inputs.version == 'v0.1.0'
+    needs: build
+    runs-on: ubuntu-latest
+    container: debian:12
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      failure_kind: ${{ steps.classify.outputs.failure_kind }}
+      platform_artifact_name: ${{ steps.platform_artifact.outputs.name }}
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      MERGED_SHA: ${{ inputs.merged_sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Install clean-host prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            ca-certificates \
+            build-essential \
+            curl \
+            git \
+            gzip \
+            libncurses-dev \
+            libssl-dev \
+            nodejs \
+            npm \
+            passwd \
+            procps \
+            python3 \
+            unzip \
+            util-linux
+          rm -rf /var/lib/apt/lists/*
+          useradd --create-home --shell /bin/sh symphony-release
+
+      - name: Checkout exact protected-main merge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ env.MERGED_SHA }}
+
+      - name: Download verified package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.build.outputs.package_artifact_name }}
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Verify exact supported platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = "debian"
+          test "$VERSION_ID" = "12"
+          test "$(dpkg --print-architecture)" = "amd64"
+          test "$(uname -m)" = "x86_64"
+          test "$(git rev-parse HEAD)" = "$MERGED_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ""
+
+      - name: Install exact toolchain for the unprivileged release user
+        shell: bash
+        run: |
+          set -euo pipefail
+          runuser --user symphony-release -- env \
+            HOME=/home/symphony-release \
+            PATH=/usr/bin:/bin \
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(
+            runuser --user symphony-release -- env \
+              HOME=/home/symphony-release \
+              PATH=/usr/bin:/bin \
+              git config --global --get-all safe.directory
+          )" = "$GITHUB_WORKSPACE"
+          mise_download="$RUNNER_TEMP/mise-v2026.7.11-linux-x64"
+          curl --fail --silent --show-error --location \
+            --output "$mise_download" \
+            https://github.com/jdx/mise/releases/download/v2026.7.11/mise-v2026.7.11-linux-x64
+          printf '%s  %s\n' \
+            d31578a16ae2708385249b439c95533068e04b9507a118e905aa6768905671fc \
+            "$mise_download" | sha256sum --check --strict
+          install -m 0755 "$mise_download" /usr/local/bin/mise
+          npm install --global --prefix /opt/symphony-codex @openai/codex@0.144.3
+          test "$(/opt/symphony-codex/bin/codex --version)" = \
+            "codex-cli 0.144.3"
+          runuser --user symphony-release -- env \
+            HOME=/home/symphony-release \
+            LANG=C.UTF-8 \
+            LC_ALL=C.UTF-8 \
+            PATH=/opt/symphony-codex/bin:/usr/local/bin:/usr/bin:/bin \
+            sh -c 'cd "$1" && mise trust mise.toml && mise install' \
+            sh "$GITHUB_WORKSPACE/elixir"
+
+      - name: Verify package and clean installation
+        id: clean_install_verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -o symphony-release -g symphony-release \
+            "$RUNNER_TEMP/platform-output"
+          chown -R symphony-release:symphony-release "$RUNNER_TEMP/release-assets"
+          set +e
+          output=$(
+            runuser --user symphony-release -- env \
+              HOME=/home/symphony-release \
+              LANG=C.UTF-8 \
+              LC_ALL=C.UTF-8 \
+              PATH=/opt/symphony-codex/bin:/usr/local/bin:/usr/bin:/bin \
+              scripts/release/verify package \
+                --directory "$RUNNER_TEMP/release-assets" &&
+            runuser --user symphony-release -- env \
+              HOME=/home/symphony-release \
+              LANG=C.UTF-8 \
+              LC_ALL=C.UTF-8 \
+              PATH=/opt/symphony-codex/bin:/usr/local/bin:/usr/bin:/bin \
+              scripts/release/verify clean-install \
+                --directory "$RUNNER_TEMP/release-assets" \
+                --receipt "$RUNNER_TEMP/platform-output/debian-clean-install.json"
+          2>&1)
+          status=$?
+          set -e
+          printf '%s' "$output"
+          if test "$status" -ne 0; then
+            case "$output" in
+              *clean_install_candidate_mismatch*|*clean_install_notice_asset_mismatch*|*clean_install_upstream_baseline_mismatch*|*clean_install_codex_lock_invalid*|*runtime_dependency_*|*symphony_priv_*|*codex_schema_bundle_*|*escript_runtime_*|*installed_version_*|*installed_guardrail_smoke_failed*|*installed_runner_*)
+                failure_kind=clean-install ;;
+              *) failure_kind=environment-or-evidence ;;
+            esac
+            printf 'failure_kind=%s\n' "$failure_kind" >> "$GITHUB_OUTPUT"
+            exit "$status"
+          fi
+          printf 'failure_kind=none\n' >> "$GITHUB_OUTPUT"
+
+      - name: Name supported-platform receipt artifact
+        id: platform_artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'name=release-platform-%s-attempt-%s\n' \
+            "$MERGED_SHA" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve supported-platform receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.platform_artifact.outputs.name }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/platform-output/debian-clean-install.json
+
+      - name: Classify clean-install outcome
+        if: ${{ always() }}
+        id: classify
+        env:
+          VERIFY_FAILURE_KIND: ${{ steps.clean_install_verify.outputs.failure_kind }}
+          VERIFY_OUTCOME: ${{ steps.clean_install_verify.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test "$VERIFY_OUTCOME" = failure; then
+            case "$VERIFY_FAILURE_KIND" in
+              clean-install|environment-or-evidence) kind="$VERIFY_FAILURE_KIND" ;;
+              *) kind=environment-or-evidence ;;
+            esac
+          elif test "$VERIFY_OUTCOME" = success; then
+            kind=none
+          else
+            kind=environment-or-evidence
+          fi
+          printf 'failure_kind=%s\n' "$kind" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: attest and publish immutable v0.1.0
+    if: github.ref == 'refs/heads/main' && inputs.version == 'v0.1.0'
+    needs:
+      - build
+      - clean_install
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      MERGED_SHA: ${{ inputs.merged_sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      RELEASE_VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Checkout exact protected-main merge
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ env.MERGED_SHA }}
+
+      - name: Download verified package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.build.outputs.package_artifact_name }}
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Download supported-platform receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.clean_install.outputs.platform_artifact_name }}
+          path: ${{ runner.temp }}/platform-evidence
+
+      - name: Verify retry-safe protected-main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$MERGED_SHA"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$MERGED_SHA" origin/main
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ""
+
+      - name: Attach and verify supported-platform evidence
+        run: |
+          scripts/release/publish attach-platform \
+            --directory "$RUNNER_TEMP/release-assets" \
+            --platform-receipt "$RUNNER_TEMP/platform-evidence/debian-clean-install.json"
+          scripts/release/verify package --directory "$RUNNER_TEMP/release-assets"
+
+      - name: Install checksum-verified GitHub CLI 2.96.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gh_2.96.0_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "$archive" \
+            https://github.com/cli/cli/releases/download/v2.96.0/gh_2.96.0_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60 \
+            "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          gh_bin="$RUNNER_TEMP/gh_2.96.0_linux_amd64/bin"
+          test "$("$gh_bin/gh" version | awk 'NR == 1 {print $3}')" = "2.96.0"
+          printf '%s\n' "$gh_bin" >> "$GITHUB_PATH"
+
+      - name: Stage and remotely rehash exact draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release/publish stage \
+            --candidate "$RUNNER_TEMP/release-assets/release-candidate-manifest.json" \
+            --merged-sha "$MERGED_SHA" \
+            --directory "$RUNNER_TEMP/release-assets" \
+            --notes-file docs/releases/v0.1.0/release-notes.md \
+            --receipt "$RUNNER_TEMP/release-stage-receipt.json"
+
+      - name: Attest exact verified draft assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: ${{ runner.temp }}/release-assets/*
+
+      - name: Verify build provenance before irreversible publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release/verify build-provenance \
+            --directory "$RUNNER_TEMP/release-assets" \
+            --workflow-sha "$GITHUB_SHA"
+
+      - name: Publish and verify immutable Latest release
+        id: finalize
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release/publish finalize \
+            --candidate "$RUNNER_TEMP/release-assets/release-candidate-manifest.json" \
+            --merged-sha "$MERGED_SHA" \
+            --directory "$RUNNER_TEMP/release-assets" \
+            --receipt "$RUNNER_TEMP/release-publication-receipt.json" \
+            --workflow-sha "$GITHUB_SHA"
+
+      - name: Preserve every available publication receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-publication-${{ env.MERGED_SHA }}-attempt-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 90
+          path: |
+            ${{ runner.temp }}/release-stage-receipt.json
+            ${{ runner.temp }}/release-publication-receipt.json
+
+      - name: Preserve final publication facts in a custom attestation
+        if: ${{ always() && steps.finalize.outcome == 'success' }}
+        id: attest_publication
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          predicate-path: ${{ runner.temp }}/release-publication-receipt.json
+          predicate-type: https://github.com/farhaanlevy/symphony-studio/attestations/release-publication/v1
+          subject-path: ${{ runner.temp }}/release-assets/release-manifest.json
+
+      - name: Verify durable publication predicate
+        if: >-
+          ${{ always() && steps.finalize.outcome == 'success' &&
+              steps.attest_publication.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release/verify publication-attestation \
+            --subject "$RUNNER_TEMP/release-assets/release-manifest.json" \
+            --receipt "$RUNNER_TEMP/release-publication-receipt.json" \
+            --workflow-sha "$GITHUB_SHA"
+
+  action-required:
+    name: preserve action-required receipt
+    if: >-
+      ${{ always() &&
+          (needs.build.result == 'failure' || needs.build.result == 'cancelled' ||
+           needs.clean_install.result == 'failure' || needs.clean_install.result == 'cancelled' ||
+           needs.publish.result == 'failure' || needs.publish.result == 'cancelled') }}
+    needs:
+      - build
+      - clean_install
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      BUILD_RESULT: ${{ needs.build.result }}
+      CLEAN_INSTALL_RESULT: ${{ needs.clean_install.result }}
+      MERGED_SHA: ${{ inputs.merged_sha }}
+      PUBLISH_RESULT: ${{ needs.publish.result }}
+
+    steps:
+      - name: Create bounded action-required receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/release-action-required.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          value = {
+              "buildResult": os.environ["BUILD_RESULT"],
+              "cleanInstallResult": os.environ["CLEAN_INSTALL_RESULT"],
+              "kind": "release-action-required",
+              "mergedCommit": os.environ["MERGED_SHA"],
+              "publishResult": os.environ["PUBLISH_RESULT"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "status": "action-required",
+              "version": "v0.1.0",
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload action-required receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-action-required-${{ inputs.merged_sha }}-attempt-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 90
+          path: ${{ runner.temp }}/release-action-required.json

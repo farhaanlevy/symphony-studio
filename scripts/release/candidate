@@ -1,0 +1,9 @@
+#!/bin/sh
+# Copyright 2026 Symphony Studio contributors
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+if [ "${1:-}" = "reconcile" ]; then
+  shift
+  exec python3 "$(dirname "$0")/release.py" reconcile-pr "$@"
+fi
+exec python3 "$(dirname "$0")/release.py" candidate "$@"

@@ -5,6 +5,31 @@ defmodule SymphonyElixir.CLITest do
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
+  test "reports public build provenance after the installed runtime validates" do
+    assert {:print, output} = CLI.evaluate(["--version"], version_deps(:ok))
+    assert output =~ "Symphony 0.1.0-dev"
+    assert output =~ "commit: development"
+    assert output =~ "upstream-base: development"
+    assert output =~ "codex-compatibility-sha256: development"
+    assert output =~ "provenance: local-unverified"
+  end
+
+  test "fails closed when the installed runtime bundle is unavailable" do
+    assert {:error, message} =
+             CLI.evaluate(
+               ["--version"],
+               version_deps({:error, :release_runtime_bundle_unavailable})
+             )
+
+    assert message == "Installed Symphony runtime validation failed."
+    refute message =~ "release_runtime_bundle_unavailable"
+  end
+
+  test "rejects version when combined with runtime arguments" do
+    assert {:error, usage} = CLI.evaluate(["--version", "WORKFLOW.md"], version_deps(:ok))
+    assert usage =~ "Usage: symphony --version"
+  end
+
   test "returns the guardrails acknowledgement banner when the flag is missing" do
     parent = self()
 
@@ -135,5 +160,18 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+  end
+
+  defp version_deps(result) do
+    fail = fn -> flunk("version handling reached runtime dependencies") end
+
+    %{
+      file_regular?: fn _path -> fail.() end,
+      set_workflow_file_path: fn _path -> fail.() end,
+      set_logs_root: fn _path -> fail.() end,
+      set_server_port_override: fn _port -> fail.() end,
+      ensure_all_started: fail,
+      validate_release_runtime: fn -> result end
+    }
   end
 end

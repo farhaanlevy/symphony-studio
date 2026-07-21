@@ -3,10 +3,16 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
   """
 
-  alias SymphonyElixir.LogFile
+  alias SymphonyElixir.Codex.{CompatibilityCircuit, SchemaBundle}
+  alias SymphonyElixir.{LogFile, ReleaseInfo}
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
+  @switches [
+    {@acknowledgement_switch, :boolean},
+    logs_root: :string,
+    port: :integer,
+    version: :boolean
+  ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -14,7 +20,8 @@ defmodule SymphonyElixir.CLI do
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result())
+          ensure_all_started: (-> ensure_started_result()),
+          validate_release_runtime: (-> :ok | {:error, atom()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -23,33 +30,57 @@ defmodule SymphonyElixir.CLI do
       :ok ->
         wait_for_shutdown()
 
+      {:print, message} ->
+        IO.puts(message)
+        System.halt(0)
+
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
     end
   end
 
-  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
+  @spec evaluate([String.t()], deps()) :: :ok | {:print, String.t()} | {:error, String.t()}
   def evaluate(args, deps \\ runtime_deps()) do
     case OptionParser.parse(args, strict: @switches) do
-      {opts, [], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
-             :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
-        end
-
-      {opts, [workflow_path], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
-             :ok <- maybe_set_server_port(opts, deps) do
-          run(workflow_path, deps)
-        end
+      {opts, paths, []} ->
+        evaluate_parsed(opts, paths, deps)
 
       _ ->
         {:error, usage_message()}
     end
   end
+
+  defp evaluate_parsed([version: true], [], deps) do
+    case deps.validate_release_runtime.() do
+      :ok -> {:print, ReleaseInfo.format()}
+      {:error, _reason} -> {:error, "Installed Symphony runtime validation failed."}
+    end
+  end
+
+  defp evaluate_parsed(opts, paths, deps) do
+    if Keyword.has_key?(opts, :version),
+      do: {:error, usage_message()},
+      else: evaluate_runtime(opts, paths, deps)
+  end
+
+  defp evaluate_runtime(opts, [], deps) do
+    with :ok <- require_guardrails_acknowledgement(opts),
+         :ok <- maybe_set_logs_root(opts, deps),
+         :ok <- maybe_set_server_port(opts, deps) do
+      run(Path.expand("WORKFLOW.md"), deps)
+    end
+  end
+
+  defp evaluate_runtime(opts, [workflow_path], deps) do
+    with :ok <- require_guardrails_acknowledgement(opts),
+         :ok <- maybe_set_logs_root(opts, deps),
+         :ok <- maybe_set_server_port(opts, deps) do
+      run(workflow_path, deps)
+    end
+  end
+
+  defp evaluate_runtime(_opts, _paths, _deps), do: {:error, usage_message()}
 
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
   def run(workflow_path, deps) do
@@ -72,7 +103,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony --version | symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
   end
 
   @spec runtime_deps() :: deps()
@@ -82,8 +113,28 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
-      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
+      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
+      validate_release_runtime: &validate_release_runtime/0
     }
+  end
+
+  defp validate_release_runtime do
+    with {:ok, manifest} <- SchemaBundle.manifest(),
+         {:ok, %{"methods" => methods}} when is_list(methods) <- SchemaBundle.matrix(),
+         {:ok, %{"title" => "InitializeParams"}} <-
+           SchemaBundle.schema("json/v1/InitializeParams.json"),
+         {:ok, compatibility} <- SchemaBundle.compatibility_status(),
+         "pass" <- compatibility["overall"],
+         "pass" <- compatibility["transportConformance"],
+         artifact_hash when is_binary(artifact_hash) <-
+           get_in(manifest, ["artifacts", "artifactBundleSha256"]),
+         ^artifact_hash <- ReleaseInfo.as_map()["codexCompatibilitySha256"],
+         {:ok, identity} <- CompatibilityCircuit.current_identity(),
+         "pass" <- identity.transport_conformance do
+      :ok
+    else
+      _reason -> {:error, :release_runtime_bundle_unavailable}
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do

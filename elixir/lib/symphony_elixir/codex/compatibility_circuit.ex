@@ -83,12 +83,10 @@ defmodule SymphonyElixir.Codex.CompatibilityCircuit do
   @doc "Returns the schema and compatibility-manifest identity used by the circuit."
   @spec current_identity(keyword()) :: {:ok, identity()} | {:error, atom()}
   def current_identity(opts \\ []) when is_list(opts) do
-    manifest_path = Keyword.get(opts, :manifest_path, default_manifest_path())
     schema_version = Keyword.get(opts, :schema_version, SchemaBundle.version())
 
-    with true <- is_binary(manifest_path) and manifest_path != "",
-         true <- is_binary(schema_version) and schema_version != "",
-         {:ok, manifest_bytes} <- File.read(manifest_path),
+    with true <- is_binary(schema_version) and schema_version != "",
+         {:ok, manifest_bytes} <- manifest_bytes(opts),
          {:ok, manifest} when is_map(manifest) <- Jason.decode(manifest_bytes),
          codex_version when is_binary(codex_version) and codex_version != "" <-
            get_in(manifest, ["codex", "version"]),
@@ -107,8 +105,17 @@ defmodule SymphonyElixir.Codex.CompatibilityCircuit do
     end
   end
 
-  defp default_manifest_path do
-    Path.join(SchemaBundle.bundle_path(), "manifest.json")
+  defp manifest_bytes(opts) do
+    case Keyword.fetch(opts, :manifest_path) do
+      :error ->
+        SchemaBundle.manifest_bytes()
+
+      {:ok, path} when is_binary(path) and path != "" ->
+        File.read(path)
+
+      {:ok, _invalid} ->
+        {:error, :invalid_manifest_path}
+    end
   end
 
   defp marker_from_identity(identity) do

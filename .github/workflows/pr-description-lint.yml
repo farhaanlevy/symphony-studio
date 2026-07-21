@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   validate-pr-description:
+    name: pr-description-lint
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -25,14 +26,16 @@ jobs:
         with:
           install: true
           cache: true
+          sha256: d31578a16ae2708385249b439c95533068e04b9507a118e905aa6768905671fc
+          version: 2026.7.11
           working_directory: elixir
 
       - name: Validate PR description format
         env:
           PR_BODY_JSON: ${{ toJson(github.event.pull_request.body) }}
         run: |
-          mix local.hex --force
-          mix local.rebar --force
-          mix deps.get
+          mix local.hex 2.4.2 --force
+          mix local.rebar --force --sha512 992fd755b7926fae455e5e07d9d195f4d3e7f181609eed1b9cabfe548624df10d148cd4b59bda40bebb185d3d68f9a9fd68a70b294101c8ad9cf0fadcc683d24
+          mix deps.get --check-locked
           printf '%s' "$PR_BODY_JSON" | jq -r '.' > /tmp/pr_body.md
           mix pr_body.check --file /tmp/pr_body.md

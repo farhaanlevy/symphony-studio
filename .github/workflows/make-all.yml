@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   make-all:
     runs-on: ubuntu-latest
@@ -16,12 +19,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up mise tools
         uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
         with:
           install: true
           cache: true
+          sha256: d31578a16ae2708385249b439c95533068e04b9507a118e905aa6768905671fc
+          version: 2026.7.11
           working_directory: elixir
 
       - name: Cache deps and build
@@ -33,6 +40,14 @@ jobs:
           key: ${{ runner.os }}-mix-${{ hashFiles('elixir/mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-mix-
+
+      - name: Install exact Codex compatibility pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global --prefix "$RUNNER_TEMP/codex-pin" @openai/codex@0.144.3
+          printf '%s\n' "$RUNNER_TEMP/codex-pin/bin" >> "$GITHUB_PATH"
+          test "$("$RUNNER_TEMP/codex-pin/bin/codex" --version)" = "codex-cli 0.144.3"
 
       - name: Verify make all
         run: make all

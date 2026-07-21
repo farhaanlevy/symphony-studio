@@ -6,6 +6,7 @@ scripts/codex_schema_matrix.json text eol=lf
 
 # Accept known legacy whitespace in byte-exact upstream erlexec files.
 # Downstream-authored and patched vendor files remain under normal checks.
+THIRD_PARTY_NOTICES.txt -whitespace
 elixir/vendor/erlexec/LICENSE -whitespace
 elixir/vendor/erlexec/c_src/ei++.cpp -whitespace
 elixir/vendor/erlexec/c_src/ei++.hpp -whitespace
