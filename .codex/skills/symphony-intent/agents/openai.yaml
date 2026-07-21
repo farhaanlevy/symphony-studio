@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Intent"
+  short_description: "Plan and publish approved Symphony backlogs"
+  default_prompt: "Use $symphony-intent to turn this product intent into an approved, dependency-aware Symphony backlog."

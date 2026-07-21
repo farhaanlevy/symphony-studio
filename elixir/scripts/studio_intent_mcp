@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$SCRIPT_DIR/.."
+
+APP_EBIN="$SCRIPT_DIR/../_build/dev/lib/symphony_elixir/ebin"
+
+if [ ! -f "$APP_EBIN/Elixir.SymphonyElixir.Studio.Intent.MCPServer.beam" ]; then
+  echo "studio_intent_mcp: compile first with 'mise exec -- mix compile'" >&2
+  exit 78
+fi
+
+export ERL_LIBS="$SCRIPT_DIR/../_build/dev/lib${ERL_LIBS:+:$ERL_LIBS}"
+
+exec mise exec -- elixir \
+  -e 'System.halt(SymphonyElixir.Studio.Intent.MCPServer.main(System.argv()))' \
+  -- "$@"
