@@ -1,6 +1,9 @@
 defmodule SymphonyElixirWeb.StudioDataPortTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.{Event, EventSink, Identity}
+  alias SymphonyElixir.EventSink.Memory
+  alias SymphonyElixir.Studio.Intent.Store
   alias SymphonyElixirWeb.RuntimeStudioDataPort
 
   defmodule StaticOrchestrator do
@@ -147,6 +150,111 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     assert page.outcome.reason =~ "does not include checks"
   end
 
+  test "projects contract and completion only from the admitted intent and complete structured proof" do
+    root = Path.join(System.tmp_dir!(), "studio-data-port-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    {:ok, store} = Store.open(root: root)
+    run_id = Identity.uuid4()
+    attempt_id = Identity.uuid4()
+
+    intent = %{
+      "schema_version" => 1,
+      "intent_id" => "intent_authoritative_run",
+      "source" => %{"content" => "Fallback source objective"},
+      "proposal" => %{
+        "tasks" => [
+          %{
+            "id" => "task-visible-change",
+            "title" => "Expose the truthful Run Detail outcome",
+            "acceptance_criteria" => ["Checks, review, and evidence are visible"],
+            "source_refs" => ["elixir/lib/symphony_elixir_web/studio_data_port.ex"]
+          }
+        ]
+      },
+      "start" => %{
+        "task_id" => "task-visible-change",
+        "issue_id" => "issue-authoritative",
+        "issue_identifier" => "SYM-99"
+      },
+      "admission" => %{"run_id" => run_id, "attempt_id" => attempt_id}
+    }
+
+    assert {:ok, ^intent, :created} = Store.create_intent(store, intent)
+
+    sink = start_supervised!({Memory, []})
+    target = {Memory, sink}
+
+    events = [
+      event(run_id, attempt_id, 1, "quality.check.completed", %{
+        "check_id" => "targeted",
+        "command" => "mix test test/symphony_elixir_web/studio_data_port_test.exs",
+        "status" => "passed"
+      }),
+      event(run_id, attempt_id, 2, "review.completed", %{
+        "status" => "passed",
+        "detached" => true,
+        "source_revision" => String.duplicate("a", 40)
+      }),
+      event(run_id, attempt_id, 3, "evidence.sealed", %{
+        "manifest_hash" => "sha256:" <> String.duplicate("b", 64),
+        "current" => true,
+        "sealed" => true
+      }),
+      event(run_id, attempt_id, 4, "delivery.recorded", %{"commit" => String.duplicate("c", 40)}),
+      event(run_id, attempt_id, 5, "tracker.handoff.confirmed", %{"status" => "confirmed"}),
+      event(run_id, attempt_id, 6, "run.completed", %{"status" => "completed"})
+    ]
+
+    Enum.each(events, fn item -> assert {:ok, :appended} = EventSink.append(target, item) end)
+
+    orchestrator = Module.concat(__MODULE__, :AuthoritativeOrchestrator)
+
+    start_supervised!(
+      {StaticOrchestrator,
+       name: orchestrator,
+       snapshot: %{
+         running: [
+           running_entry()
+           |> Map.merge(%{
+             issue_id: "issue-authoritative",
+             identifier: "SYM-99",
+             run_id: run_id,
+             attempt_id: attempt_id
+           })
+         ],
+         blocked: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 21, output_tokens: 13, total_tokens: 34, seconds_running: 60},
+         rate_limits: nil
+       }}
+    )
+
+    configure_endpoint(
+      orchestrator: orchestrator,
+      snapshot_timeout_ms: 100,
+      studio_intent_data_root: root,
+      studio_event_sink: target
+    )
+
+    assert {:ok, page} = RuntimeStudioDataPort.load(:run_detail, %{"run_id" => run_id})
+    assert page.run.objective == "Expose the truthful Run Detail outcome"
+    assert page.acceptance_criteria == ["Checks, review, and evidence are visible"]
+    assert page.checks |> List.first() |> Map.fetch!(:status) == :passed
+
+    assert page.review == %{
+             status: :passed,
+             detached: true,
+             findings: [],
+             source_revision: String.duplicate("a", 40),
+             completed_at: "2026-07-21T12:00:00.000Z"
+           }
+
+    assert page.outcome.status == :complete
+    assert page.run.state == :completed
+    assert page.run.phase == :outcome
+  end
+
   test "Setup reads the sealed readiness artifact and fails closed for changed source" do
     assert {:ok, page} = RuntimeStudioDataPort.load(:setup, %{})
     assert page.kind == :setup
@@ -264,5 +372,21 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
       last_event_sequence: 2,
       last_event_type: "retry.scheduled"
     }
+  end
+
+  defp event(run_id, attempt_id, sequence, type, payload) do
+    Event.new!(%{
+      sequence: sequence,
+      occurred_at: ~U[2026-07-21 12:00:00.000Z],
+      issue_id: "issue-authoritative",
+      issue_identifier: "SYM-99",
+      run_id: run_id,
+      attempt_id: attempt_id,
+      thread_id: "thread-authoritative",
+      turn_id: "turn-authoritative",
+      type: type,
+      severity: "info",
+      payload: payload
+    })
   end
 end
