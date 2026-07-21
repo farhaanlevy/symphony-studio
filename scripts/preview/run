@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Symphony Studio Build Week Preview owner and verification entrypoint."""
+
+from __future__ import annotations
+
+from preview_cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

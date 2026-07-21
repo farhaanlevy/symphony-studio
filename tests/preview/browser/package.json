@@ -1,0 +1,19 @@
+{
+  "name": "symphony-studio-preview-browser-verification",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "install-browser": "playwright install chromium",
+    "list": "playwright test --list",
+    "test": "playwright test --workers=1 --retries=0",
+    "test:contract": "playwright test --project=harness-contract --workers=1 --retries=0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1",
+    "pngjs": "7.0.0"
+  }
+}
