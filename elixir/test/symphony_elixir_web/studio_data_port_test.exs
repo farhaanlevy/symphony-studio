@@ -23,7 +23,10 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
   end
 
   defmodule StaticIntentService do
-    def get_intent_status("intent-errors", []), do: {:ok, snapshot()}
+    def get_intent_status("intent-errors", opts) do
+      send(self(), {:static_intent_service_options, opts})
+      {:ok, snapshot()}
+    end
 
     defp snapshot do
       problem = %{"code" => "linear_timeout", "message" => "Linear confirmation timed out.", "resumable" => true}
@@ -278,6 +281,10 @@ defmodule SymphonyElixirWeb.StudioDataPortTest do
     configure_endpoint(studio_intent_service: StaticIntentService)
 
     assert {:ok, page} = RuntimeStudioDataPort.load(:new_work, %{"intent" => "intent-errors"})
+    assert_receive {:static_intent_service_options, opts}
+
+    assert {SymphonyElixir.Studio.LinearWriteBroker.Linear, %SymphonyElixir.Studio.LinearWriteBroker.Linear{}} = Keyword.fetch!(opts, :broker)
+
     assert page.publication.status == "partial"
 
     assert [task] = page.publication.tasks

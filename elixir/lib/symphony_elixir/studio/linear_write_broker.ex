@@ -3,12 +3,12 @@
 
 defmodule SymphonyElixir.Studio.LinearWriteBroker do
   @moduledoc """
-  Least-privilege boundary for future Linear backlog writes.
+  Least-privilege boundary for Symphony Studio Linear backlog writes.
 
-  The existing Symphony credential remains query-only. This boundary has no
-  network implementation and defaults to `Unavailable`. A real adapter must be
-  supplied later with a separate least-privilege key, exact idempotency-marker
-  reconciliation, and the same typed contract. SYM-1 and SYM-2 are denied both
+  The existing Symphony credential remains query-only. The boundary defaults
+  to `Unavailable`; production entrypoints explicitly inject the protected
+  `Linear` adapter, which requires a separate least-privilege key and performs
+  exact idempotency-marker reconciliation. SYM-1 and SYM-2 are denied both
   before delegation and on adapter responses.
   """
 

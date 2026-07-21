@@ -38,6 +38,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
 
   alias SymphonyElixir.{Config, Event, EventSink}
   alias SymphonyElixir.Studio.Intent.Store
+  alias SymphonyElixir.Studio.LinearWriteBroker.Linear
   alias SymphonyElixirWeb.{Endpoint, Presenter}
 
   @intent_service SymphonyElixir.Studio.IntentService
@@ -602,7 +603,8 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
         }
 
       missing ->
-        %{status: :incomplete, reason: "Incomplete: " <> (missing |> Enum.map(&elem(&1, 1)) |> Enum.join("; ")) <> "."}
+        reason = Enum.map_join(missing, "; ", &elem(&1, 1))
+        %{status: :incomplete, reason: "Incomplete: " <> reason <> "."}
     end
   end
 
@@ -1443,10 +1445,13 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
   end
 
   defp intent_service_options do
-    case intent_data_root() do
-      root when is_binary(root) -> [data_root: root]
-      nil -> []
-    end
+    data_options =
+      case intent_data_root() do
+        root when is_binary(root) -> [data_root: root]
+        nil -> []
+      end
+
+    Keyword.put(data_options, :broker, web_config(:studio_linear_write_broker, Linear.target()))
   end
 
   defp intent_data_root do

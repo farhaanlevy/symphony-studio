@@ -110,28 +110,39 @@ defmodule SymphonyElixir.Application do
         {:ok, []}
 
       root when is_binary(root) and root != "" ->
-        if Path.type(root) == :absolute do
-          with {:ok, store} <- Store.open(root: Path.join(root, "intent")) do
-            {children, downstream} = preview_event_downstream()
-            target = AdmissionSink.target(store, downstream)
-            Application.put_env(:symphony_elixir, :event_sink, target)
-            {:ok, children}
-          end
-        else
-          {:error, :invalid_preview_data_root}
-        end
+        open_preview_children(root)
 
       _invalid ->
         {:error, :invalid_preview_data_root}
     end
   end
 
+  defp open_preview_children(root) do
+    with :absolute <- Path.type(root),
+         {:ok, store} <- Store.open(root: Path.join(root, "intent")) do
+      {children, downstream} = preview_event_downstream()
+      target = AdmissionSink.target(store, downstream)
+      Application.put_env(:symphony_elixir, :event_sink, target)
+      {:ok, children}
+    else
+      {:error, _reason} = error -> error
+      _invalid -> {:error, :invalid_preview_data_root}
+    end
+  end
+
   defp preview_event_downstream do
     case Application.get_env(:symphony_elixir, :event_sink, Noop) do
       downstream when downstream in [nil, Noop] ->
+        memory_opts = [
+          name: @preview_event_sink,
+          max_runs: 128,
+          max_events_per_run: 512,
+          max_dedup_entries_per_run: 1_024
+        ]
+
         child =
           Supervisor.child_spec(
-            {Memory, name: @preview_event_sink, max_runs: 128, max_events_per_run: 512, max_dedup_entries_per_run: 1_024},
+            {Memory, memory_opts},
             id: @preview_event_sink
           )
 
