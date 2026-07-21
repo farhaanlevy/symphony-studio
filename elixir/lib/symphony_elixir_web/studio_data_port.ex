@@ -474,7 +474,7 @@ defmodule SymphonyElixirWeb.RuntimeStudioDataPort do
       clarifications
       |> Map.get("questions", [])
       |> list_of_maps()
-      |> Enum.take(3)
+      |> Enum.take(2)
       |> Enum.map(fn question ->
         %{
           id: question["id"],

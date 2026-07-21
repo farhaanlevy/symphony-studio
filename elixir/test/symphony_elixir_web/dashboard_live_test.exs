@@ -300,7 +300,7 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
   end
 
   test "Mission Control leads with the active operational object and genuine usage" do
-    {:ok, _view, html} = live(build_conn(), "/")
+    {:ok, _view, html} = live(build_conn(), "/mission-control")
 
     assert html =~ "Mission Control"
     assert html =~ "STUDIO-201"

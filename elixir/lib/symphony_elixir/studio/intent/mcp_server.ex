@@ -364,7 +364,7 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
       tool(
         "studio_present_proposal",
         "Present Proposal",
-        "Explicitly present the current 3-8 task DAG and immutable proposal digest before any publication approval.",
+        "Explicitly present the current 3-5 task DAG and immutable proposal digest before any publication approval.",
         intent_command_schema(),
         local_annotations()
       ),

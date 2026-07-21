@@ -546,7 +546,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       >
         <div class="section-heading">
           <div><p class="section-kicker">2 · Clarify</p><h2 id="questions-title">Material questions</h2></div>
-          <span class="count-label">{length(@page.clarifications.questions)} of 3 maximum</span>
+          <span class="count-label">{length(@page.clarifications.questions)} of 2 maximum</span>
         </div>
         <form phx-submit="answer_questions" class="questions-form">
           <fieldset :for={{question, index} <- Enum.with_index(@page.clarifications.questions)}>

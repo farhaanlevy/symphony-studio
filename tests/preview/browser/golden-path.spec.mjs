@@ -20,7 +20,7 @@ test("owner intent reaches an evidence-backed completed run through real service
     )
     .toBeGreaterThan(0);
   const questionCount = await questions.count();
-  expect(questionCount).toBeLessThanOrEqual(3);
+  expect(questionCount).toBeLessThanOrEqual(2);
   for (let index = 0; index < questionCount; index += 1) {
     const question = questions.nth(index);
     const recommended = question.locator('[data-recommended="true"]');
@@ -34,7 +34,7 @@ test("owner intent reaches an evidence-backed completed run through real service
   await expect(tasks.first()).toBeVisible({ timeout: 120_000 });
   const taskCount = await tasks.count();
   expect(taskCount).toBeGreaterThanOrEqual(3);
-  expect(taskCount).toBeLessThanOrEqual(8);
+  expect(taskCount).toBeLessThanOrEqual(5);
   await expect(page.getByTestId("proposal-side-effects")).toContainText(/Linear|Backlog/);
 
   const proposal = await readProbe(page);
@@ -43,8 +43,8 @@ test("owner intent reaches an evidence-backed completed run through real service
   expect(proposal.intent.mutationAudit).toMatchObject({ linearMutations: 0 });
   await captureEvidence(page, testInfo, "proposal-before-approval", {
     acceptanceCriterion: "The owner sees scope and side effects before external mutation",
-    assertions: ["3-8 tasks", "zero confirmed writes", "explicit approval"],
-    interactions: ["entered intent", "answered at most three clarifications"],
+    assertions: ["3-5 tasks", "zero confirmed writes", "explicit approval"],
+    interactions: ["entered intent", "answered at most two clarifications"],
   });
 
   const approve = page.getByRole("button", { name: "Approve and publish" });

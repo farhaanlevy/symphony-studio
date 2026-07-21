@@ -7,16 +7,16 @@ defmodule SymphonyElixir.Studio.Intent.Planner do
 
   This is deliberately a thin plan constructor, not a model substitute. It
   exposes ambiguity, grounds the proposal in the bounded repository inventory,
-  and produces a valid 3-8 task DAG that a future Planner Conductor can replace
+  and produces a valid 3-5 task DAG that a future Planner Conductor can replace
   without changing approval, publication, or admission contracts.
   """
 
   alias SymphonyElixir.Studio.Intent.Canonical
 
-  @max_questions 3
-  @max_tasks 8
+  @max_questions 2
+  @max_tasks 5
 
-  @doc "Builds one batched set of at most three high-value clarification questions."
+  @doc "Builds one batched set of at most two high-value clarification questions."
   @spec questions(map(), map()) :: [map()]
   def questions(%{"content" => content}, inspection)
       when is_binary(content) and is_map(inspection) do
@@ -39,7 +39,7 @@ defmodule SymphonyElixir.Studio.Intent.Planner do
     end)
   end
 
-  @doc "Builds a deterministic 3-8 task proposal and its content digest."
+  @doc "Builds a deterministic 3-5 task proposal and its content digest."
   @spec propose(map(), map(), map()) :: map()
   def propose(%{"content" => content} = source, inspection, answers)
       when is_binary(content) and is_map(inspection) and is_map(answers) do

@@ -100,7 +100,7 @@ as passing.
 
 ### One explicitly authorized live golden path
 
-The live mode publishes the approved 3-8 task proposal and starts its first
+The live mode publishes the approved 3-5 task proposal and starts its first
 ready task. Run it only with the dedicated, separately scoped preview-write
 authority and the exact acknowledgement:
 
@@ -116,8 +116,8 @@ authority and the exact acknowledgement:
 The test proves this order from the authoritative Studio projection:
 
 1. inspect the current project and submit the safe owner-intent fixture;
-2. answer no more than three high-value questions;
-3. inspect 3-8 proposed tasks and side effects with zero Linear writes;
+2. answer no more than two high-value questions;
+3. inspect 3-5 proposed tasks and side effects with zero Linear writes;
 4. explicitly approve duplicate-free, idempotent Backlog publication;
 5. start the first ready task and observe Symphony admission;
 6. observe an isolated GPT-5.6 Sol Ultra run in Mission Control and Run Detail;
@@ -191,8 +191,8 @@ Linear credential and performs zero external mutation.
 - Setup truthfully identifies the repository, dedicated Linear project, Codex
   authentication, pinned compatibility, GPT-5.6 Sol Ultra policy, and any
   blocker. A missing dependency does not render as ready.
-- New Work accepts the Markdown intent, asks at most three useful questions,
-  shows 3-8 tasks and exact side effects, and performs no write before approval.
+- New Work accepts the Markdown intent, asks at most two useful questions,
+  shows 3-5 tasks and exact side effects, and performs no write before approval.
 - Reloading or repeating approval does not duplicate Linear issues.
 - The first published issue begins in Backlog and moves into Symphony admission
   only after the explicit Start action.

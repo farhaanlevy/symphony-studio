@@ -28,6 +28,7 @@ defmodule SymphonyElixirWeb.Router do
 
     live_session :studio_workbench do
       live("/", DashboardLive, :mission_control)
+      live("/mission-control", DashboardLive, :mission_control)
       live("/setup", DashboardLive, :setup)
       live("/work/new", DashboardLive, :new_work)
       live("/runs/:run_id", DashboardLive, :run_detail)

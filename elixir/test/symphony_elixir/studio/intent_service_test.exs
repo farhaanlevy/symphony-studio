@@ -48,7 +48,7 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
       )
 
     assert submitted["lifecycle_state"] == "clarification_required"
-    assert length(submitted["clarifications"]["questions"]) in 1..3
+    assert length(submitted["clarifications"]["questions"]) in 1..2
     intent_id = submitted["intent_id"]
 
     {:ok, proposed} =
@@ -60,7 +60,7 @@ defmodule SymphonyElixir.Studio.IntentServiceTest do
       )
 
     assert proposed["lifecycle_state"] == "proposal_ready"
-    assert length(proposed["proposal"]["tasks"]) in 3..8
+    assert length(proposed["proposal"]["tasks"]) in 3..5
     assert_acyclic(proposed["proposal"]["tasks"])
 
     {:ok, presented} = IntentService.present_proposal(intent_id, "present-1", opts)
