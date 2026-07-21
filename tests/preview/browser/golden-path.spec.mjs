@@ -9,8 +9,8 @@ test("owner intent reaches an evidence-backed completed run through real service
 
   await page.goto("/work/new");
   await expect(page.getByRole("heading", { name: "New Work", level: 1 })).toBeVisible();
-  await page.getByLabel("Describe the work").fill(readOwnerIntent());
-  await page.getByRole("button", { name: "Inspect project" }).click();
+  await page.getByLabel("Work request").fill(readOwnerIntent());
+  await page.getByRole("button", { name: "Inspect and plan" }).click();
 
   const questions = page.getByTestId("clarification-question");
   await expect
@@ -21,14 +21,10 @@ test("owner intent reaches an evidence-backed completed run through real service
     .toBeGreaterThan(0);
   const questionCount = await questions.count();
   expect(questionCount).toBeLessThanOrEqual(2);
-  for (let index = 0; index < questionCount; index += 1) {
-    const question = questions.nth(index);
-    const recommended = question.locator('[data-recommended="true"]');
-    await expect(recommended, "each clarification needs a recommended answer").toHaveCount(1);
-    await recommended.check();
+  if (questionCount > 0) {
+    await expect(page.locator(".recommended-answer")).toHaveCount(questionCount);
+    await page.getByRole("button", { name: "Use recommended defaults" }).click();
   }
-  const continueButton = page.getByRole("button", { name: "Continue" });
-  if (questionCount > 0 && (await continueButton.isVisible())) await continueButton.click();
 
   const tasks = page.getByTestId("proposal-task");
   await expect(tasks.first()).toBeVisible({ timeout: 120_000 });
@@ -47,9 +43,11 @@ test("owner intent reaches an evidence-backed completed run through real service
     interactions: ["entered intent", "answered at most two clarifications"],
   });
 
-  const approve = page.getByRole("button", { name: "Approve and publish" });
-  await approve.click();
-  await expect(approve).toBeDisabled();
+  await page.getByRole("button", { name: "Review final proposal" }).click();
+  await page.getByRole("button", { name: "Approve Backlog publication" }).click();
+  const publish = page.getByRole("button", { name: "Publish approved tasks" });
+  await publish.click();
+  await expect(publish).toBeDisabled();
   const published = await waitForProbe(
     page,
     (value) => value.intent?.publication?.status === "confirmed",

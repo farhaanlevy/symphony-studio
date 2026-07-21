@@ -309,6 +309,8 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "Tokens used"
     assert html =~ "1,500"
     assert html =~ "View run"
+    assert html =~ ~s(data-testid="connection-state")
+    assert html =~ ~s(data-testid="mission-run")
     assert html =~ ~s(aria-label="Open STUDIO-201 in the issue tracker")
     refute html =~ "hero-card"
     refute html =~ "% complete"
@@ -322,6 +324,9 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "GPT-5.6 Sol"
     assert html =~ "Ultra reasoning verified"
     assert html =~ "Credentials stay private"
+    assert html =~ ~s(data-testid="setup-readiness")
+    assert html =~ ~s(data-testid="setup-repository")
+    assert html =~ ~s(data-testid="setup-model-policy")
     refute html =~ "API key"
   end
 
@@ -331,6 +336,8 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "No Linear mutation has occurred."
     assert html =~ "Approve Backlog publication"
     assert html =~ "3 proposed tasks"
+    assert html =~ ~s(data-testid="proposal-side-effects")
+    assert html =~ ~s(data-testid="proposal-task")
 
     html =
       view
@@ -367,6 +374,15 @@ defmodule SymphonyElixirWeb.DashboardLiveTest do
     assert html =~ "Tests failed: 1 failure"
     assert html =~ "Independent review"
     assert html =~ "Not run"
+    assert html =~ ~s(data-testid="run-truth-state")
+    assert html =~ ~s(data-testid="run-next-action")
+    assert html =~ ~s(data-testid="run-objective")
+    assert html =~ ~s(data-testid="run-acceptance")
+    assert html =~ ~s(data-testid="run-plan")
+    assert html =~ ~s(data-testid="run-checks")
+    assert html =~ ~s(data-testid="run-independent-review")
+    assert html =~ ~s(data-testid="run-outcome")
+    assert html =~ ~s(data-testid="run-completion-reason")
 
     {outcome_index, _} = :binary.match(html, "Evidence and outcome")
     {activity_index, _} = :binary.match(html, "Meaningful events")

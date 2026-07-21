@@ -59,12 +59,12 @@ test("browser disconnect shows reconnecting and replays authoritative state", as
   test.skip(!handoff, "BLOCKED: no authoritative preview run handoff exists");
   browserAudit.allowExpectedNetworkFailures();
   await page.goto("/mission-control");
-  await expect(page.getByTestId("connection-state")).toHaveText("Live");
+  await expect(page.getByTestId("connection-state").locator(".status-badge-live")).toBeVisible();
   const before = await readProbe(page);
   await context.setOffline(true);
-  await expect(page.getByTestId("connection-state")).toHaveText("Reconnecting");
+  await expect(page.getByTestId("connection-state").locator(".status-badge-offline")).toBeVisible();
   await context.setOffline(false);
-  await expect(page.getByTestId("connection-state")).toHaveText("Live", { timeout: 30_000 });
+  await expect(page.getByTestId("connection-state").locator(".status-badge-live")).toBeVisible({ timeout: 30_000 });
   const after = await readProbe(page);
   expect(after.sequence).toBeGreaterThanOrEqual(before.sequence);
   expect(after.run.runId).toBe(handoff.runId);

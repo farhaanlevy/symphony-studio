@@ -168,7 +168,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </details>
 
         <div class="topbar-truth">
-          <div class="connection-state" role="status" aria-live="polite">
+          <div class="connection-state" role="status" aria-live="polite" data-testid="connection-state">
             <span class="status-badge status-badge-live"><span aria-hidden="true">●</span> Live</span>
             <span class="status-badge status-badge-offline"><span aria-hidden="true">◇</span> Offline · reconnecting</span>
           </div>
@@ -251,7 +251,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </header>
 
       <%= if @page.active_run do %>
-        <article class={active_run_class(@page.active_run.state)} aria-labelledby="active-run-title">
+        <article class={active_run_class(@page.active_run.state)} aria-labelledby="active-run-title" data-testid="mission-run">
           <div class="active-run-main">
             <div class="object-heading">
               <div>
@@ -350,7 +350,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <span class="count-label numeric">{length(@other_runs)} runs</span>
         </div>
         <div class="run-list">
-          <article :for={run <- @other_runs} class="run-row">
+          <article :for={run <- @other_runs} class="run-row" data-testid="mission-run">
             <div class="run-row-identity">
               <span class="object-id mono">{run.issue_identifier}</span>
               <strong>{run.objective}</strong>
@@ -395,7 +395,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <button type="button" class="button secondary" phx-click="refresh_page">Check again</button>
       </header>
 
-      <section class={setup_verdict_class(@page.verdict)} aria-labelledby="readiness-title">
+      <section class={setup_verdict_class(@page.verdict)} aria-labelledby="readiness-title" data-testid="setup-readiness">
         <div class="verdict-symbol" aria-hidden="true">{if(@page.verdict == :ready, do: "✓", else: "!")}</div>
         <div>
           <p class="section-kicker">Readiness verdict</p>
@@ -420,7 +420,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <span role="columnheader">Checked value</span>
             <span role="columnheader">Recovery</span>
           </div>
-          <article :for={row <- @page.rows} class="readiness-row" role="row">
+          <article :for={row <- @page.rows} class="readiness-row" role="row" data-testid={setup_test_id(row.system)}>
             <div role="cell"><strong>{row.system}</strong><span>{row.label}</span></div>
             <div role="cell"><.state_badge state={row.state} label={row.state_label} /></div>
             <div role="cell"><strong class="mono">{row.value}</strong><span>{format_timestamp(row.checked_at)}</span></div>
@@ -549,7 +549,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <span class="count-label">{length(@page.clarifications.questions)} of 2 maximum</span>
         </div>
         <form phx-submit="answer_questions" class="questions-form">
-          <fieldset :for={{question, index} <- Enum.with_index(@page.clarifications.questions)}>
+          <fieldset :for={{question, index} <- Enum.with_index(@page.clarifications.questions)} data-testid="clarification-question">
             <legend><span class="mono">Q{index + 1}</span> {question.prompt}</legend>
             <p :if={question.impact}>{question.impact}</p>
             <label class="field">
@@ -586,7 +586,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </div>
 
       <div class="proposal-list">
-        <article :for={task <- @page.proposal.tasks} class="proposal-task">
+        <article :for={task <- @page.proposal.tasks} class="proposal-task" data-testid="proposal-task">
           <div class="task-position mono">{task.position || "–"}</div>
           <div>
             <h3>{task.title}</h3>
@@ -601,7 +601,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </article>
       </div>
 
-      <div class="mutation-boundary">
+      <div class="mutation-boundary" data-testid="proposal-side-effects">
         <div>
           <strong>No Linear mutation has occurred.</strong>
           <span>This proposal is bound to digest <span class="mono">{short_value(@page.proposal.digest)}</span>.</span>
@@ -717,7 +717,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     assigns = assign(assigns, :terminal, terminal_run?(assigns.page))
 
     ~H"""
-    <div class="page-stack run-detail-page">
+    <div class="page-stack run-detail-page" data-testid="run-truth-state" data-state={@page.run.state}>
       <header class="run-header">
         <div>
           <.link class="back-link" navigate="/">← Mission Control</.link>
@@ -735,7 +735,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
       </header>
 
-      <section class={decision_banner_class(@page.run.state)} aria-labelledby="run-next-action">
+      <section class={decision_banner_class(@page.run.state)} aria-labelledby="run-next-action" data-testid="run-next-action">
         <div><p class="section-kicker">{if(@page.run.blocker, do: "Blocker", else: "Next action")}</p><h2 id="run-next-action">{decision_heading(@page.run)}</h2></div>
         <p>{@page.run.blocker || @page.run.next_action}</p>
         <div class="button-row">
@@ -761,7 +761,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
       <.outcome_section :if={@terminal} page={@page} />
 
-      <nav class="phase-rail" aria-label="Run phases">
+      <nav class="phase-rail" aria-label="Run phases" data-testid="run-phase">
         <ol>
           <li :for={phase <- @page.run.phase_rail} class={phase_status_class(phase.status)} aria-current={if(phase.status == :active, do: "step")}>
             <span class="phase-mark" aria-hidden="true">{phase_symbol(phase.status)}</span>
@@ -772,17 +772,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
       <div class="run-content-grid">
         <div class="run-evidence-column">
-          <section class="section-block" aria-labelledby="objective-title">
+          <section class="section-block" aria-labelledby="objective-title" data-testid="run-objective">
             <div class="section-heading"><div><p class="section-kicker">Contract</p><h2 id="objective-title">Objective</h2></div></div>
             <p class="lead-copy">{@page.run.objective}</p>
             <h3>Acceptance criteria</h3>
-            <ul :if={@page.acceptance_criteria != []} class="criteria-list">
-              <li :for={criterion <- @page.acceptance_criteria}>{criterion}</li>
-            </ul>
-            <p :if={@page.acceptance_criteria == []} class="unavailable-copy">Not recorded by the current runtime projection.</p>
+            <div data-testid="run-acceptance">
+              <ul :if={@page.acceptance_criteria != []} class="criteria-list">
+                <li :for={criterion <- @page.acceptance_criteria}>{criterion}</li>
+              </ul>
+              <p :if={@page.acceptance_criteria == []} class="unavailable-copy">Not recorded by the current runtime projection.</p>
+            </div>
           </section>
 
-          <section class="section-block" aria-labelledby="plan-title">
+          <section class="section-block" aria-labelledby="plan-title" data-testid="run-plan">
             <div class="section-heading"><div><p class="section-kicker">Execution</p><h2 id="plan-title">Plan</h2></div></div>
             <ol :if={@page.plan != []} class="plan-list">
               <li :for={step <- @page.plan} class={plan_step_class(step)}>
@@ -792,7 +794,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p :if={@page.plan == []} class="unavailable-copy">No structured plan is available. Future steps are not inferred.</p>
           </section>
 
-          <section class="section-block" aria-labelledby="activity-title">
+          <section class="section-block" aria-labelledby="activity-title" data-testid="run-commands">
             <div class="section-heading"><div><p class="section-kicker">Meaningful events</p><h2 id="activity-title">Activity</h2></div></div>
             <div :if={@page.activity != []} class="activity-list">
               <details :for={event <- @page.activity} class="activity-event" open={event.result in [:blocked, :failed]}>
@@ -811,7 +813,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p :if={@page.activity == []} class="unavailable-copy">No meaningful activity has been reported.</p>
           </section>
 
-          <section class="section-block" aria-labelledby="changes-title">
+          <section class="section-block" aria-labelledby="changes-title" data-testid="run-changed-files">
             <div class="section-heading"><div><p class="section-kicker">Repository</p><h2 id="changes-title">Changes</h2></div></div>
             <div :if={@page.changes != []} class="file-list">
               <div :for={change <- @page.changes} class="file-row"><code>{change.path}</code><span>{change.summary}</span><strong>{humanize_state(change.status)}</strong></div>
@@ -821,7 +823,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
 
         <aside class="run-proof-column">
-          <section class="section-block" aria-labelledby="checks-title">
+          <section class="section-block" aria-labelledby="checks-title" data-testid="run-checks">
             <div class="section-heading"><div><p class="section-kicker">Deterministic</p><h2 id="checks-title">Checks</h2></div></div>
             <div :if={@page.checks != []} class="check-list">
               <article :for={check <- @page.checks} class="check-row">
@@ -833,7 +835,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p :if={@page.checks == []} class="unavailable-copy">Not run or unavailable. No passing result is inferred.</p>
           </section>
 
-          <section class="section-block" aria-labelledby="review-title">
+          <section class="section-block" aria-labelledby="review-title" data-testid="run-independent-review">
             <div class="section-heading"><div><p class="section-kicker">Quality lane</p><h2 id="review-title">Independent review</h2></div><.state_badge state={@page.review.status} label={humanize_state(@page.review.status)} /></div>
             <dl class="review-meta">
               <div><dt>Role</dt><dd>Independent review role</dd></div>
@@ -861,13 +863,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp outcome_section(assigns) do
     ~H"""
-    <section class={outcome_class(@page.outcome.status)} aria-labelledby="outcome-title">
+    <section class={outcome_class(@page.outcome.status)} aria-labelledby="outcome-title" data-testid="run-outcome">
       <div class="outcome-verdict">
         <span aria-hidden="true">{if(@page.outcome.status == :complete, do: "✓", else: "!")}</span>
         <div><p class="section-kicker">Evidence and outcome</p><h2 id="outcome-title">{humanize_state(@page.outcome.status)}</h2></div>
       </div>
-      <p class="outcome-reason">{@page.outcome.reason}</p>
-      <div :if={@page.evidence != []} class="evidence-list">
+      <p class="outcome-reason" data-testid="run-completion-reason">{@page.outcome.reason}</p>
+      <div :if={@page.evidence != []} class="evidence-list" data-testid="run-evidence">
         <div :for={evidence <- @page.evidence} class="evidence-row">
           <div><strong>{evidence.label}</strong><span>{evidence.summary}</span></div>
           <code>{evidence.reference}</code>
@@ -881,7 +883,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           >Copy</button>
         </div>
       </div>
-      <p :if={@page.evidence == []} class="unavailable-copy">No durable evidence references are available.</p>
+      <p :if={@page.evidence == []} class="unavailable-copy" data-testid="run-evidence">No durable evidence references are available.</p>
     </section>
     """
   end
@@ -1005,6 +1007,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp active_run_class(state), do: "active-run state-#{css_state(state)}"
   defp setup_verdict_class(:ready), do: "setup-verdict ready"
   defp setup_verdict_class(_verdict), do: "setup-verdict not-ready"
+  defp setup_test_id("Repository"), do: "setup-repository"
+  defp setup_test_id("Linear project"), do: "setup-linear-project"
+  defp setup_test_id("Codex authentication"), do: "setup-codex-auth"
+  defp setup_test_id("Compatibility"), do: "setup-codex-compatibility"
+  defp setup_test_id("Runtime selection"), do: "setup-model-policy"
+  defp setup_test_id(_system), do: nil
   defp decision_banner_class(state), do: "decision-banner state-#{css_state(state)}"
   defp outcome_class(:complete), do: "outcome-section complete"
   defp outcome_class(_status), do: "outcome-section incomplete"
