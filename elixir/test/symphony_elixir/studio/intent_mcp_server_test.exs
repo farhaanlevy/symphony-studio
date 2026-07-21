@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Studio.Intent.MCPServerTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.Studio.Intent.MCPServer
+  alias SymphonyElixir.Studio.LinearWriteBroker.Linear
 
   setup do
     unique = System.unique_integer([:positive, :monotonic])
@@ -175,6 +176,16 @@ defmodule SymphonyElixir.Studio.Intent.MCPServerTest do
 
     assert stderr =~ "--data-root must be absolute"
     refute File.exists?(ctx.data_root)
+  end
+
+  test "precompiled CLI options bind the typed production broker without starting STDIO", ctx do
+    assert {:ok, opts} = MCPServer.production_options_for_test(["--data-root", ctx.data_root])
+
+    assert opts[:data_root] == Path.expand(ctx.data_root)
+    assert opts[:broker] == Linear.target()
+
+    assert {:ok, [broker: broker]} = MCPServer.production_options_for_test([])
+    assert broker == Linear.target()
   end
 
   defp initialize_message do

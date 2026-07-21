@@ -7,11 +7,14 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
 
   Standard output contains protocol messages only. The server supports the MCP
   initialization lifecycle and the eight public intent tools; it performs no
-  model calls and has no real Linear write adapter.
+  model calls. The precompiled CLI binds the dedicated least-privilege Linear
+  adapter, while direct `run/1` and test exchanges remain fail-closed unless a
+  broker is explicitly injected.
   """
 
   alias SymphonyElixir.Studio.Intent.Canonical
   alias SymphonyElixir.Studio.IntentService
+  alias SymphonyElixir.Studio.LinearWriteBroker.Linear
 
   @protocol_version "2025-11-25"
   @supported_versions ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
@@ -22,7 +25,7 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
   @doc "Runs the precompiled STDIO entrypoint and returns a process exit status."
   @spec main([String.t()]) :: non_neg_integer()
   def main(args) when is_list(args) do
-    case cli_options(args) do
+    case production_cli_options(args) do
       {:ok, opts} ->
         run(opts)
         0
@@ -36,6 +39,10 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
         64
     end
   end
+
+  @doc false
+  @spec production_options_for_test([String.t()]) :: {:ok, keyword()} | :help | {:error, String.t()}
+  def production_options_for_test(args) when is_list(args), do: production_cli_options(args)
 
   @doc "Runs the local MCP server until its standard input closes."
   @spec run(keyword()) :: :ok
@@ -386,7 +393,7 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
       tool(
         "studio_publish_approved_plan",
         "Publish Approved Plan",
-        "Reconcile exact idempotency markers and publish through the least-privilege broker. Partial or uncertain outcomes remain visible and resumable; the default broker is unavailable.",
+        "Reconcile exact idempotency markers and publish through the dedicated least-privilege broker. Partial, blocked, or uncertain outcomes remain visible and resumable.",
         intent_command_schema(),
         external_annotations()
       ),
@@ -521,6 +528,13 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
     end
   end
 
+  defp production_cli_options(args) do
+    case cli_options(args) do
+      {:ok, opts} -> {:ok, Keyword.put(opts, :broker, Linear.target())}
+      other -> other
+    end
+  end
+
   defp cli_options(args) do
     args
     |> OptionParser.parse(
@@ -554,12 +568,15 @@ defmodule SymphonyElixir.Studio.Intent.MCPServer do
 
   defp cli_help do
     """
-    Run the precompiled fail-closed Symphony Studio Intent MCP server over STDIO.
+    Run the precompiled Symphony Studio Intent MCP server over STDIO with the
+    dedicated least-privilege Linear adapter.
 
       studio_intent_mcp [--data-root /absolute/owner-local/path]
 
     Compile the Elixir project before launching. Standard output is reserved
     for newline-delimited MCP JSON-RPC messages while the server is running.
+    The separate protected Linear credential is read only during a bounded
+    broker request; missing or invalid credential configuration fails closed.
     """
     |> String.trim()
   end
