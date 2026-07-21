@@ -16,6 +16,7 @@ defmodule SymphonyElixirWeb.Router do
 
   scope "/", SymphonyElixirWeb do
     get("/dashboard.css", StaticAssetController, :dashboard_css)
+    get("/studio.js", StaticAssetController, :studio_js)
     get("/favicon.png", StaticAssetController, :favicon)
     get("/vendor/phoenix_html/phoenix_html.js", StaticAssetController, :phoenix_html_js)
     get("/vendor/phoenix/phoenix.js", StaticAssetController, :phoenix_js)
@@ -25,7 +26,12 @@ defmodule SymphonyElixirWeb.Router do
   scope "/", SymphonyElixirWeb do
     pipe_through(:browser)
 
-    live("/", DashboardLive, :index)
+    live_session :studio_workbench do
+      live("/", DashboardLive, :mission_control)
+      live("/setup", DashboardLive, :setup)
+      live("/work/new", DashboardLive, :new_work)
+      live("/runs/:run_id", DashboardLive, :run_detail)
+    end
   end
 
   scope "/", SymphonyElixirWeb do

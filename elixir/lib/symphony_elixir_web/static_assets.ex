@@ -2,12 +2,14 @@ defmodule SymphonyElixirWeb.StaticAssets do
   @moduledoc false
 
   @dashboard_css_path Path.expand("../../priv/static/dashboard.css", __DIR__)
+  @studio_js_path Path.expand("../../priv/static/studio.js", __DIR__)
   @favicon_path Path.expand("../../priv/static/favicon.png", __DIR__)
   @phoenix_html_js_path Application.app_dir(:phoenix_html, "priv/static/phoenix_html.js")
   @phoenix_js_path Application.app_dir(:phoenix, "priv/static/phoenix.js")
   @phoenix_live_view_js_path Application.app_dir(:phoenix_live_view, "priv/static/phoenix_live_view.js")
 
   @external_resource @dashboard_css_path
+  @external_resource @studio_js_path
   @external_resource @favicon_path
   @external_resource @phoenix_html_js_path
   @external_resource @phoenix_js_path
@@ -18,6 +20,10 @@ defmodule SymphonyElixirWeb.StaticAssets do
                         |> Base.encode16(case: :lower)
                         |> binary_part(0, 12)
   @favicon File.read!(@favicon_path)
+  @studio_js File.read!(@studio_js_path)
+  @studio_js_digest :crypto.hash(:sha256, @studio_js)
+                    |> Base.encode16(case: :lower)
+                    |> binary_part(0, 12)
   @favicon_digest :crypto.hash(:sha256, @favicon)
                   |> Base.encode16(case: :lower)
                   |> binary_part(0, 12)
@@ -27,6 +33,7 @@ defmodule SymphonyElixirWeb.StaticAssets do
 
   @assets %{
     "/dashboard.css" => {"text/css", @dashboard_css},
+    "/studio.js" => {"application/javascript", @studio_js},
     "/favicon.png" => {"image/png", @favicon},
     "/vendor/phoenix_html/phoenix_html.js" => {"application/javascript", @phoenix_html_js},
     "/vendor/phoenix/phoenix.js" => {"application/javascript", @phoenix_js},
@@ -38,6 +45,9 @@ defmodule SymphonyElixirWeb.StaticAssets do
 
   @spec favicon_url() :: String.t()
   def favicon_url, do: "/favicon.png?v=#{@favicon_digest}"
+
+  @spec studio_js_url() :: String.t()
+  def studio_js_url, do: "/studio.js?v=#{@studio_js_digest}"
 
   @spec fetch(String.t()) :: {:ok, String.t(), binary()} | :error
   def fetch(path) when is_binary(path) do
