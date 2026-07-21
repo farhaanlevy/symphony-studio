@@ -136,27 +136,43 @@ It forbids credentials, authentication, persistence, migrations,
 infrastructure, tracker lifecycle, and broad layout work.
 
 Reset is deliberately local-only and requires both the dedicated demo issue
-identifier and the intent idempotency key:
+identifier and the exact canonical `intent_id` returned by
+`studio_submit_intent` or `studio_get_intent_status`. The ID has the persisted
+shape `intent_` followed by 24 lowercase hexadecimal characters; a friendly
+label is not a safe storage selector.
+
+Stop the preview runtime before reset so its process-local event projection is
+discarded and the Intent Store is not concurrently active. Then run:
 
 ```bash
 ./scripts/preview/run reset \
   --issue SYM-<dedicated-demo-number> \
-  --intent-key buildweek.copy-evidence-hash \
+  --intent-id intent_<24-lowercase-hex-characters> \
   --dry-run \
   --json
 
 ./scripts/preview/run reset \
   --issue SYM-<dedicated-demo-number> \
-  --intent-key buildweek.copy-evidence-hash \
+  --intent-id intent_<24-lowercase-hex-characters> \
   --json
 ```
 
-The first command must pass before the second is considered. The authoritative
-reset driver must return a strict receipt with `linearMutations: 0`; otherwise
-the wrapper fails and publishes no receipt. `SYM-1` and `SYM-2` are rejected
-before the driver launches. Reset removes only local preview projections and
-idempotency state. It does not move, edit, delete, comment on, or otherwise
-mutate any Linear issue.
+The first command must pass before the second is considered. It inventories the
+bounded owner-only store before sorting, validates exactly one intent document,
+and requires its selected start task to bind the same issue ID and identifier.
+Missing, ambiguous, malformed, symlinked, oversized, or fixture-bound data
+fails closed before removal. `SYM-1` and `SYM-2` are rejected unconditionally.
+
+The second command atomically quarantines and deletes only the exact intent
+document plus any prior receipt bound to the same issue and intent. It then
+publishes a mode-0600 local receipt containing `linearMutations: 0`. The reset
+path uses only bounded local filesystem operations after the existing Git
+worktree-boundary check; it invokes no Linear client and performs no network
+operation. It does not remove the attached project, general logs, or evidence;
+process-local run projection is cleared by the required runtime restart. It
+never moves, edits, deletes, comments on, or otherwise mutates a Linear issue,
+and it cannot reverse Linear history. Restart the preview after the receipt is
+written.
 
 ## Candidate gates
 
@@ -228,7 +244,8 @@ and `data-testid` hooks defined in the Playwright specs. These hooks are test
 contracts only; they must expose the same state rendered to the owner and must
 not create a second fixture or mock-success data source.
 
-The local reset integration point is executable `elixir/bin/studio preview
-reset ... --local-only --json`. Its strict receipt schema is tested in
-`tests/preview/test_preview_cli.py`. Until that driver exists, reset reports
-`BLOCKED`, not success.
+The local reset integration point is `./scripts/preview/run reset`. It operates
+directly on the owner-only `<data-root>/intent` Store boundary and requires the
+exact persisted intent ID plus selected issue binding. Its strict zero-mutation
+receipt, ambiguity guards, bounded inventory, and stale-runner launch guard are
+tested in `tests/preview/test_preview_cli.py`.

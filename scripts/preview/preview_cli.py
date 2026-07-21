@@ -43,9 +43,10 @@ MAX_DRIVER_OUTPUT_BYTES = 64 * 1024
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 100_000
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_RESET_DIRECTORY_ENTRIES = 1_024
 FORBIDDEN_FIXTURE_ISSUES = frozenset({"SYM-1", "SYM-2"})
 ISSUE_IDENTIFIER = re.compile(r"[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,9}\Z")
-INTENT_KEY = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\Z")
+INTENT_ID = re.compile(r"intent_[0-9a-f]{24}\Z")
 MEDIA_EXTENSIONS = frozenset(
     {
         ".aac",
@@ -644,7 +645,7 @@ def launch_command(root: Path, workflow: Path, data_root: Path, port: int) -> li
     if mise is None:
         raise PreviewBlocked("mise is required to launch Symphony Studio")
     runner = root / "elixir/bin/symphony"
-    if not runner.is_file():
+    if not runner.is_file() or not os.access(runner, os.X_OK):
         raise PreviewBlocked("preview runtime is not built")
     return [
         mise,
@@ -680,7 +681,11 @@ def command_launch(args: argparse.Namespace) -> int:
         emit(report, as_json=args.json)
         return BLOCKED
     data_root = prepare_data_root(Path(args.data_root), root)
-    if not (root / "elixir/bin/symphony").is_file() and not args.no_build:
+    runner = root / "elixir/bin/symphony"
+    if args.no_build:
+        if not runner.is_file() or not os.access(runner, os.X_OK):
+            raise PreviewBlocked("preview runtime is not built")
+    else:
         build_foundation(root)
     command = launch_command(root, workflow, data_root, args.port)
     if args.dry_run:
@@ -710,16 +715,232 @@ def validate_issue_identifier(value: str) -> str:
     return normalized
 
 
-def validate_intent_key(value: str) -> str:
-    normalized = value.strip().lower()
-    if INTENT_KEY.fullmatch(normalized) is None:
-        raise PreviewError("intent key has an invalid shape")
+def validate_intent_id(value: str) -> str:
+    normalized = value.strip()
+    if INTENT_ID.fullmatch(normalized) is None:
+        raise PreviewError("intent id must be the exact persisted intent_ identifier")
     return normalized
+
+
+def validate_private_directory(path: Path, data_root: Path, label: str) -> Path:
+    assert_no_symlink_components(path)
+    try:
+        canonical = path.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise PreviewBlocked(f"{label} is unavailable") from error
+    metadata = canonical.lstat()
+    if (
+        not is_relative_to(canonical, data_root)
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise PreviewError(f"{label} must be contained, owner-owned, and mode 0700")
+    return canonical
+
+
+def bounded_private_file_inventory(
+    directory: Path,
+    data_root: Path,
+    label: str,
+    *,
+    limit: int = MAX_RESET_DIRECTORY_ENTRIES,
+) -> tuple[Path, ...]:
+    canonical = validate_private_directory(directory, data_root, label)
+    files: list[Path] = []
+    try:
+        with os.scandir(canonical) as entries:
+            for entry in entries:
+                if len(files) >= limit:
+                    raise PreviewError(f"{label} exceeds its entry bound")
+                metadata = entry.stat(follow_symlinks=False)
+                if (
+                    stat.S_ISLNK(metadata.st_mode)
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                ):
+                    raise PreviewError(
+                        f"{label} contains a non-private regular-file entry"
+                    )
+                path = Path(entry.path)
+                if not is_relative_to(path, canonical):
+                    raise PreviewError(f"{label} contains an escaping entry")
+                files.append(path)
+    except OSError as error:
+        raise PreviewError(f"{label} could not be inventoried safely") from error
+    return tuple(sorted(files, key=lambda path: path.name))
+
+
+def read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(read_bounded(path).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as error:
+        raise PreviewError(f"{label} is malformed") from error
+    if not isinstance(value, dict):
+        raise PreviewError(f"{label} is not a JSON object")
+    return value
+
+
+def validate_intent_document(path: Path) -> dict[str, Any]:
+    match = re.fullmatch(r"(intent_[0-9a-f]{24})\.json", path.name)
+    if match is None:
+        raise PreviewError("Intent Store contains an unexpected document name")
+    value = read_json_object(path, "Intent Store document")
+    if value.get("schema_version") != SCHEMA_VERSION or value.get("intent_id") != match[1]:
+        raise PreviewError("Intent Store document identity is invalid")
+    start = value.get("start")
+    publication = value.get("publication")
+    if not isinstance(start, dict) or not isinstance(publication, dict):
+        raise PreviewError("Intent Store document lifecycle is invalid")
+    tasks = publication.get("tasks")
+    if not isinstance(tasks, dict):
+        raise PreviewError("Intent Store publication task map is invalid")
+    for task_id, task in tasks.items():
+        if not isinstance(task_id, str) or not isinstance(task, dict):
+            raise PreviewError("Intent Store publication task entry is invalid")
+        identifier = task.get("issue_identifier")
+        if identifier in FORBIDDEN_FIXTURE_ISSUES:
+            raise PreviewError("Intent Store document references a protected R0 fixture")
+    return value
+
+
+def reset_intent_target(
+    data_root: Path, intent_id: str, issue_identifier: str
+) -> tuple[Path, dict[str, Any]]:
+    intent_root = validate_private_directory(
+        data_root / "intent", data_root, "Intent Store root"
+    )
+    intent_directory = validate_private_directory(
+        intent_root / "intents", data_root, "Intent Store intents directory"
+    )
+    documents = [
+        (path, validate_intent_document(path))
+        for path in bounded_private_file_inventory(
+            intent_directory, data_root, "Intent Store intents directory"
+        )
+    ]
+    by_id = [(path, value) for path, value in documents if value["intent_id"] == intent_id]
+    by_issue = [
+        (path, value)
+        for path, value in documents
+        if value["start"].get("issue_identifier") == issue_identifier
+    ]
+    if len(by_id) != 1:
+        raise PreviewError("reset requires exactly one persisted matching intent id")
+    if len(by_issue) != 1 or by_issue[0][0] != by_id[0][0]:
+        raise PreviewError("reset issue and intent id do not identify one unique record")
+
+    path, value = by_id[0]
+    start = value["start"]
+    tasks = value["publication"]["tasks"]
+    matching_tasks = [
+        (task_id, task)
+        for task_id, task in tasks.items()
+        if task.get("issue_identifier") == issue_identifier
+    ]
+    if len(matching_tasks) != 1:
+        raise PreviewError("reset issue does not identify one unique published task")
+    task_id, task = matching_tasks[0]
+    if (
+        start.get("task_id") != task_id
+        or start.get("issue_id") != task.get("issue_id")
+        or task.get("status") != "confirmed"
+        or start.get("status")
+        not in {"waiting_for_admission", "admitted", "blocked", "uncertain"}
+    ):
+        raise PreviewError("reset target lacks an exact persisted start/task binding")
+    admission = value.get("admission")
+    if admission is not None and (
+        not isinstance(admission, dict)
+        or admission.get("issue_id") != start.get("issue_id")
+    ):
+        raise PreviewError("reset target admission binding is invalid")
+    return path, value
+
+
+def reset_receipt_targets(
+    data_root: Path, intent_id: str, issue_identifier: str
+) -> tuple[tuple[Path, ...], Path]:
+    receipt_directory = validate_private_directory(
+        data_root / "receipts", data_root, "preview receipt directory"
+    )
+    filename = f"reset-{issue_identifier.lower()}-{intent_id}.json"
+    final_path = receipt_directory / filename
+    matching: list[Path] = []
+    issue_prefix = f"reset-{issue_identifier.lower()}-"
+    for path in bounded_private_file_inventory(
+        receipt_directory, data_root, "preview receipt directory"
+    ):
+        if not path.name.startswith(issue_prefix):
+            continue
+        if path.name != filename:
+            raise PreviewError("reset receipt identity is ambiguous")
+        value = read_json_object(path, "reset receipt")
+        if (
+            value.get("schemaVersion") != SCHEMA_VERSION
+            or value.get("action") != "preview_reset"
+            or value.get("issueIdentifier") != issue_identifier
+            or value.get("intentId") != intent_id
+            or value.get("linearMutations") != 0
+        ):
+            raise PreviewError("existing reset receipt binding is invalid")
+        matching.append(path)
+    if len(matching) > 1:
+        raise PreviewError("reset receipt identity is ambiguous")
+    return tuple(matching), final_path
+
+
+def quarantine_reset_targets(data_root: Path, targets: Sequence[Path]) -> Path:
+    quarantine = Path(tempfile.mkdtemp(prefix=".reset-quarantine-", dir=data_root))
+    os.chmod(quarantine, 0o700)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for index, source in enumerate(targets):
+            destination = quarantine / f"record-{index:04d}"
+            os.replace(source, destination)
+            moved.append((source, destination))
+        return quarantine
+    except OSError as error:
+        for source, destination in reversed(moved):
+            try:
+                os.replace(destination, source)
+            except OSError:
+                pass
+        try:
+            quarantine.rmdir()
+        except OSError:
+            pass
+        raise PreviewError("local reset could not quarantine its exact target set") from error
+
+
+def remove_quarantine(quarantine: Path) -> None:
+    try:
+        with os.scandir(quarantine) as entries:
+            paths: list[Path] = []
+            for entry in entries:
+                if len(paths) >= MAX_RESET_DIRECTORY_ENTRIES:
+                    raise PreviewError("reset quarantine exceeds its entry bound")
+                metadata = entry.stat(follow_symlinks=False)
+                if (
+                    stat.S_ISLNK(metadata.st_mode)
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                ):
+                    raise PreviewError("reset quarantine contains an invalid entry")
+                paths.append(Path(entry.path))
+        for path in paths:
+            path.unlink()
+        quarantine.rmdir()
+    except OSError as error:
+        raise PreviewError("reset quarantine cleanup failed") from error
 
 
 def validate_reset_receipt(value: Any, issue_identifier: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise PreviewError("reset driver returned a non-object receipt")
+        raise PreviewError("local reset produced a non-object receipt")
     expected_keys = {
         "action",
         "issueIdentifier",
@@ -729,7 +950,7 @@ def validate_reset_receipt(value: Any, issue_identifier: str) -> dict[str, Any]:
         "status",
     }
     if set(value) != expected_keys:
-        raise PreviewError("reset driver receipt has unexpected or missing fields")
+        raise PreviewError("local reset receipt has unexpected or missing fields")
     if (
         value["schemaVersion"] != SCHEMA_VERSION
         or value["action"] != "preview_reset"
@@ -739,79 +960,79 @@ def validate_reset_receipt(value: Any, issue_identifier: str) -> dict[str, Any]:
         or type(value["localRecordsRemoved"]) is not int
         or value["localRecordsRemoved"] < 0
     ):
-        raise PreviewError("reset driver receipt violates the local-only contract")
+        raise PreviewError("local reset receipt violates the local-only contract")
     return dict(value)
 
 
 def command_reset(args: argparse.Namespace) -> int:
     root = repository_root()
     issue_identifier = validate_issue_identifier(args.issue)
-    intent_key = validate_intent_key(args.intent_key)
+    intent_id = validate_intent_id(args.intent_id)
     data_root = validate_data_root(Path(args.data_root), root, create=False)
     marker = data_root / MARKER_NAME
     try:
         marker_value = json.loads(read_bounded(marker, 16 * 1024).decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as error:
         raise PreviewError("preview data-root marker is malformed") from error
-    if marker_value.get("application") != APP_MARKER:
+    if marker_value != {
+        "application": APP_MARKER,
+        "repositoryIdentity": repository_identity(root),
+        "schemaVersion": SCHEMA_VERSION,
+    }:
         raise PreviewError("reset target is not a Symphony Studio preview data root")
-    driver = root / "elixir/bin/studio"
-    command = [
-        str(driver),
-        "preview",
-        "reset",
-        "--data-root",
-        str(data_root),
-        "--issue",
-        issue_identifier,
-        "--intent-key",
-        intent_key,
-        "--local-only",
-        "--json",
-    ]
+    intent_path, _document = reset_intent_target(data_root, intent_id, issue_identifier)
+    prior_receipts, receipt_path = reset_receipt_targets(
+        data_root, intent_id, issue_identifier
+    )
+    targets = (intent_path, *prior_receipts)
     if args.dry_run:
         emit(
             {
                 "checks": [
                     check_row("reset_boundary", "pass", "local-only target validated"),
                     check_row("fixture_guard", "pass", "SYM-1 and SYM-2 excluded"),
-                    check_row(
-                        "reset_driver",
-                        "pass" if driver.is_file() else "blocked",
-                        "available" if driver.is_file() else "awaiting Studio reset driver",
-                    ),
+                    check_row("intent_binding", "pass", "exact persisted intent and issue"),
+                    check_row("linear_mutations", "pass", "zero by construction"),
                 ],
                 "schemaVersion": SCHEMA_VERSION,
-                "status": "pass" if driver.is_file() else "blocked",
+                "status": "pass",
             },
             as_json=args.json,
         )
-        return PASS if driver.is_file() else BLOCKED
-    if not driver.is_file() or not os.access(driver, os.X_OK):
-        raise PreviewBlocked("authoritative Studio local reset driver is not integrated")
-    driver_home = data_root / "driver-home"
-    driver_home.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(driver_home, 0o700)
-    result = run_command(
-        command,
-        cwd=root / "elixir",
-        environment=safe_child_environment(home=driver_home),
-        timeout=120.0,
-        max_output_bytes=MAX_DRIVER_OUTPUT_BYTES,
+        return PASS
+
+    quarantine = quarantine_reset_targets(data_root, targets)
+    receipt = validate_reset_receipt(
+        {
+            "action": "preview_reset",
+            "issueIdentifier": issue_identifier,
+            "linearMutations": 0,
+            "localRecordsRemoved": len(targets),
+            "schemaVersion": SCHEMA_VERSION,
+            "status": "reset",
+        },
+        issue_identifier,
     )
-    if result.returncode != 0:
-        raise PreviewBlocked("authoritative Studio local reset driver failed")
-    try:
-        receipt = validate_reset_receipt(
-            json.loads(result.stdout.decode("utf-8")), issue_identifier
-        )
-    except (ValueError, UnicodeDecodeError) as error:
-        raise PreviewError("reset driver returned malformed JSON") from error
-    receipt["intentKey"] = intent_key
+    receipt["intentId"] = intent_id
     receipt["recordedAt"] = int(time.time())
-    write_private_json(
-        data_root / "receipts" / f"reset-{issue_identifier.lower()}.json", receipt
-    )
+    try:
+        write_private_json(receipt_path, receipt)
+    except OSError as error:
+        try:
+            receipt_path.unlink()
+        except FileNotFoundError:
+            pass
+        for index, source in reversed(list(enumerate(targets))):
+            try:
+                os.replace(quarantine / f"record-{index:04d}", source)
+            except OSError:
+                pass
+        try:
+            quarantine.rmdir()
+        except OSError:
+            pass
+        raise PreviewError("local reset receipt could not be published") from error
+    remove_quarantine(quarantine)
     emit(
         {
             "checks": [
@@ -1290,10 +1511,10 @@ def parser() -> argparse.ArgumentParser:
     launch.add_argument("--json", action="store_true")
     launch.set_defaults(function=command_launch)
 
-    reset = subparsers.add_parser("reset", help="reset one demo issue through the local-only driver")
+    reset = subparsers.add_parser("reset", help="reset one exact local demo intent")
     reset.add_argument("--data-root", default=str(default_data_root()))
     reset.add_argument("--issue", required=True)
-    reset.add_argument("--intent-key", required=True)
+    reset.add_argument("--intent-id", required=True)
     reset.add_argument("--dry-run", action="store_true")
     reset.add_argument("--json", action="store_true")
     reset.set_defaults(function=command_reset)
