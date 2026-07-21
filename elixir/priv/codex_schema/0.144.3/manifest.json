@@ -116,8 +116,14 @@
       "testedAt": "2026-07-21"
     },
     "fixtures": "pass",
-    "overall": "pending_r0_06",
-    "runtimeCapabilities": "not_run",
+    "overall": "pass",
+    "runtimeCapabilities": "pass",
+    "runtimeEvidence": {
+      "hashAlgorithm": "sha256-canonical-json-v1",
+      "readinessManifestSha256": "35888d910a70a803b7f6a2ef70555a6e98ff0a7f6a083fb8f47b4de4eaef2dd8",
+      "schemaManifestBasisSha256": "8dd34c7fbccc840ea22cb9e2fd3612e277b4796bc88e669b40d9080c38f25537",
+      "sourceSha256": "4f4c290986ed2bb10dde60f6b84f65a28fdf720547a74f3f31a1b1f919aeb73e"
+    },
     "schemaContract": "pass",
     "testedAt": "2026-07-21",
     "transportConformance": "pass"

@@ -27,7 +27,7 @@
       "comments": {
         "status": "pass"
       },
-      "configuredProjectBinding": "linear-project-v1-ac47aebfe6e2e4f0ead27428bfa0b3aed37e950b41411df6b678eae61d87d83f",
+      "configuredProjectBinding": "linear-project-v1-3ed33736da2231a9fc2fde4c3fd61d0ab0ef0476d078d7b48f6c6c1d4336dbb8",
       "connectivity": {
         "status": "pass"
       },
@@ -2618,17 +2618,17 @@
     }
   },
   "checkout": {
-    "headCommit": "4ef89f73025519102781d7134352b4575b55704c",
+    "headCommit": "4d240a2d3d69a19f06d63b40d79793dd77fb1a5d",
     "headSemantics": "generation-head-with-staged-index-v1",
-    "patchLedgerRevision": 66,
+    "patchLedgerRevision": 68,
     "source": {
       "algorithm": "sha256-git-index-mode-oid-path-synthetic-schema-v1",
-      "fileCount": 2109,
+      "fileCount": 2127,
       "gitObjectFormat": "sha1",
       "readinessPathExcluded": true,
-      "schemaManifestBasisSha256": "f58eaf3b0f9ba946b67c24807dc80e1a2e4f79d094b1329b2b117ac89f578be5",
+      "schemaManifestBasisSha256": "8dd34c7fbccc840ea22cb9e2fd3612e277b4796bc88e669b40d9080c38f25537",
       "schemaManifestPath": "elixir/priv/codex_schema/0.144.3/manifest.json",
-      "sha256": "37a622802e1616ba2e2db53076156e0120c513689679e3fe22a9cf6ed1e37d66"
+      "sha256": "4f4c290986ed2bb10dde60f6b84f65a28fdf720547a74f3f31a1b1f919aeb73e"
     },
     "upstreamBaseCommit": "4cbe3a9699a73b862466c0b157ceca0c1985d6d7",
     "upstreamCommit": "4cbe3a9699a73b862466c0b157ceca0c1985d6d7"
@@ -2639,7 +2639,7 @@
     "matrixSha256": "f102c992bc99faaa7442f1bc22b6f41cce70e0f1a5d2ba56e99a8dabafdd8b25",
     "nativeSha256": "37e6f5953f191b04f7b62cb07dae90f51d0947ad89f0355665b421fbde28700b",
     "schemaBundleSha256": "5044e15b8aa187e7deec44ee16b0848a4f9a20aa25e6ec66f10c1d5bcc40141a",
-    "schemaManifestBasisSha256": "f58eaf3b0f9ba946b67c24807dc80e1a2e4f79d094b1329b2b117ac89f578be5",
+    "schemaManifestBasisSha256": "8dd34c7fbccc840ea22cb9e2fd3612e277b4796bc88e669b40d9080c38f25537",
     "target": "x86_64-unknown-linux-musl",
     "version": "0.144.3",
     "versionOutput": "codex-cli 0.144.3"
